@@ -132,7 +132,7 @@ def orders_mlf(shift):
         refresh_token=os.environ["REFRESH_TOKEN_EU"],
         lwa_app_id=os.environ["CLIENT_ID_EU"],
         lwa_client_secret=os.environ["CLIENT_SECRET_EU"]
-
+    )
 
     # Format dates for API
     utc_now = datetime.utcnow()
