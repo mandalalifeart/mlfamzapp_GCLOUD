@@ -1,0 +1,4 @@
+requests
+python-amazon-sp-api
+functions-framework
+
