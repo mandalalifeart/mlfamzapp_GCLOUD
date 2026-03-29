@@ -314,8 +314,11 @@ def MlfReportReq(request):
         end_date = request_json["end_date"]
         marketplace = request_json["marketplace"]
 
+        print("access_token MP:", marketplace)
         access_token = get_access_token(marketplace)
+        print("create_report MP:", marketplace)
         report_id = create_report(access_token, start_date, end_date, marketplace)
+        print("report_id MP :",report_id)
 
         response_body = json.dumps({
             "status": "success",
