@@ -3,7 +3,7 @@ import requests
 from sp_api.api import Reports
 from sp_api.base import Marketplaces
 
-TOKEN_URL = "https://api.amazon.com/auth/o2/token"
+TOKEN_URL = "https://api.amazon.com/auth/o2/token" 
 
 def get_endpoint(mp,url_type):
     if mp.region == "usa":
