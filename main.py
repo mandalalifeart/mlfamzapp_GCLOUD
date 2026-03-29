@@ -8,7 +8,12 @@ import os
 from MlfReport import get_endpoint
 from MlfReport import MARKETPLACE_MAP
 
-
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "https://mlfamzappfire.web.app",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+    }
 
 CLIENT_SECRET_USA = os.environ["CLIENT_SECRET_USA"]
 CLIENT_SECRET_EU = os.environ["CLIENT_SECRET_EU"]
@@ -150,9 +155,154 @@ def wootry1(request):
     return result, 200
 
 
-def MlfReportReq(request):
+def MlfReportGet(request):
+    if request.method == "OPTIONS":
+        return ("", 204, cors_headers())
+
     if request.method != "POST":
-        return "Method not allowed", 405
+        return (
+            json.dumps({
+                "status": "ERROR",
+                "message": "Method not allowed"
+            }),
+            405,
+            cors_headers(),
+        )
+
+    request_json = request.get_json(silent=True) or {}
+
+    missing = [f for f in ["marketplace", "report_req_id"] if not request_json.get(f)]
+    if missing:
+        return (
+            json.dumps({
+                "status": "ERROR",
+                "message": f"Missing required field(s): {', '.join(missing)}",
+                "received": request_json
+            }),
+            400,
+            cors_headers(),
+        )
+
+    marketplace = request_json["marketplace"]
+    report_req_id = request_json["report_req_id"]
+
+    if marketplace == "usa":
+        credentials = credentials_usa
+    else:
+        credentials = credentials_eu
+
+    try:
+        access_token = get_access_token(marketplace)
+        status = check_report_status(credentials, marketplace, report_req_id)
+
+        if not isinstance(status, dict):
+            return (
+                json.dumps({
+                    "status": "ERROR",
+                    "message": f"Unexpected status response: {status}"
+                }),
+                500,
+                cors_headers(),
+            )
+
+        processing_status = status.get("processingStatus")
+
+        if processing_status == "DONE":
+            document_id = status.get("reportDocumentId")
+            if not document_id:
+                return (
+                    json.dumps({
+                        "status": "ERROR",
+                        "message": "Report finished but reportDocumentId is missing"
+                    }),
+                    500,
+                    cors_headers(),
+                )
+
+            report_data_in = download_report(document_id, access_token, marketplace)
+            data = json.loads(report_data_in)
+            url = data["url"]
+
+            response = requests.get(url)
+            if response.status_code != 200:
+                raise Exception(f"Failed to download the report file: {response.status_code} {response.text}")
+
+            try:
+                if is_gzip_compressed(response.content):
+                    decompressed_data = gzip.decompress(response.content)
+                    report_content_str = decompressed_data.decode("utf-8")
+                else:
+                    report_content_str = response.content.decode("utf-8")
+            except (UnicodeDecodeError, gzip.BadGzipFile) as e:
+                raise Exception(f"Failed to decode report content: {str(e)}")
+
+            return (
+                json.dumps({
+                    "status": "success",
+                    "data": {
+                        "marketplace": marketplace,
+                        "report_req_id": report_req_id,
+                        "payload": report_content_str
+                    }
+                }),
+                200,
+                cors_headers(),
+            )
+
+        elif processing_status in ["FATAL", "CANCELLED"]:
+            return (
+                json.dumps({
+                    "status": "ERROR_FATAL",
+                    "data": {
+                        "marketplace": marketplace,
+                        "report_req_id": report_req_id,
+                        "payload": processing_status
+                    }
+                }),
+                200,
+                cors_headers(),
+            )
+
+        else:
+            return (
+                json.dumps({
+                    "status": "IN_PROCESS",
+                    "data": {
+                        "marketplace": marketplace,
+                        "report_req_id": report_req_id,
+                        "payload": processing_status or "IN_PROCESS"
+                    }
+                }),
+                200,
+                cors_headers(),
+            )
+
+    except Exception as e:
+        return (
+            json.dumps({
+                "status": "ERROR_MlfReportGet",
+                "data": {
+                    "marketplace": marketplace,
+                    "report_req_id": report_req_id,
+                    "payload": str(e)
+                }
+            }),
+            500,
+            cors_headers(),
+        )
+def MlfReportReq(request):
+    if request.method == "OPTIONS":
+        return ("", 204, cors_headers())
+
+    if request.method != "POST":
+        return (
+            json.dumps({
+                "status": "error",
+                "message": "Method not allowed"
+            }),
+            405,
+            cors_headers(),
+        )
 
     request_json = request.get_json(silent=True) or {}
 
@@ -164,184 +314,22 @@ def MlfReportReq(request):
         access_token = get_access_token(marketplace)
         report_id = create_report(access_token, start_date, end_date, marketplace)
 
-        return json_response({
+        response_body = json.dumps({
             "status": "success",
             "data": {
                 "start_date": start_date,
                 "end_date": end_date,
-                "marketplace": marketplace,
-                "report_req_id": report_id,
+                "report_req_id": report_id
             }
-        }, 200)
-
-    except KeyError as e:
-        return json_response({
-            "status": "error",
-            "message": f"Missing field: {str(e)}"
-        }, 400)
+        })
+        return (response_body, 200, cors_headers())
 
     except Exception as e:
-        print("MlfReportReq error:", str(e))
-        return json_response({
-            "status": "error",
-            "message": str(e)
-        }, 500)
-
-
-def MlfReportGet(request):
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("###  ###")
-    print("### MlfReportGet FIXED BUILD 2026-03-28 v8 ###")
-    print("RAW BODY:", request.data)
-
-    # Accept only POST if that is your intended API design
-    if request.method != 'POST':
-        return json.dumps({
-            "status": "ERROR",
-            "message": "Method not allowed. Use POST."
-        }), 405, {'Content-Type': 'application/json'}
-
-    request_json = request.get_json(silent=True) or {}
-    print("Incoming JSON:", request_json)
-
-    # For GET-status/fetch, only these are really required
-    required_fields = ["marketplace", "report_req_id"]
-    missing = [f for f in required_fields if not request_json.get(f)]
-
-    if missing:
-        return json.dumps({
-            "status": "ERROR",
-            "message": f"Missing required field(s): {', '.join(missing)}",
-            "received": request_json
-        }), 400, {'Content-Type': 'application/json'}
-
-    marketplace = request_json["marketplace"]
-    report_req_id = request_json["report_req_id"]
-
-    print(f"MlfReportGet marketplace: {marketplace}, report_req_id: {report_req_id}")
-
-    if marketplace == "usa":
-        credentials = credentials_usa
-    else:
-        credentials = credentials_eu
-
-    try:
-        access_token = get_access_token(marketplace)
-
-        print(f"Checking status: {report_req_id} marketplace={marketplace}")
-        status = check_report_status(credentials, marketplace, report_req_id)
-
-        print(f"Checking status1: {report_req_id} marketplace={marketplace}")
-        if not isinstance(status, dict):
-            return json.dumps({
-                "status": "ERROR",
-                "message": f"Unexpected status response: {status}"
-            }), 500, {'Content-Type': 'application/json'}
-
-        print(f"Checking status2: {report_req_id} marketplace={marketplace}")
-        processing_status = status.get("processingStatus")
-        print(f"processingStatus: {processing_status}")
-
-        if processing_status == "DONE":
-            document_id = status.get("reportDocumentId")
-            if not document_id:
-                return json.dumps({
-                    "status": "ERROR",
-                    "message": "Report finished but reportDocumentId is missing"
-                }), 500, {'Content-Type': 'application/json'}
-
-            print(f"Document ID: {document_id}")
-            report_data_in = download_report(document_id, access_token, marketplace)
-            print("REPORT_DATA_RAW:", report_data_in)
-
-        elif processing_status in ["FATAL", "CANCELLED"]:
-            return json.dumps({
-                "status": "ERROR_FATAL",
-                "data": {
-                    "marketplace": marketplace,
-                    "report_req_id": report_req_id,
-                    "payload": status
-                }
-            }), 200, {'Content-Type': 'application/json'}
-
-        else:
-            return json.dumps({
-                "status": "IN_PROCESS",
-                "data": {
-                    "marketplace": marketplace,
-                    "report_req_id": report_req_id,
-                    "payload": processing_status or "IN_PROCESS"
-                }
-            }), 200, {'Content-Type': 'application/json'}
-
-    except Exception as e:
-        print("ERROR in status/download stage:", str(e))
-        return json.dumps({
-            "status": "ERROR_MlfReportGet",
-            "data": {
-                "marketplace": marketplace,
-                "report_req_id": report_req_id,
-                "payload": {
-                    "error": str(e),
-                    "last_status": status if 'status' in locals() else None
-                }            }
-        }), 500, {'Content-Type': 'application/json'}
-
-    try:
-        data = json.loads(report_data_in)
-        url = data["url"]
-        print("Download URL:", url)
-
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download the report file: {response.status_code} {response.text}")
-
-        try:
-            if is_gzip_compressed(response.content):
-                decompressed_data = gzip.decompress(response.content)
-                report_content_str = decompressed_data.decode("utf-8")
-            else:
-                report_content_str = response.content.decode("utf-8")
-        except (UnicodeDecodeError, gzip.BadGzipFile) as e:
-            raise Exception(f"Failed to decode report content: {str(e)}")
-
-        return json.dumps({
-            "status": "success",
-            "data": {
-                "marketplace": marketplace,
-                "report_req_id": report_req_id,
-                "payload": report_content_str
-            }
-        }), 200, {'Content-Type': 'application/json'}
-
-    except Exception as e:
-        print("ERROR in report file processing:", str(e))
-        return json.dumps({
-            "status": "ERROR",
-            "data": {
-                "marketplace": marketplace,
-                "report_req_id": report_req_id,
-                "payload": "ERRORx5 " + str(e)
-            }
-        }), 500, {'Content-Type': 'application/json'}
+        return (
+            json.dumps({
+                "status": "error",
+                "message": str(e)
+            }),
+            500,
+            cors_headers(),
+        )        
