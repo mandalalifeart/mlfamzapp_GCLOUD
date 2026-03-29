@@ -6,7 +6,7 @@ from sp_api.base import Marketplaces
 import gzip
 import os
 from MlfReport import get_endpoint
-from MARKETPLACE_MAP import get_endpoint
+from MlfReport import MARKETPLACE_MAP
 
 
 
