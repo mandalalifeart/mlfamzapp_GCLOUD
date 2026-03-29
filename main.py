@@ -260,8 +260,7 @@ def MlfReportGet(request):
                 "data": {
                     "marketplace": marketplace,
                     "report_req_id": report_req_id,
-                    "payload": processing_status,
-                    "input": request_json   # 👈 add here too
+                    "payload": status
                 }
             }), 200, {'Content-Type': 'application/json'}
 
@@ -282,8 +281,7 @@ def MlfReportGet(request):
             "data": {
                 "marketplace": marketplace,
                 "report_req_id": report_req_id,
-                "payload": str(e),
-                "input": request_json   # 👈 add here too
+                "payload": { str(e), "last_status": status if 'status' in locals() else None }
             }
         }), 500, {'Content-Type': 'application/json'}
 
