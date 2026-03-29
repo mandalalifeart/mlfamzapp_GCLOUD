@@ -107,7 +107,7 @@ def check_report_status(credentials, marketplace, report_id):
     mp = MARKETPLACE_MAP[marketplace]
     mp_id = mp.marketplace_id
 
-    reports_api = Reports(credentials=credentials, marketplace=mp_id)
+    reports_api = Reports(credentials=credentials, marketplace=mp)
     response = reports_api.get_report(reportId=report_id)
     return response.payload
 
@@ -229,12 +229,14 @@ def MlfReportGet(request):
         print(f"Checking status: {report_req_id} marketplace={marketplace}")
         status = check_report_status(credentials, marketplace, report_req_id)
 
+        print(f"Checking status1: {report_req_id} marketplace={marketplace}")
         if not isinstance(status, dict):
             return json.dumps({
                 "status": "ERROR",
                 "message": f"Unexpected status response: {status}"
             }), 500, {'Content-Type': 'application/json'}
 
+        print(f"Checking status2: {report_req_id} marketplace={marketplace}")
         processing_status = status.get("processingStatus")
         print(f"processingStatus: {processing_status}")
 
