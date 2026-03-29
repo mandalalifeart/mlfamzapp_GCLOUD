@@ -6,9 +6,9 @@ from sp_api.base import Marketplaces
 TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
 def get_endpoint(mp,url_type):
-    if mp.region == "NA":
+    if mp.region == "usa":
         return f"https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/{url_type}"
-    elif mp.region == "EU":
+    elif mp.region == "de":
         return f"https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/{url_type}"
     else:
         return f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/{url_type}"
