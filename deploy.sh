@@ -70,6 +70,10 @@ EOF
 # ---- deploy ----
 gcloud config set project "$PROJECT_ID" >/dev/null
 
+git add .
+git commit -m $1 
+git push -u origin main --force
+
 gcloud functions deploy "$FUNCTION_NAME" \
   --runtime="$RUNTIME" \
   --region="$REGION" \
