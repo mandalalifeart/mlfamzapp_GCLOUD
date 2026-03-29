@@ -72,6 +72,7 @@ def get_access_token(mp):
 
     response = requests.post(TOKEN_URL, data=payload, timeout=60)
     response_data = response.json()
+    print("get_access_token MP done:", mp)
 
     if response.status_code == 200:
         return response_data["access_token"]
