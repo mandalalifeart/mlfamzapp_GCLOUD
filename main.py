@@ -81,8 +81,33 @@ def get_access_token(mp):
 
     raise Exception(f"Failed to get access token: {response_data.get('error_description')}")
 
+def create_report(credentials, marketplace, dataStartTime, dataEndTime):
+    print(f"create_report MP: {marketplace} start={dataStartTime} end={dataEndTime}")
 
-def create_report(access_token, dataStartTime, dataEndTime, marketplace):
+    if marketplace == "usa":
+        mp_id = Marketplaces.US
+    else:
+        mp_id = Marketplaces.DE
+
+    try:
+        reports_api = Reports(credentials=credentials, marketplace=mp_id)
+
+        response = reports_api.create_report(
+            reportType="GET_XML_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL",
+            dataStartTime=dataStartTime,
+            dataEndTime=dataEndTime
+        )
+
+        print("create_report response payload:", response.payload)
+        return response.payload.get("reportId")
+
+    except Exception as e:
+        import traceback
+        print("create_report ERROR:", str(e))
+        print(traceback.format_exc())
+        raise
+        
+def create_report2(access_token, dataStartTime, dataEndTime, marketplace):
     
     print("create_report ",marketplace)
     mp = MARKETPLACE_MAP[marketplace]
@@ -315,12 +340,15 @@ def MlfReportReq(request):
         end_date = request_json["end_date"]
         marketplace = request_json["marketplace"]
 
-        print("access_token MP:", marketplace)
-        access_token = get_access_token(marketplace)
-        print("create_report MP:", marketplace)
-        report_id = create_report(access_token, start_date, end_date, marketplace)
-        print("report_id MP :",report_id)
+        if marketplace == "usa":
+            credentials = credentials_usa
+        else:
+            credentials = credentials_eu
 
+        print(f"Start Date: {start_date}, End Date: {end_date}, marketplace: {marketplace}")
+        report_id = create_report(credentials, marketplace, start_date, end_date)
+        print(f"report_id: {report_id}")
+        
         response_body = json.dumps({
             "status": "success",
             "data": {
