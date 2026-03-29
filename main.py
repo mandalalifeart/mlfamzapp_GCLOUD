@@ -84,6 +84,7 @@ def get_access_token(mp):
 
 def create_report(access_token, dataStartTime, dataEndTime, marketplace):
     
+    print("create_report ",marketplace)
     mp = MARKETPLACE_MAP[marketplace]
     mp_id = mp.marketplace_id
     endpoint_url = get_endpoint(marketplace,"reports")
