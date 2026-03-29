@@ -281,8 +281,10 @@ def MlfReportGet(request):
             "data": {
                 "marketplace": marketplace,
                 "report_req_id": report_req_id,
-                "payload": { str(e), "last_status": status if 'status' in locals() else None }
-            }
+                "payload": {
+                    "error": str(e),
+                    "last_status": status if 'status' in locals() else None
+                }            }
         }), 500, {'Content-Type': 'application/json'}
 
     try:
