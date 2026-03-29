@@ -75,7 +75,9 @@ def get_access_token(mp):
     print("get_access_token MP done:", mp)
 
     if response.status_code == 200:
+        print("get_access_token MP 200:", response_data["access_token"])
         return response_data["access_token"]
+        
 
     raise Exception(f"Failed to get access token: {response_data.get('error_description')}")
 
