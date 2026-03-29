@@ -5,44 +5,55 @@ from sp_api.base import Marketplaces
 
 TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
+def get_endpoint(mp,url_type):
+    if mp.region == "NA":
+        return= "https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/".url_type
+    elif mp.region == "EU":
+        return= "https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/".url_type
+    else:
+        return= "https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/".url_type
+
 
 REGIONS = {
     "USA": {
         "client_id_env": "CLIENT_ID_USA",
         "client_secret_env": "CLIENT_SECRET_USA",
-        "refresh_token_env": "REFRESH_TOKEN_USA",
-        "marketplace_id": "ATVPDKIKX0DER",
-        "marketplace": Marketplaces.US,
-        "reports_endpoint": "https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/reports",
-        "documents_endpoint": "https://sellingpartnerapi-na.amazon.com/reports/2020-09-04/documents",
+        "refresh_token_env": "REFRESH_TOKEN_USA"
     },
     "EU": { 
         "client_id_env": "CLIENT_ID_EU",
         "client_secret_env": "CLIENT_SECRET_EU",
-        "refresh_token_env": "REFRESH_TOKEN_EU",
-        "marketplace_id": "A1PA6795UKMFR9",
-        "marketplace": Marketplaces.DE,
-        "reports_endpoint": "https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/reports",
-        "documents_endpoint": "https://sellingpartnerapi-eu.amazon.com/reports/2020-09-04/documents",
-    },
+        "refresh_token_env": "REFRESH_TOKEN_EU"
+   },
 }
 
-
+MARKETPLACE_MAP = {
+    "usa": Marketplaces.US,
+    "uk": Marketplaces.GB,
+    "de": Marketplaces.DE,
+    "fr": Marketplaces.FR,
+    "it": Marketplaces.IT,
+    "es": Marketplaces.ES,
+    "nl": Marketplaces.NL,
+    "pl": Marketplaces.PL,
+    "jp": Marketplaces.JP,
+}
 def get_region_config(region_name: str) -> dict:
     region_name = region_name.upper()
     if region_name not in REGIONS:
         raise ValueError(f"Unsupported region: {region_name}")
 
     cfg = REGIONS[region_name]
-
+    marketplace = MARKETPLACE_MAP[region_name]
+    marketplace_id = marketplace.marketplace_id
     return {
         "client_id": os.environ[cfg["client_id_env"]],
         "client_secret": os.environ[cfg["client_secret_env"]],
         "refresh_token": os.environ[cfg["refresh_token_env"]],
-        "marketplace_id": cfg["marketplace_id"],
-        "marketplace": cfg["marketplace"],
-        "reports_endpoint": cfg["reports_endpoint"],
-        "documents_endpoint": cfg["documents_endpoint"],
+        "marketplace_id": marketplace_id,
+        "marketplace": marketplace,
+        "reports_endpoint": get_endpoint(region_name,"reports"),
+        "documents_endpoint": get_endpoint(region_name,"documents")
     }
 
 
@@ -84,7 +95,7 @@ def create_report(
         "x-amz-access-token": access_token,
         "Content-Type": "application/json",
     }
-
+    ZZZ
     payload = {
         "reportType": report_type,
         "marketplaceIds": [config["marketplace_id"]],

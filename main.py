@@ -5,6 +5,10 @@ from sp_api.api import Reports
 from sp_api.base import Marketplaces
 import gzip
 import os
+from MlfReport import get_endpoint
+from MARKETPLACE_MAP import get_endpoint
+
+
 
 CLIENT_SECRET_USA = os.environ["CLIENT_SECRET_USA"]
 CLIENT_SECRET_EU = os.environ["CLIENT_SECRET_EU"]
@@ -26,13 +30,10 @@ credentials_eu = dict(
     lwa_client_secret=CLIENT_SECRET_EU
 )
 
-MARKETPLACE_ID_USA = 'ATVPDKIKX0DER'
-MARKETPLACE_ID_EU = 'A1PA6795UKMFR9'
 
-endpoint_url_usa = "https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/reports"
-endpoint_url_eu  = "https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/reports"
-endpoint_url_document_usa = "https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/documents"
-endpoint_url_document_eu  = "https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/documents"
+#Marketplace(country_code='GB', marketplace_id='A1F83G8C2ARO7P', region='EU')
+
+
 TOKEN_URL = 'https://api.amazon.com/auth/o2/token'
 
 
@@ -42,6 +43,8 @@ def json_response(payload, status=200):
 
 def is_gzip_compressed(data):
     return len(data) > 2 and data[:2] == b'\x1f\x8b'
+
+
 
 
 def get_access_token(mp):
@@ -72,12 +75,11 @@ def get_access_token(mp):
 
 
 def create_report(access_token, dataStartTime, dataEndTime, marketplace):
-    if marketplace == "usa":
-        mp_id = MARKETPLACE_ID_USA
-        endpoint_url = endpoint_url_usa
-    else:
-        mp_id = MARKETPLACE_ID_EU
-        endpoint_url = endpoint_url_eu
+    
+    mp = MARKETPLACE_MAP[marketplace]
+    mp_id = mp.marketplace_id
+    endpoint_url = get_endpoint(marketplace,"reports")
+    print("URL " + str(endpoint_url))
 
     headers = {
         "x-amz-access-token": access_token,
@@ -102,11 +104,8 @@ def create_report(access_token, dataStartTime, dataEndTime, marketplace):
 
 def check_report_status(credentials, marketplace, report_id):
     print(f"Checking status: marketplace={marketplace} report_id={report_id}")
-
-    if marketplace == "usa":
-        mp_id = Marketplaces.US
-    else:
-        mp_id = Marketplaces.DE
+    mp = MARKETPLACE_MAP[marketplace]
+    mp_id = mp.marketplace_id
 
     reports_api = Reports(credentials=credentials, marketplace=mp_id)
     response = reports_api.get_report(reportId=report_id)
@@ -114,11 +113,8 @@ def check_report_status(credentials, marketplace, report_id):
 
 
 def download_report(document_id, access_token, mp):
-    if mp == "usa":
-        endpoint_url_docuemnt = endpoint_url_docuemnt_usa
-    else:
-        endpoint_url_docuemnt = endpoint_url_docuemnt_eu
-
+    
+    endpoint_url = get_endpoint(mp,"documents")
     url = f"{endpoint_url_docuemnt}/{document_id}"
     print("URL " + str(url))
     headers = {
