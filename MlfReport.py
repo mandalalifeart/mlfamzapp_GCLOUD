@@ -7,12 +7,11 @@ TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 
 def get_endpoint(mp,url_type):
     if mp.region == "NA":
-        return= "https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/".url_type
+        return f"https://sellingpartnerapi-na.amazon.com/reports/2021-06-30/{url_type}"
     elif mp.region == "EU":
-        return= "https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/".url_type
+        return f"https://sellingpartnerapi-eu.amazon.com/reports/2021-06-30/{url_type}"
     else:
-        return= "https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/".url_type
-
+        return f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/{url_type}"
 
 REGIONS = {
     "USA": {
