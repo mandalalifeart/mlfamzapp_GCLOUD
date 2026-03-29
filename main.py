@@ -114,7 +114,7 @@ def check_report_status(credentials, marketplace, report_id):
 
 def download_report(document_id, access_token, marketplace):
     mp = MARKETPLACE_MAP[marketplace]
-    endpoint_url = get_endpoint(mp,"documents")
+    endpoint_url_docuemnt = get_endpoint(mp,"documents")
     url = f"{endpoint_url_docuemnt}/{document_id}"
     print("URL " + str(url))
     headers = {
