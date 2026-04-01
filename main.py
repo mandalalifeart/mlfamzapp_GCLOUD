@@ -1,5 +1,5 @@
-from MlfReportGet_updated import MlfReportReq, MlfReportGet
-from UpdateSkuSalesMonth_updated import UpdateSkuSalesMonth
+from MlfReportGet import MlfReportReq, MlfReportGet
+from UpdateSkuSalesMonth import UpdateSkuSalesMonth 
 
 try:
     from Orders import orders_mlf
