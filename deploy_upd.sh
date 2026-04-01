@@ -40,6 +40,8 @@ required_vars=(
   REFRESH_TOKEN_EU
   CLIENT_ID_USA
   CLIENT_ID_EU
+  SUPABASE_URL
+  SUPABASE_SERVICE_ROLE_KEY
 )
 
 for var in "${required_vars[@]}"; do
@@ -65,16 +67,19 @@ REFRESH_TOKEN_USA: $(yaml_escape "$REFRESH_TOKEN_USA")
 REFRESH_TOKEN_EU: $(yaml_escape "$REFRESH_TOKEN_EU")
 CLIENT_ID_USA: $(yaml_escape "$CLIENT_ID_USA")
 CLIENT_ID_EU: $(yaml_escape "$CLIENT_ID_EU")
+SUPABASE_URL: $(yaml_escape "$SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY: $(yaml_escape "$SUPABASE_SERVICE_ROLE_KEY")
 EOF
 
 # ---- deploy ----
 gcloud config set project "$PROJECT_ID" >/dev/null
 
 git add .
-git commit -m $1 
-git push -u origin main --force
+git commit -m "${1:-UpdateLogic}" || true
+git push -u origin main
 
 gcloud functions deploy "$FUNCTION_NAME" \
+  --gen2 \
   --runtime="$RUNTIME" \
   --region="$REGION" \
   --source="$SOURCE_DIR" \

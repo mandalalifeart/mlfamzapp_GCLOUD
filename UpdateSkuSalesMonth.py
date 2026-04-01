@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 
-from MlfReport_updated import DB_MARKETPLACE_MAP, EU_MARKETPLACES
+from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")

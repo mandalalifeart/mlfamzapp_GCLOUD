@@ -139,7 +139,11 @@ def check_report_status(config: dict[str, Any], report_id: str) -> dict[str, Any
     return payload
 
 
-def get_report_document_metadata(document_id: str, access_token: str, config: dict[str, Any]) -> dict[str, Any]:
+def get_report_document_metadata(
+    document_id: str,
+    access_token: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
     url = f"{config['documents_endpoint']}/{document_id}"
     headers = {
         "Authorization": f"Bearer {access_token}",
