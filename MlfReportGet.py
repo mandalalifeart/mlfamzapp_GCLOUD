@@ -1,6 +1,6 @@
 import json
 
-from MlfReport_updated import (
+from MlfReport import (
     check_report_status,
     create_report,
     download_report_payload,
