@@ -14,8 +14,6 @@ SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "SKU SALES")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 
-# Default CSV location:
-# Put the file next to this python file, or override with env var MAPPING_CSV_PATH
 MAPPING_CSV_PATH = os.environ.get(
     "MAPPING_CSV_PATH",
     os.path.join(os.path.dirname(__file__), "sku_asin_department.csv"),
@@ -90,7 +88,7 @@ def load_sku_mapping(csv_path):
         required = {"SKU", "ASIN", "Department"}
         if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
             raise ValueError(
-                f"CSV must contain exactly these columns at minimum: SKU, ASIN, Department. "
+                f"CSV must contain these columns: SKU, ASIN, Department. "
                 f"Found: {reader.fieldnames}"
             )
 
@@ -137,7 +135,6 @@ def build_sales_query_params(region, offset, limit):
     region_norm = safe_strip(region).lower() or "all"
 
     if region_norm == "all":
-        # Avoid double-counting the synthetic EU bucket when all marketplaces are requested.
         params["MARKETPLACE"] = "not.eq.eu"
     elif region_norm == "eu":
         params["MARKETPLACE"] = "eq.eu"
@@ -193,10 +190,6 @@ def empty_month_totals():
         for month in range(1, 13):
             data[f"{year}-{month:02d}"] = 0
     return data
-
-
-def build_month_columns():
-    return [f"{year}-{month:02d}" for year in YEARS for month in range(1, 13)]
 
 
 def aggregate_sales_rows(sales_rows, sku_to_meta):
@@ -266,7 +259,6 @@ def build_department_rows(aggregated_departments):
         last_year = max(YEARS)
 
     result = {}
-    month_columns = build_month_columns()
 
     for department_name in sorted(aggregated_departments.keys()):
         dept_data = aggregated_departments[department_name]
@@ -283,8 +275,10 @@ def build_department_rows(aggregated_departments):
                 "_sortLastYear": asin_data["yearTotals"][str(last_year)],
             }
 
-            for month_key in month_columns:
-                row[month_key] = asin_data["monthTotals"][month_key]
+            for year in YEARS:
+                for month in range(1, 13):
+                    month_key = f"{year}-{month:02d}"
+                    row[month_key] = asin_data["monthTotals"][month_key]
 
             asin_rows.append(row)
 
@@ -307,8 +301,10 @@ def build_department_rows(aggregated_departments):
             "_sortLastYear": dept_data["total"]["yearTotals"][str(last_year)],
         }
 
-        for month_key in month_columns:
-            total_row[month_key] = dept_data["total"]["monthTotals"][month_key]
+        for year in YEARS:
+            for month in range(1, 13):
+                month_key = f"{year}-{month:02d}"
+                total_row[month_key] = dept_data["total"]["monthTotals"][month_key]
 
         rows = [total_row] + asin_rows
 
@@ -351,7 +347,11 @@ def GetSalesDepartmentReport(request):
         body = request.get_json(silent=True) or {}
 
         region = safe_strip(body.get("region", "all")).lower() or "all"
-        if region not in {"all", "eu", "usa", "ca", "mx", "uk", "de", "fr", "it", "es", "se", "ie", "pl", "nl", "be", "jp"}:
+        allowed_regions = {
+            "all", "eu", "usa", "ca", "mx", "uk", "de", "fr", "it", "es",
+            "se", "ie", "pl", "nl", "be", "jp"
+        }
+        if region not in allowed_regions:
             return json_response({"error": f"Unsupported region: {region}"}, 400)
 
         sku_to_meta, mapping_stats = load_sku_mapping(MAPPING_CSV_PATH)
@@ -363,7 +363,6 @@ def GetSalesDepartmentReport(request):
             "status": "success",
             "region": region,
             "years": YEARS,
-            "monthColumns": build_month_columns(),
             "mappingFile": MAPPING_CSV_PATH,
             "mappingStats": mapping_stats,
             "sourceRowCount": len(sales_rows),
