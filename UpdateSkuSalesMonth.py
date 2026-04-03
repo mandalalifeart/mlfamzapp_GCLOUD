@@ -1,5 +1,6 @@
 import json
 import os
+from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
@@ -175,11 +176,83 @@ def build_db_rows(order_rows, month, year):
         if not marketplace_code:
             continue
 
-        add_row(row["sku"], marketplace_code, int(row["qty"]))
+        qty = int(row["qty"])
+        add_row(row["sku"], marketplace_code, qty)
+
         if marketplace_code in EU_MARKETPLACES:
-            add_row(row["sku"], "eu", int(row["qty"]))
+            add_row(row["sku"], "eu", qty)
 
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
+
+
+def build_dry_run_summary(db_rows):
+    by_marketplace = defaultdict(lambda: {"rows": 0, "units": 0, "unique_skus": set()})
+
+    for row in db_rows:
+        mp = row["MARKETPLACE"]
+        by_marketplace[mp]["rows"] += 1
+        by_marketplace[mp]["units"] += int(row["QUANTITY"])
+        by_marketplace[mp]["unique_skus"].add(row["SKU"])
+
+    summary = []
+    for mp in sorted(by_marketplace.keys()):
+        item = by_marketplace[mp]
+        summary.append({
+            "marketplace": mp,
+            "rows": item["rows"],
+            "units": item["units"],
+            "uniqueSkus": len(item["unique_skus"]),
+        })
+
+    return summary
+
+
+def collect_report_ids_from_body(body):
+    """
+    Preferred new format:
+      "reportIds": {
+        "usa": "677669020544",
+        "de": "594242020544",
+        "uk": "...",
+        "fr": "..."
+      }
+
+    Backward-compatible old format:
+      "usaReportId": "...",
+      "deReportId": "..."
+    """
+    report_ids = {}
+
+    raw = body.get("reportIds")
+    if isinstance(raw, dict):
+        for marketplace, report_id in raw.items():
+            marketplace_norm = safe_strip(marketplace).lower()
+            report_id_norm = safe_strip(report_id)
+            if marketplace_norm and report_id_norm:
+                report_ids[marketplace_norm] = report_id_norm
+
+    legacy_map = {
+        "usa": body.get("usaReportId", ""),
+        "de": body.get("deReportId", ""),
+        "uk": body.get("ukReportId", ""),
+        "fr": body.get("frReportId", ""),
+        "it": body.get("itReportId", ""),
+        "es": body.get("esReportId", ""),
+        "nl": body.get("nlReportId", ""),
+        "se": body.get("seReportId", ""),
+        "pl": body.get("plReportId", ""),
+        "be": body.get("beReportId", ""),
+        "jp": body.get("jpReportId", ""),
+        "ca": body.get("caReportId", ""),
+        "mx": body.get("mxReportId", ""),
+    }
+
+    for marketplace, report_id in legacy_map.items():
+        report_id_norm = safe_strip(report_id)
+        if report_id_norm and marketplace not in report_ids:
+            report_ids[marketplace] = report_id_norm
+
+    return report_ids
 
 
 def supabase_headers():
@@ -248,8 +321,6 @@ def UpdateSkuSalesMonth(request):
         end_date = body.get("endDate")
         confirm_month = body.get("confirmMonth")
         confirm_year = body.get("confirmYear")
-        usa_report_id = body.get("usaReportId", "")
-        de_report_id = body.get("deReportId", "")
         dry_run = bool(body.get("dryRun", False))
 
         if not start_date or not end_date:
@@ -257,20 +328,39 @@ def UpdateSkuSalesMonth(request):
 
         start_month, start_year = get_la_month_year(start_date)
         end_month, end_year = get_la_month_year(end_date)
+
         if (start_month, start_year) != (end_month, end_year):
             return json_response(
-                {"error": "startDate and endDate must belong to the same month and year in America/Los_Angeles"},
+                {
+                    "error": "startDate and endDate must belong to the same month and year in America/Los_Angeles"
+                },
                 400,
             )
 
         if int(confirm_month or 0) != start_month or int(confirm_year or 0) != start_year:
             return json_response({"error": "Month/year confirmation mismatch"}, 400)
 
+        report_ids = collect_report_ids_from_body(body)
+        if not report_ids:
+            return json_response(
+                {
+                    "error": "No report IDs provided. Use reportIds object or legacy fields like usaReportId/deReportId."
+                },
+                400,
+            )
+
         order_rows = []
-        if usa_report_id:
-            order_rows.extend(parse_orders_from_xml(fetch_report_payload("usa", usa_report_id)))
-        if de_report_id:
-            order_rows.extend(parse_orders_from_xml(fetch_report_payload("de", de_report_id)))
+        fetched_reports = []
+
+        for marketplace, report_req_id in sorted(report_ids.items()):
+            xml_payload = fetch_report_payload(marketplace, report_req_id)
+            parsed_rows = parse_orders_from_xml(xml_payload)
+            order_rows.extend(parsed_rows)
+            fetched_reports.append({
+                "marketplace": marketplace,
+                "reportId": report_req_id,
+                "parsedRows": len(parsed_rows),
+            })
 
         db_rows = build_db_rows(order_rows, start_month, start_year)
 
@@ -282,7 +372,9 @@ def UpdateSkuSalesMonth(request):
                     "year": start_year,
                     "parsedOrderRows": len(order_rows),
                     "dbRowsCount": len(db_rows),
-                    "preview": db_rows[:50],
+                    "reports": fetched_reports,
+                    "aggregatedByMarketplace": build_dry_run_summary(db_rows),
+                    "preview": db_rows[:100],
                 },
                 200,
             )
@@ -295,12 +387,15 @@ def UpdateSkuSalesMonth(request):
                 "status": "success",
                 "month": start_month,
                 "year": start_year,
+                "parsedOrderRows": len(order_rows),
+                "dbRowsCount": len(db_rows),
                 "deletedRows": deleted_count,
                 "insertedRows": inserted_count,
-                "parsedOrderRows": len(order_rows),
+                "reports": fetched_reports,
             },
             200,
         )
+
     except PermissionError as exc:
         return json_response({"error": str(exc)}, 403)
     except ValueError as exc:
