@@ -21,8 +21,6 @@ MAPPING_CSV_PATH = os.environ.get(
 
 VALID_DEPARTMENTS = {"PAREO", "P_RUG", "P_BOHO"}
 YEARS = [2023, 2024, 2025, 2026]
-EU_MARKETPLACES = {"de", "fr", "it", "es", "se", "ie", "pl", "nl", "be"}
-
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
 
@@ -54,8 +52,12 @@ def safe_strip(value):
 def normalize_sku(sku):
     sku = safe_strip(sku)
     if sku.startswith("amzn.gr."):
-        return sku[len("amzn.gr."):].split("-", 1)[0]
-    return sku
+        sku = sku[len("amzn.gr."):].split("-", 1)[0]
+    return sku.lower()
+
+
+def normalize_asin(asin):
+    return safe_strip(asin).upper()
 
 
 def supabase_headers():
@@ -70,7 +72,7 @@ def supabase_table_url():
     return f"{SUPABASE_URL}/rest/v1/{requests.utils.quote(SUPABASE_TABLE, safe='')}"
 
 
-def load_sku_mapping(csv_path):
+def load_sku_mapping(csv_path, asin_filter=None):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Mapping CSV not found: {csv_path}")
 
@@ -80,7 +82,10 @@ def load_sku_mapping(csv_path):
         "ignoredRows": 0,
         "keptRows": 0,
         "duplicateSkus": 0,
+        "asinFilteredOutRows": 0,
     }
+
+    normalized_asin_filter = normalize_asin(asin_filter) if asin_filter else ""
 
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -96,7 +101,7 @@ def load_sku_mapping(csv_path):
             stats["totalRows"] += 1
 
             sku = normalize_sku(row.get("SKU", ""))
-            asin = safe_strip(row.get("ASIN", ""))
+            asin = normalize_asin(row.get("ASIN", ""))
             department = safe_strip(row.get("Department", "")).upper()
 
             if not sku or not asin or not department:
@@ -109,6 +114,10 @@ def load_sku_mapping(csv_path):
 
             if department not in VALID_DEPARTMENTS:
                 stats["ignoredRows"] += 1
+                continue
+
+            if normalized_asin_filter and asin != normalized_asin_filter:
+                stats["asinFilteredOutRows"] += 1
                 continue
 
             if sku in sku_to_meta:
@@ -194,6 +203,7 @@ def empty_month_totals():
 
 def aggregate_sales_rows(sales_rows, sku_to_meta):
     departments = {}
+    missing_skus = set()
 
     def ensure_department(department_name):
         if department_name not in departments:
@@ -215,6 +225,8 @@ def aggregate_sales_rows(sales_rows, sku_to_meta):
         meta = sku_to_meta.get(sku)
 
         if not meta:
+            if sku:
+                missing_skus.add(sku)
             continue
 
         department = meta["department"]
@@ -241,23 +253,24 @@ def aggregate_sales_rows(sales_rows, sku_to_meta):
         month_key = f"{year}-{month:02d}"
         year_key = str(year)
 
-        asin_bucket["skuSet"].add(sku)
+        asin_bucket["skuSet"].add(raw_sku)
         asin_bucket["yearTotals"][year_key] += qty
         asin_bucket["monthTotals"][month_key] += qty
 
-        dept_bucket["total"]["skuSet"].add(sku)
+        dept_bucket["total"]["skuSet"].add(raw_sku)
         dept_bucket["total"]["yearTotals"][year_key] += qty
         dept_bucket["total"]["monthTotals"][month_key] += qty
 
-    return departments
+    return departments, sorted(list(missing_skus))[:50]
 
 
-def build_department_rows(aggregated_departments):
+def build_department_rows(aggregated_departments, asin_filter=None):
     now_year = datetime.now(LA_TZ).year
     last_year = now_year - 1
     if last_year not in YEARS:
         last_year = max(YEARS)
 
+    normalized_asin_filter = normalize_asin(asin_filter) if asin_filter else ""
     result = {}
 
     for department_name in sorted(aggregated_departments.keys()):
@@ -265,6 +278,9 @@ def build_department_rows(aggregated_departments):
         asin_rows = []
 
         for asin, asin_data in dept_data["asins"].items():
+            if normalized_asin_filter and asin != normalized_asin_filter:
+                continue
+
             row = {
                 "SKU": ", ".join(sorted(asin_data["skuSet"])),
                 "ASIN": asin,
@@ -291,20 +307,33 @@ def build_department_rows(aggregated_departments):
             )
         )
 
+        if not asin_rows and normalized_asin_filter:
+            continue
+
         total_row = {
             "SKU": "ALL",
             "ASIN": "ALL",
-            "Y2023": dept_data["total"]["yearTotals"]["2023"],
-            "Y2024": dept_data["total"]["yearTotals"]["2024"],
-            "Y2025": dept_data["total"]["yearTotals"]["2025"],
-            "Y2026": dept_data["total"]["yearTotals"]["2026"],
-            "_sortLastYear": dept_data["total"]["yearTotals"][str(last_year)],
+            "Y2023": 0,
+            "Y2024": 0,
+            "Y2025": 0,
+            "Y2026": 0,
+            "_sortLastYear": 0,
         }
 
         for year in YEARS:
             for month in range(1, 13):
-                month_key = f"{year}-{month:02d}"
-                total_row[month_key] = dept_data["total"]["monthTotals"][month_key]
+                total_row[f"{year}-{month:02d}"] = 0
+
+        for asin_row in asin_rows:
+            total_row["Y2023"] += asin_row["Y2023"]
+            total_row["Y2024"] += asin_row["Y2024"]
+            total_row["Y2025"] += asin_row["Y2025"]
+            total_row["Y2026"] += asin_row["Y2026"]
+
+            for year in YEARS:
+                for month in range(1, 13):
+                    month_key = f"{year}-{month:02d}"
+                    total_row[month_key] += asin_row[month_key]
 
         rows = [total_row] + asin_rows
 
@@ -347,6 +376,9 @@ def GetSalesDepartmentReport(request):
         body = request.get_json(silent=True) or {}
 
         region = safe_strip(body.get("region", "all")).lower() or "all"
+        asin = body.get("asin")
+        asin = normalize_asin(asin) if asin else ""
+
         allowed_regions = {
             "all", "eu", "usa", "ca", "mx", "uk", "de", "fr", "it", "es",
             "se", "ie", "pl", "nl", "be", "jp"
@@ -354,18 +386,20 @@ def GetSalesDepartmentReport(request):
         if region not in allowed_regions:
             return json_response({"error": f"Unsupported region: {region}"}, 400)
 
-        sku_to_meta, mapping_stats = load_sku_mapping(MAPPING_CSV_PATH)
+        sku_to_meta, mapping_stats = load_sku_mapping(MAPPING_CSV_PATH, asin_filter=asin or None)
         sales_rows = fetch_sales_rows(region=region)
-        aggregated = aggregate_sales_rows(sales_rows, sku_to_meta)
-        department_rows = build_department_rows(aggregated)
+        aggregated, missing_skus = aggregate_sales_rows(sales_rows, sku_to_meta)
+        department_rows = build_department_rows(aggregated, asin_filter=asin or None)
 
         response_body = {
             "status": "success",
             "region": region,
+            "asinFilter": asin or None,
             "years": YEARS,
             "mappingFile": MAPPING_CSV_PATH,
             "mappingStats": mapping_stats,
             "sourceRowCount": len(sales_rows),
+            "missingSkuExamples": missing_skus,
             "departmentSummary": summarize_departments(department_rows),
             "departments": {
                 "PAREO": department_rows.get("PAREO", []),
