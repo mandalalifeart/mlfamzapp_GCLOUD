@@ -10,7 +10,7 @@ TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 REPORT_TYPE_ALL_ORDERS_BY_DATE = "GET_XML_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL"
 
 
-REGION_CONFIGS = {
+REGION_CONFIGS = { 
     "usa": {
         "client_id_env": "CLIENT_ID_USA",
         "client_secret_env": "CLIENT_SECRET_USA",
