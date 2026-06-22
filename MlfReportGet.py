@@ -10,7 +10,7 @@ from MlfReport import (
 )
 
 
-ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
+ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"     
 
 
 def cors_headers():
