@@ -39,8 +39,6 @@ required_vars=(
   REFRESH_TOKEN_EU
   CLIENT_ID_USA
   CLIENT_ID_EU
-  SUPABASE_URL
-  SUPABASE_SERVICE_ROLE_KEY
 )
 
 for var in "${required_vars[@]}"; do

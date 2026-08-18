@@ -5,14 +5,18 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
+import pymysql
 import requests
 
 from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "SKU SALES")
+MARIADB_HOST = os.environ["MARIADB_HOST"]
+MARIADB_PORT = int(os.environ.get("MARIADB_PORT", "3306"))
+MARIADB_USER = os.environ["MARIADB_USER"]
+MARIADB_PASSWORD = os.environ["MARIADB_PASSWORD"]
+MARIADB_DATABASE = os.environ.get("MARIADB_DATABASE", "bababot")
+MARIADB_TABLE = os.environ.get("MARIADB_TABLE", "SKU_SALES")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 LA_TZ = ZoneInfo("America/Los_Angeles")
@@ -255,56 +259,56 @@ def collect_report_ids_from_body(body):
     return report_ids
 
 
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def supabase_table_url():
-    return f"{SUPABASE_URL}/rest/v1/{requests.utils.quote(SUPABASE_TABLE, safe='')}"
+def get_db_connection():
+    return pymysql.connect(
+        host=MARIADB_HOST,
+        port=MARIADB_PORT,
+        user=MARIADB_USER,
+        password=MARIADB_PASSWORD,
+        database=MARIADB_DATABASE,
+        autocommit=False,
+    )
 
 
 def delete_existing_rows(month, year):
-    headers = supabase_headers()
-    headers["Prefer"] = "return=representation"
-    response = requests.delete(
-        supabase_table_url(),
-        headers=headers,
-        params={"MONTH": f"eq.{month}", "YEAR": f"eq.{year}"},
-        timeout=180,
-    )
-    if response.status_code not in (200, 204):
-        raise RuntimeError(f"Supabase delete failed: HTTP {response.status_code} - {response.text}")
-    if response.status_code == 204 or not response.text:
-        return 0
+    conn = get_db_connection()
     try:
-        rows = response.json()
-        return len(rows) if isinstance(rows, list) else 0
-    except Exception:
-        return 0
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM `{MARIADB_TABLE}` WHERE MONTH = %s AND YEAR = %s",
+                (month, year),
+            )
+            deleted = cursor.rowcount
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
 
 
 def insert_rows(rows, chunk_size=1000):
     if not rows:
         return 0
 
-    inserted_total = 0
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i + chunk_size]
-        headers = supabase_headers()
-        headers["Prefer"] = "return=representation"
-        response = requests.post(supabase_table_url(), headers=headers, json=chunk, timeout=180)
-        if response.status_code not in (200, 201):
-            raise RuntimeError(f"Supabase insert failed: HTTP {response.status_code} - {response.text}")
-        try:
-            inserted_rows = response.json()
-            inserted_total += len(inserted_rows) if isinstance(inserted_rows, list) else len(chunk)
-        except Exception:
-            inserted_total += len(chunk)
-    return inserted_total
+    conn = get_db_connection()
+    try:
+        insert_sql = (
+            f"INSERT INTO `{MARIADB_TABLE}` (SKU, MARKETPLACE, MONTH, YEAR, QUANTITY) "
+            "VALUES (%s, %s, %s, %s, %s)"
+        )
+        inserted_total = 0
+        with conn.cursor() as cursor:
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                values = [
+                    (row["SKU"], row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"])
+                    for row in chunk
+                ]
+                cursor.executemany(insert_sql, values)
+                inserted_total += cursor.rowcount
+        conn.commit()
+        return inserted_total
+    finally:
+        conn.close()
 
 
 def UpdateSkuSalesMonth(request):
