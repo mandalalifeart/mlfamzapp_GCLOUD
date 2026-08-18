@@ -3,3 +3,8 @@
 __pycache__/
 *.pyc
 venv/
+mandalalifeart
+mandalalifeart.pub
+*.pem
+id_*
+id_*.pub

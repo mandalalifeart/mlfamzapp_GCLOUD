@@ -9,7 +9,6 @@ RUNTIME="python312"
 ENTRY_POINT="GetSalesDepartmentReport"
 SOURCE_DIR="."
 ENV_FILE=".env"
-TMP_ENV_YAML="$(mktemp)"
 
 # ---- checks ----
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -47,32 +46,23 @@ required_vars=(
 for var in "${required_vars[@]}"; do
   if [[ -z "${!var:-}" ]]; then
     echo "Missing required env var: $var"
-    rm -f "$TMP_ENV_YAML"
     exit 1
   fi
 done
 
-# ---- escape values for YAML ----
-yaml_escape() {
-  local s="${1//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  printf '"%s"' "$s"
-}
-
-# ---- build temporary env yaml from .env ----
-cat > "$TMP_ENV_YAML" <<EOF
-CLIENT_SECRET_USA: $(yaml_escape "$CLIENT_SECRET_USA")
-CLIENT_SECRET_EU: $(yaml_escape "$CLIENT_SECRET_EU")
-REFRESH_TOKEN_USA: $(yaml_escape "$REFRESH_TOKEN_USA")
-REFRESH_TOKEN_EU: $(yaml_escape "$REFRESH_TOKEN_EU")
-CLIENT_ID_USA: $(yaml_escape "$CLIENT_ID_USA")
-CLIENT_ID_EU: $(yaml_escape "$CLIENT_ID_EU")
-SUPABASE_URL: $(yaml_escape "$SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY: $(yaml_escape "$SUPABASE_SERVICE_ROLE_KEY")
-EOF
-
 # ---- deploy ----
 gcloud config set project "$PROJECT_ID" >/dev/null
+
+# ---- sync secrets to Secret Manager (creates on first run, adds a new version every deploy) ----
+secrets_flag=""
+for var in "${required_vars[@]}"; do
+  if ! gcloud secrets describe "$var" >/dev/null 2>&1; then
+    gcloud secrets create "$var" --replication-policy=automatic >/dev/null
+  fi
+  printf '%s' "${!var}" | gcloud secrets versions add "$var" --data-file=- >/dev/null
+  secrets_flag+="${var}=${var}:latest,"
+done
+secrets_flag="${secrets_flag%,}"
 
 git add .
 git commit -m "${1:-UpdateLogic}" || true
@@ -86,9 +76,6 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --entry-point="$ENTRY_POINT" \
   --trigger-http \
   --allow-unauthenticated \
-  --env-vars-file="$TMP_ENV_YAML"
-
-# ---- cleanup ----
-rm -f "$TMP_ENV_YAML"
+  --set-secrets="$secrets_flag"
 
 echo "Deployment completed."
