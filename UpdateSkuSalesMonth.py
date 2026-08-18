@@ -152,9 +152,18 @@ def parse_orders_from_xml(xml_payload):
             if qty <= 0:
                 continue
 
+            amount_raw = safe_strip(order_item.findtext("ItemPrice")) or safe_strip(
+                order_item.findtext("ItemPrice/Amount")
+            )
+            try:
+                amount = float(amount_raw) if amount_raw else 0.0
+            except ValueError:
+                amount = 0.0
+
             rows.append({
                 "sku": sku,
                 "qty": qty,
+                "amount": amount,
                 "sales_channel": sales_channel.lower(),
             })
 
@@ -164,7 +173,7 @@ def parse_orders_from_xml(xml_payload):
 def build_db_rows(order_rows, month, year):
     totals = {}
 
-    def add_row(sku, marketplace_code, qty):
+    def add_row(sku, marketplace_code, qty, amount):
         key = (sku, marketplace_code, month, year)
         if key not in totals:
             totals[key] = {
@@ -173,8 +182,10 @@ def build_db_rows(order_rows, month, year):
                 "MONTH": month,
                 "YEAR": year,
                 "QUANTITY": 0,
+                "AMOUNT": 0.0,
             }
         totals[key]["QUANTITY"] += qty
+        totals[key]["AMOUNT"] += amount
 
     for row in order_rows:
         marketplace_code = DB_MARKETPLACE_MAP.get(row["sales_channel"])
@@ -182,10 +193,11 @@ def build_db_rows(order_rows, month, year):
             continue
 
         qty = int(row["qty"])
-        add_row(row["sku"], marketplace_code, qty)
+        amount = float(row.get("amount", 0.0))
+        add_row(row["sku"], marketplace_code, qty, amount)
 
         if marketplace_code in EU_MARKETPLACES:
-            add_row(row["sku"], "eu", qty)
+            add_row(row["sku"], "eu", qty, amount)
 
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
 
@@ -200,23 +212,27 @@ def build_country_rows(db_rows, month, year):
                 "MARKETPLACE": marketplace_code,
                 "MONTH": month,
                 "YEAR": year,
-                "SKU_COUNT": 0,
                 "QUANTITY": 0,
+                "AMOUNT": 0.0,
             }
-        totals[marketplace_code]["SKU_COUNT"] += 1
         totals[marketplace_code]["QUANTITY"] += int(row["QUANTITY"])
+        totals[marketplace_code]["AMOUNT"] += float(row.get("AMOUNT", 0.0))
+
+    for item in totals.values():
+        item["AMOUNT"] = round(item["AMOUNT"], 2)
 
     return sorted(totals.values(), key=lambda item: item["MARKETPLACE"])
 
 
 def build_dry_run_summary(db_rows):
-    by_marketplace = defaultdict(lambda: {"rows": 0, "units": 0, "unique_skus": set()})
+    by_marketplace = defaultdict(lambda: {"rows": 0, "units": 0, "unique_skus": set(), "amount": 0.0})
 
     for row in db_rows:
         mp = row["MARKETPLACE"]
         by_marketplace[mp]["rows"] += 1
         by_marketplace[mp]["units"] += int(row["QUANTITY"])
         by_marketplace[mp]["unique_skus"].add(row["SKU"])
+        by_marketplace[mp]["amount"] += float(row.get("AMOUNT", 0.0))
 
     summary = []
     for mp in sorted(by_marketplace.keys()):
@@ -226,6 +242,7 @@ def build_dry_run_summary(db_rows):
             "rows": item["rows"],
             "units": item["units"],
             "uniqueSkus": len(item["unique_skus"]),
+            "amount": round(item["amount"], 2),
         })
 
     return summary
@@ -323,11 +340,11 @@ def insert_country_rows(cursor, rows):
         return 0
 
     insert_sql = (
-        f"INSERT INTO `{MARIADB_COUNTRY_TABLE}` (MARKETPLACE, MONTH, YEAR, SKU_COUNT, QUANTITY) "
+        f"INSERT INTO `{MARIADB_COUNTRY_TABLE}` (MARKETPLACE, MONTH, YEAR, QUANTITY, AMOUNT) "
         "VALUES (%s, %s, %s, %s, %s)"
     )
     values = [
-        (row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["SKU_COUNT"], row["QUANTITY"])
+        (row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"], row["AMOUNT"])
         for row in rows
     ]
     cursor.executemany(insert_sql, values)
