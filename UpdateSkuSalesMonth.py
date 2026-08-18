@@ -17,6 +17,7 @@ MARIADB_USER = os.environ["MARIADB_USER"]
 MARIADB_PASSWORD = os.environ["MARIADB_PASSWORD"]
 MARIADB_DATABASE = os.environ.get("MARIADB_DATABASE", "bababot")
 MARIADB_TABLE = os.environ.get("MARIADB_TABLE", "SKU_SALES")
+MARIADB_COUNTRY_TABLE = os.environ.get("MARIADB_COUNTRY_TABLE", "COUNTRY_SALES")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 LA_TZ = ZoneInfo("America/Los_Angeles")
@@ -189,6 +190,25 @@ def build_db_rows(order_rows, month, year):
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
 
 
+def build_country_rows(db_rows, month, year):
+    totals = {}
+
+    for row in db_rows:
+        marketplace_code = row["MARKETPLACE"]
+        if marketplace_code not in totals:
+            totals[marketplace_code] = {
+                "MARKETPLACE": marketplace_code,
+                "MONTH": month,
+                "YEAR": year,
+                "SKU_COUNT": 0,
+                "QUANTITY": 0,
+            }
+        totals[marketplace_code]["SKU_COUNT"] += 1
+        totals[marketplace_code]["QUANTITY"] += int(row["QUANTITY"])
+
+    return sorted(totals.values(), key=lambda item: item["MARKETPLACE"])
+
+
 def build_dry_run_summary(db_rows):
     by_marketplace = defaultdict(lambda: {"rows": 0, "units": 0, "unique_skus": set()})
 
@@ -270,43 +290,68 @@ def get_db_connection():
     )
 
 
-def delete_existing_rows(month, year):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                f"DELETE FROM `{MARIADB_TABLE}` WHERE MONTH = %s AND YEAR = %s",
-                (month, year),
-            )
-            deleted = cursor.rowcount
-        conn.commit()
-        return deleted
-    finally:
-        conn.close()
+def delete_month_rows(cursor, table, month, year):
+    cursor.execute(
+        f"DELETE FROM `{table}` WHERE MONTH = %s AND YEAR = %s",
+        (month, year),
+    )
+    return cursor.rowcount
 
 
-def insert_rows(rows, chunk_size=1000):
+def insert_sku_rows(cursor, rows, chunk_size=1000):
     if not rows:
         return 0
 
+    insert_sql = (
+        f"INSERT INTO `{MARIADB_TABLE}` (SKU, MARKETPLACE, MONTH, YEAR, QUANTITY) "
+        "VALUES (%s, %s, %s, %s, %s)"
+    )
+    inserted_total = 0
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        values = [
+            (row["SKU"], row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"])
+            for row in chunk
+        ]
+        cursor.executemany(insert_sql, values)
+        inserted_total += cursor.rowcount
+    return inserted_total
+
+
+def insert_country_rows(cursor, rows):
+    if not rows:
+        return 0
+
+    insert_sql = (
+        f"INSERT INTO `{MARIADB_COUNTRY_TABLE}` (MARKETPLACE, MONTH, YEAR, SKU_COUNT, QUANTITY) "
+        "VALUES (%s, %s, %s, %s, %s)"
+    )
+    values = [
+        (row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["SKU_COUNT"], row["QUANTITY"])
+        for row in rows
+    ]
+    cursor.executemany(insert_sql, values)
+    return cursor.rowcount
+
+
+def write_month_data(db_rows, country_rows, month, year):
     conn = get_db_connection()
     try:
-        insert_sql = (
-            f"INSERT INTO `{MARIADB_TABLE}` (SKU, MARKETPLACE, MONTH, YEAR, QUANTITY) "
-            "VALUES (%s, %s, %s, %s, %s)"
-        )
-        inserted_total = 0
         with conn.cursor() as cursor:
-            for i in range(0, len(rows), chunk_size):
-                chunk = rows[i:i + chunk_size]
-                values = [
-                    (row["SKU"], row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"])
-                    for row in chunk
-                ]
-                cursor.executemany(insert_sql, values)
-                inserted_total += cursor.rowcount
+            deleted_sku = delete_month_rows(cursor, MARIADB_TABLE, month, year)
+            inserted_sku = insert_sku_rows(cursor, db_rows)
+            deleted_country = delete_month_rows(cursor, MARIADB_COUNTRY_TABLE, month, year)
+            inserted_country = insert_country_rows(cursor, country_rows)
         conn.commit()
-        return inserted_total
+        return {
+            "deletedRows": deleted_sku,
+            "insertedRows": inserted_sku,
+            "deletedCountryRows": deleted_country,
+            "insertedCountryRows": inserted_country,
+        }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -367,6 +412,7 @@ def UpdateSkuSalesMonth(request):
             })
 
         db_rows = build_db_rows(order_rows, start_month, start_year)
+        country_rows = build_country_rows(db_rows, start_month, start_year)
 
         if dry_run:
             return json_response(
@@ -376,15 +422,16 @@ def UpdateSkuSalesMonth(request):
                     "year": start_year,
                     "parsedOrderRows": len(order_rows),
                     "dbRowsCount": len(db_rows),
+                    "countryRowsCount": len(country_rows),
                     "reports": fetched_reports,
                     "aggregatedByMarketplace": build_dry_run_summary(db_rows),
                     "preview": db_rows[:100],
+                    "countryPreview": country_rows,
                 },
                 200,
             )
 
-        deleted_count = delete_existing_rows(start_month, start_year)
-        inserted_count = insert_rows(db_rows)
+        write_result = write_month_data(db_rows, country_rows, start_month, start_year)
 
         return json_response(
             {
@@ -393,9 +440,9 @@ def UpdateSkuSalesMonth(request):
                 "year": start_year,
                 "parsedOrderRows": len(order_rows),
                 "dbRowsCount": len(db_rows),
-                "deletedRows": deleted_count,
-                "insertedRows": inserted_count,
+                "countryRowsCount": len(country_rows),
                 "reports": fetched_reports,
+                **write_result,
             },
             200,
         )
