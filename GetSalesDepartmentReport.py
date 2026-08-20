@@ -107,7 +107,17 @@ def pb_authenticate():
     return token
 
 
-def fetch_sku_sales(token, min_year):
+def build_pb_filter(min_year, atomic_marketplaces):
+    marketplace_clause = " || ".join(
+        f'marketplace="{mp}"' for mp in sorted(atomic_marketplaces)
+    )
+    return f"(year>={min_year} && ({marketplace_clause}))"
+
+
+def fetch_sku_sales(token, min_year, atomic_marketplaces):
+    if not atomic_marketplaces:
+        return []
+
     records = []
     page = 1
     while True:
@@ -115,7 +125,7 @@ def fetch_sku_sales(token, min_year):
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_SKU_COLLECTION}/records",
             headers={"Authorization": token},
             params={
-                "filter": f"(year>={min_year})",
+                "filter": build_pb_filter(min_year, atomic_marketplaces),
                 "fields": "sku,marketplace,month,year,quantity",
                 "perPage": 500,
                 "page": page,
@@ -223,7 +233,7 @@ def GetSalesDepartmentReport(request):
 
         mapping = load_mapping()
         token = pb_authenticate()
-        records = fetch_sku_sales(token, min_year=years[-1])
+        records = fetch_sku_sales(token, min_year=years[-1], atomic_marketplaces=atomic_marketplaces)
         groups, unmapped = build_report(records, mapping, atomic_marketplaces, years)
 
         return json_response({
