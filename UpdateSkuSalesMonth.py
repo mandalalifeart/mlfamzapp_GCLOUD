@@ -1,13 +1,36 @@
+import csv
 import json
 import os
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
 import requests
 
 from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
+
+MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
+
+_sku_to_asin_cache = None
+
+
+def load_sku_to_asin():
+    global _sku_to_asin_cache
+    if _sku_to_asin_cache is not None:
+        return _sku_to_asin_cache
+
+    sku_to_asin = {}
+    with open(MAPPING_CSV_PATH, newline="") as f:
+        for row in csv.DictReader(f):
+            sku = (row.get("SKU") or "").strip()
+            asin = (row.get("ASIN") or "").strip()
+            if sku and asin:
+                sku_to_asin[sku] = asin
+
+    _sku_to_asin_cache = sku_to_asin
+    return _sku_to_asin_cache
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
@@ -163,12 +186,14 @@ def parse_orders_from_xml(xml_payload):
 
 def build_db_rows(order_rows, month, year):
     totals = {}
+    sku_to_asin = load_sku_to_asin()
 
     def add_row(sku, marketplace_code, qty, amount):
         key = (sku, marketplace_code, month, year)
         if key not in totals:
             totals[key] = {
                 "SKU": sku,
+                "ASIN": sku_to_asin.get(sku, ""),
                 "MARKETPLACE": marketplace_code,
                 "MONTH": month,
                 "YEAR": year,
@@ -350,6 +375,7 @@ def pb_batch(token, batch_requests):
 def sku_row_to_body(row):
     return {
         "sku": row["SKU"],
+        "ASIN": row.get("ASIN", ""),
         "marketplace": row["MARKETPLACE"],
         "month": row["MONTH"],
         "year": row["YEAR"],

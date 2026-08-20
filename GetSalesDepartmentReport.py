@@ -22,7 +22,7 @@ MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
 EU_ATOMIC = {"de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}
 UI_MARKETPLACE_TO_ATOMIC = {
     "usa": {"usa"},
-    "uk": {"gb"},
+    "uk": {"uk"},
     "jp": {"jp"},
     "au": {"au"},
     "de": {"de"},

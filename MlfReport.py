@@ -38,7 +38,7 @@ DB_MARKETPLACE_MAP = {
     "amazon.com": "usa",
     "amazon.ca": "ca",
     "amazon.com.mx": "mex",
-    "amazon.co.uk": "gb",
+    "amazon.co.uk": "uk",
     "amazon.de": "de",
     "amazon.fr": "fr",
     "amazon.it": "it",
@@ -51,7 +51,7 @@ DB_MARKETPLACE_MAP = {
     "amazon.ie": "ie",
 }
 
-EU_MARKETPLACES = {"gb", "de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}
+EU_MARKETPLACES = {"de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}
 
 
 def get_region_config(region_name: str) -> dict[str, Any]:
