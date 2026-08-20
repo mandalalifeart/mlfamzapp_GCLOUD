@@ -1,5 +1,17 @@
 from MlfReportGet import MlfReportReq, MlfReportGet
 
+
+def UpdateSkuSalesMonth(request):
+    # lazy import: this module reads POCKETBASE_* env vars at import time,
+    # which are only set for this function's deployment, not the others
+    from UpdateSkuSalesMonth import UpdateSkuSalesMonth as _impl
+    return _impl(request)
+
+
+def GetSalesDepartmentReport(request):
+    from GetSalesDepartmentReport import GetSalesDepartmentReport as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
