@@ -126,7 +126,7 @@ def fetch_sku_sales(token, min_year, atomic_marketplaces):
             headers={"Authorization": token},
             params={
                 "filter": build_pb_filter(min_year, atomic_marketplaces),
-                "fields": "sku,marketplace,month,year,quantity",
+                "fields": "sku,ASIN,marketplace,month,year,quantity",
                 "perPage": 500,
                 "page": page,
             },
@@ -143,7 +143,6 @@ def fetch_sku_sales(token, min_year, atomic_marketplaces):
 
 
 def build_report(records, mapping, atomic_marketplaces, years):
-    sku_to_asin = mapping["sku_to_asin"]
     asin_to_main_sku = mapping["asin_to_main_sku"]
     asin_to_group = mapping["asin_to_group"]
 
@@ -161,8 +160,12 @@ def build_report(records, mapping, atomic_marketplaces, years):
             continue
         sku = rec.get("sku") or ""
         qty = int(rec.get("quantity") or 0)
-        asin = sku_to_asin.get(sku)
-        if not asin:
+        # Group by the sale's own ASIN field (set from the order data), not by
+        # matching its SKU string against the mapping CSV - a product can be sold
+        # under multiple SKU spellings (e.g. Pareo5Blue / Pareo5Blue502) that all
+        # share one ASIN, and the CSV won't list every variant.
+        asin = (rec.get("ASIN") or "").strip()
+        if not asin or asin not in asin_to_group:
             unmapped_totals[sku] += qty
             continue
         asin_year_months[asin][year][month - 1] += qty
