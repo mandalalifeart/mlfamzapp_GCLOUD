@@ -16,7 +16,6 @@ POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_SKU_COLLECTION = os.environ.get("POCKETBASE_SKU_COLLECTION", "sku_sales")
 POCKETBASE_COUNTRY_COLLECTION = os.environ.get("POCKETBASE_COUNTRY_COLLECTION", "country_sales")
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -25,7 +24,7 @@ def cors_headers():
     return {
         "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, x-admin-key",
+        "Access-Control-Allow-Headers": "Content-Type",
         "Content-Type": "application/json",
     }
 
@@ -83,12 +82,6 @@ def get_la_month_year(date_value):
     return dt_la.month, dt_la.year
 
 
-def validate_admin_key(request):
-    if not ADMIN_KEY:
-        return
-    incoming = request.headers.get("x-admin-key", "")
-    if incoming != ADMIN_KEY:
-        raise PermissionError("Unauthorized")
 
 
 def fetch_report_payload(marketplace, report_req_id, timeout_sec=180):
@@ -428,7 +421,6 @@ def UpdateSkuSalesMonth(request):
         return json_response({"error": "Method not allowed"}, 405)
 
     try:
-        validate_admin_key(request)
         body = request.get_json(silent=True) or {}
 
         start_date = body.get("startDate")

@@ -12,7 +12,6 @@ POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_SKU_COLLECTION = os.environ.get("POCKETBASE_SKU_COLLECTION", "sku_sales")
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -46,20 +45,13 @@ def cors_headers():
     return {
         "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, x-admin-key",
+        "Access-Control-Allow-Headers": "Content-Type",
         "Content-Type": "application/json",
     }
 
 
 def json_response(body, status=200):
     return json.dumps(body), status, cors_headers()
-
-
-def validate_admin_key(request):
-    if not ADMIN_KEY:
-        return
-    if request.headers.get("x-admin-key", "") != ADMIN_KEY:
-        raise PermissionError("Unauthorized")
 
 
 _mapping_cache = None
@@ -218,7 +210,6 @@ def GetSalesDepartmentReport(request):
         return json_response({"error": "Method not allowed"}, 405)
 
     try:
-        validate_admin_key(request)
         body = request.get_json(silent=True) or {}
 
         selected_marketplaces = body.get("marketplaces")
