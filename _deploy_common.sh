@@ -59,6 +59,11 @@ run_deploy() {
     timeout_flag=(--timeout="${TIMEOUT_SECONDS}s")
   fi
 
+  local service_account_flag=()
+  if [[ -n "${SERVICE_ACCOUNT:-}" ]]; then
+    service_account_flag=(--service-account="$SERVICE_ACCOUNT")
+  fi
+
   # a plain (non-secret) env var with the same name as a secret we're about to
   # set blocks the deploy, so drop any leftover plain vars from earlier deploys
   local remove_env_vars_flag=()
@@ -95,6 +100,7 @@ run_deploy() {
     --trigger-http \
     --allow-unauthenticated \
     "${remove_env_vars_flag[@]}" \
+    "${service_account_flag[@]}" \
     --set-secrets="$secrets_flag"
 
   echo "Deployment completed."

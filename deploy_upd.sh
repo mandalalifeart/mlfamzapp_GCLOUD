@@ -12,6 +12,7 @@ SOURCE_DIR="."
 ENV_FILE=".env"
 GEN2=true
 FORCE_PUSH=false
+SERVICE_ACCOUNT="mlfamzapp@appspot.gserviceaccount.com"
 COMMIT_MSG="${1:-UpdateLogic}"
 
 required_vars=(
