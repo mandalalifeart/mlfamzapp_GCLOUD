@@ -59,6 +59,25 @@ run_deploy() {
     timeout_flag=(--timeout="${TIMEOUT_SECONDS}s")
   fi
 
+  # a plain (non-secret) env var with the same name as a secret we're about to
+  # set blocks the deploy, so drop any leftover plain vars from earlier deploys
+  local remove_env_vars_flag=()
+  local existing_env_vars
+  existing_env_vars="$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" \
+    --format="value(serviceConfig.environmentVariables.keys())" 2>/dev/null || true)"
+  if [[ -n "$existing_env_vars" ]]; then
+    local overlap=""
+    for var in "${required_vars[@]}"; do
+      if [[ ";${existing_env_vars//,/;};" == *";${var};"* ]]; then
+        overlap+="${var},"
+      fi
+    done
+    overlap="${overlap%,}"
+    if [[ -n "$overlap" ]]; then
+      remove_env_vars_flag=(--remove-env-vars="$overlap")
+    fi
+  fi
+
   gcloud functions deploy "$FUNCTION_NAME" \
     "${gen2_flag[@]}" \
     "${timeout_flag[@]}" \
@@ -68,6 +87,7 @@ run_deploy() {
     --entry-point="$ENTRY_POINT" \
     --trigger-http \
     --allow-unauthenticated \
+    "${remove_env_vars_flag[@]}" \
     --set-secrets="$secrets_flag"
 
   echo "Deployment completed."
