@@ -62,13 +62,20 @@ run_deploy() {
   # a plain (non-secret) env var with the same name as a secret we're about to
   # set blocks the deploy, so drop any leftover plain vars from earlier deploys
   local remove_env_vars_flag=()
-  local existing_env_vars
-  existing_env_vars="$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" \
-    --format="value(serviceConfig.environmentVariables.keys())" 2>/dev/null || true)"
-  if [[ -n "$existing_env_vars" ]]; then
+  local env_path="environmentVariables"
+  local describe_gen2_flag=()
+  if [[ "$GEN2" == "true" ]]; then
+    env_path="serviceConfig.environmentVariables"
+    describe_gen2_flag=(--gen2)
+  fi
+  local existing_keys
+  existing_keys="$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" \
+    "${describe_gen2_flag[@]}" --format="flattened(${env_path})" 2>/dev/null \
+    | sed -n "s/^${env_path//./\\.}\.\([A-Za-z0-9_]*\):.*/\1/p")"
+  if [[ -n "$existing_keys" ]]; then
     local overlap=""
     for var in "${required_vars[@]}"; do
-      if [[ ";${existing_env_vars//,/;};" == *";${var};"* ]]; then
+      if grep -qx "$var" <<<"$existing_keys"; then
         overlap+="${var},"
       fi
     done
