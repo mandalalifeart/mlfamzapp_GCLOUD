@@ -54,8 +54,14 @@ run_deploy() {
     gen2_flag=(--gen2)
   fi
 
+  local timeout_flag=()
+  if [[ -n "${TIMEOUT_SECONDS:-}" ]]; then
+    timeout_flag=(--timeout="${TIMEOUT_SECONDS}s")
+  fi
+
   gcloud functions deploy "$FUNCTION_NAME" \
     "${gen2_flag[@]}" \
+    "${timeout_flag[@]}" \
     --runtime="$RUNTIME" \
     --region="$REGION" \
     --source="$SOURCE_DIR" \

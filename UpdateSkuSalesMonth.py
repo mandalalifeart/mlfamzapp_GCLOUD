@@ -5,19 +5,17 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
-import pymysql
 import requests
 
 from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
-MARIADB_HOST = os.environ["MARIADB_HOST"]
-MARIADB_PORT = int(os.environ.get("MARIADB_PORT", "3306"))
-MARIADB_USER = os.environ["MARIADB_USER"]
-MARIADB_PASSWORD = os.environ["MARIADB_PASSWORD"]
-MARIADB_DATABASE = os.environ.get("MARIADB_DATABASE", "bababot")
-MARIADB_TABLE = os.environ.get("MARIADB_TABLE", "SKU_SALES")
-MARIADB_COUNTRY_TABLE = os.environ.get("MARIADB_COUNTRY_TABLE", "COUNTRY_SALES")
+POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
+POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
+POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
+POCKETBASE_SKU_COLLECTION = os.environ.get("POCKETBASE_SKU_COLLECTION", "sku_sales")
+POCKETBASE_COUNTRY_COLLECTION = os.environ.get("POCKETBASE_COUNTRY_COLLECTION", "country_sales")
+POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 LA_TZ = ZoneInfo("America/Los_Angeles")
@@ -296,81 +294,131 @@ def collect_report_ids_from_body(body):
     return report_ids
 
 
-def get_db_connection():
-    return pymysql.connect(
-        host=MARIADB_HOST,
-        port=MARIADB_PORT,
-        user=MARIADB_USER,
-        password=MARIADB_PASSWORD,
-        database=MARIADB_DATABASE,
-        autocommit=False,
+def pb_authenticate():
+    response = requests.post(
+        f"{POCKETBASE_URL}/api/collections/_superusers/auth-with-password",
+        json={"identity": POCKETBASE_ADMIN_EMAIL, "password": POCKETBASE_ADMIN_PASSWORD},
+        timeout=30,
     )
+    if response.status_code != 200:
+        raise RuntimeError(f"PocketBase auth failed: HTTP {response.status_code} - {response.text}")
+    token = response.json().get("token")
+    if not token:
+        raise RuntimeError("PocketBase auth response missing token")
+    return token
 
 
-def delete_month_rows(cursor, table, month, year):
-    cursor.execute(
-        f"DELETE FROM `{table}` WHERE MONTH = %s AND YEAR = %s",
-        (month, year),
+def pb_list_ids(token, collection, month, year):
+    ids = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{collection}/records",
+            headers={"Authorization": token},
+            params={
+                "filter": f"(month={month}&&year={year})",
+                "fields": "id",
+                "perPage": 200,
+                "page": page,
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"PocketBase list failed for {collection}: HTTP {response.status_code} - {response.text}"
+            )
+        data = response.json()
+        ids.extend(item["id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return ids
+
+
+def pb_batch(token, batch_requests):
+    if not batch_requests:
+        return
+    response = requests.post(
+        f"{POCKETBASE_URL}/api/batch",
+        headers={"Authorization": token},
+        json={"requests": batch_requests},
+        timeout=60,
     )
-    return cursor.rowcount
+    if response.status_code != 200:
+        raise RuntimeError(f"PocketBase batch request failed: HTTP {response.status_code} - {response.text}")
+    for entry, result in zip(batch_requests, response.json()):
+        status = result.get("status")
+        if status is None or status >= 400:
+            raise RuntimeError(
+                f"PocketBase batch item failed ({entry['method']} {entry['url']}): {result.get('body')}"
+            )
 
 
-def insert_sku_rows(cursor, rows, chunk_size=1000):
-    if not rows:
-        return 0
-
-    insert_sql = (
-        f"INSERT INTO `{MARIADB_TABLE}` (SKU, MARKETPLACE, MONTH, YEAR, QUANTITY) "
-        "VALUES (%s, %s, %s, %s, %s)"
-    )
-    inserted_total = 0
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i + chunk_size]
-        values = [
-            (row["SKU"], row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"])
-            for row in chunk
-        ]
-        cursor.executemany(insert_sql, values)
-        inserted_total += cursor.rowcount
-    return inserted_total
+def sku_row_to_body(row):
+    return {
+        "sku": row["SKU"],
+        "marketplace": row["MARKETPLACE"],
+        "month": row["MONTH"],
+        "year": row["YEAR"],
+        "quantity": row["QUANTITY"],
+    }
 
 
-def insert_country_rows(cursor, rows):
-    if not rows:
-        return 0
-
-    insert_sql = (
-        f"INSERT INTO `{MARIADB_COUNTRY_TABLE}` (MARKETPLACE, MONTH, YEAR, QUANTITY, AMOUNT) "
-        "VALUES (%s, %s, %s, %s, %s)"
-    )
-    values = [
-        (row["MARKETPLACE"], row["MONTH"], row["YEAR"], row["QUANTITY"], row["AMOUNT"])
-        for row in rows
-    ]
-    cursor.executemany(insert_sql, values)
-    return cursor.rowcount
+def country_row_to_body(row):
+    return {
+        "marketplace": row["MARKETPLACE"],
+        "month": row["MONTH"],
+        "year": row["YEAR"],
+        "quantity": row["QUANTITY"],
+        "amount": row["AMOUNT"],
+    }
 
 
 def write_month_data(db_rows, country_rows, month, year):
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            deleted_sku = delete_month_rows(cursor, MARIADB_TABLE, month, year)
-            inserted_sku = insert_sku_rows(cursor, db_rows)
-            deleted_country = delete_month_rows(cursor, MARIADB_COUNTRY_TABLE, month, year)
-            inserted_country = insert_country_rows(cursor, country_rows)
-        conn.commit()
-        return {
-            "deletedRows": deleted_sku,
-            "insertedRows": inserted_sku,
-            "deletedCountryRows": deleted_country,
-            "insertedCountryRows": inserted_country,
-        }
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    token = pb_authenticate()
+
+    existing_sku_ids = pb_list_ids(token, POCKETBASE_SKU_COLLECTION, month, year)
+    existing_country_ids = pb_list_ids(token, POCKETBASE_COUNTRY_COLLECTION, month, year)
+
+    ops = (
+        [
+            {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_SKU_COLLECTION}/records/{rid}"}
+            for rid in existing_sku_ids
+        ]
+        + [
+            {
+                "method": "POST",
+                "url": f"/api/collections/{POCKETBASE_SKU_COLLECTION}/records",
+                "body": sku_row_to_body(row),
+            }
+            for row in db_rows
+        ]
+        + [
+            {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_COUNTRY_COLLECTION}/records/{rid}"}
+            for rid in existing_country_ids
+        ]
+        + [
+            {
+                "method": "POST",
+                "url": f"/api/collections/{POCKETBASE_COUNTRY_COLLECTION}/records",
+                "body": country_row_to_body(row),
+            }
+            for row in country_rows
+        ]
+    )
+
+    # Each /api/batch call is one PocketBase transaction; chunking keeps requests under
+    # the server's max batch size, so atomicity holds within a chunk but not across the
+    # whole month once the row count exceeds POCKETBASE_BATCH_SIZE.
+    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+        pb_batch(token, ops[i:i + POCKETBASE_BATCH_SIZE])
+
+    return {
+        "deletedRows": len(existing_sku_ids),
+        "insertedRows": len(db_rows),
+        "deletedCountryRows": len(existing_country_ids),
+        "insertedCountryRows": len(country_rows),
+    }
 
 
 def UpdateSkuSalesMonth(request):
