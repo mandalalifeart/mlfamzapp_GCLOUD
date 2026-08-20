@@ -1,36 +1,13 @@
-import csv
 import json
 import os
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
 import requests
 
 from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
-
-MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
-
-_sku_to_asin_cache = None
-
-
-def load_sku_to_asin():
-    global _sku_to_asin_cache
-    if _sku_to_asin_cache is not None:
-        return _sku_to_asin_cache
-
-    sku_to_asin = {}
-    with open(MAPPING_CSV_PATH, newline="") as f:
-        for row in csv.DictReader(f):
-            sku = (row.get("SKU") or "").strip()
-            asin = (row.get("ASIN") or "").strip()
-            if sku and asin:
-                sku_to_asin[sku] = asin
-
-    _sku_to_asin_cache = sku_to_asin
-    return _sku_to_asin_cache
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
@@ -157,6 +134,8 @@ def parse_orders_from_xml(xml_payload):
                 continue
             sku = extract_amzn_gr_value(sku)
 
+            asin = safe_strip(order_item.findtext("ASIN"))
+
             qty_raw = safe_strip(order_item.findtext("Quantity"))
             try:
                 qty = int(float(qty_raw)) if qty_raw else 0
@@ -176,6 +155,7 @@ def parse_orders_from_xml(xml_payload):
 
             rows.append({
                 "sku": sku,
+                "asin": asin,
                 "qty": qty,
                 "amount": amount,
                 "sales_channel": sales_channel.lower(),
@@ -186,14 +166,13 @@ def parse_orders_from_xml(xml_payload):
 
 def build_db_rows(order_rows, month, year):
     totals = {}
-    sku_to_asin = load_sku_to_asin()
 
-    def add_row(sku, marketplace_code, qty, amount):
+    def add_row(sku, asin, marketplace_code, qty, amount):
         key = (sku, marketplace_code, month, year)
         if key not in totals:
             totals[key] = {
                 "SKU": sku,
-                "ASIN": sku_to_asin.get(sku, ""),
+                "ASIN": asin,
                 "MARKETPLACE": marketplace_code,
                 "MONTH": month,
                 "YEAR": year,
@@ -210,12 +189,17 @@ def build_db_rows(order_rows, month, year):
 
         qty = int(row["qty"])
         amount = float(row.get("amount", 0.0))
-        add_row(row["sku"], marketplace_code, qty, amount)
+        asin = row.get("asin", "")
+        add_row(row["sku"], asin, marketplace_code, qty, amount)
 
         if marketplace_code in EU_MARKETPLACES:
-            add_row(row["sku"], "eu", qty, amount)
+            add_row(row["sku"], asin, "eu", qty, amount)
 
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
+
+
+def find_missing_asin_skus(db_rows):
+    return sorted({row["SKU"] for row in db_rows if not row.get("ASIN")})
 
 
 def build_country_rows(db_rows, month, year):
@@ -496,6 +480,12 @@ def UpdateSkuSalesMonth(request):
 
         db_rows = build_db_rows(order_rows, start_month, start_year)
         country_rows = build_country_rows(db_rows, start_month, start_year)
+        missing_asin_skus = find_missing_asin_skus(db_rows)
+        asin_warning = (
+            f"{len(missing_asin_skus)} SKU(s) written with empty ASIN: {', '.join(missing_asin_skus)}"
+            if missing_asin_skus
+            else ""
+        )
 
         if dry_run:
             return json_response(
@@ -510,6 +500,8 @@ def UpdateSkuSalesMonth(request):
                     "aggregatedByMarketplace": build_dry_run_summary(db_rows),
                     "preview": db_rows[:100],
                     "countryPreview": country_rows,
+                    "asinWarning": asin_warning,
+                    "missingAsinSkus": missing_asin_skus,
                 },
                 200,
             )
@@ -525,6 +517,8 @@ def UpdateSkuSalesMonth(request):
                 "dbRowsCount": len(db_rows),
                 "countryRowsCount": len(country_rows),
                 "reports": fetched_reports,
+                "asinWarning": asin_warning,
+                "missingAsinSkus": missing_asin_skus,
                 **write_result,
             },
             200,
