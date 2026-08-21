@@ -12,6 +12,11 @@ def GetSalesDepartmentReport(request):
     from GetSalesDepartmentReport import GetSalesDepartmentReport as _impl
     return _impl(request)
 
+
+def GetMarketplaceSalesSummary(request):
+    from GetMarketplaceSalesSummary import GetMarketplaceSalesSummary as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
