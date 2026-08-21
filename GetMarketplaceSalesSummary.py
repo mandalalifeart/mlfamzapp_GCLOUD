@@ -189,16 +189,23 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         currency = MARKETPLACE_CURRENCY.get(marketplace, "USD")
         sales_year_months_by_currency[currency][year][month - 1] += rec.get("sales") or 0
 
-    # Convert every currency bucket into USD so marketplaces can be blended
-    # into one total - a live rate is fetched per request rather than stored,
-    # since this is a display-time conversion, not a historical record.
-    usd_rates = fetch_usd_rates(sales_year_months_by_currency.keys())
-    sales_year_months_usd = defaultdict(lambda: [0.0] * 12)
-    for currency, year_months in sales_year_months_by_currency.items():
-        rate = 1.0 if currency == "USD" else usd_rates.get(currency)
-        for year, months in year_months.items():
-            for i, value in enumerate(months):
-                sales_year_months_usd[year][i] += (value / rate) if rate else value
+    # A single-currency selection (one marketplace, or several that share a
+    # currency) is shown in that native currency - only a genuinely mixed
+    # selection (e.g. "All marketplaces") gets blended into one USD total, so
+    # picking DE shows EUR, UK shows GBP, and USA/"All" show USD.
+    present_currencies = list(sales_year_months_by_currency.keys())
+    if len(present_currencies) <= 1:
+        sales_currency = present_currencies[0] if present_currencies else "USD"
+        sales_year_months_final = sales_year_months_by_currency.get(sales_currency, defaultdict(lambda: [0.0] * 12))
+    else:
+        sales_currency = "USD"
+        usd_rates = fetch_usd_rates(present_currencies)
+        sales_year_months_final = defaultdict(lambda: [0.0] * 12)
+        for currency, year_months in sales_year_months_by_currency.items():
+            rate = 1.0 if currency == "USD" else usd_rates.get(currency)
+            for year, months in year_months.items():
+                for i, value in enumerate(months):
+                    sales_year_months_final[year][i] += (value / rate) if rate else value
 
     # Comparing a full prior year against a current year that's still in progress
     # skews the % low, so growth is measured only over the months already
@@ -224,7 +231,8 @@ def build_summary(records, atomic_marketplaces, years, current_month):
 
     return {
         "quantity": make_metric(quantity_year_months),
-        "sales": make_metric(sales_year_months_usd, round_decimals=2),
+        "sales": make_metric(sales_year_months_final, round_decimals=2),
+        "salesCurrency": sales_currency,
     }
 
 
@@ -259,7 +267,7 @@ def GetMarketplaceSalesSummary(request):
             "marketplaces": selected_marketplaces or ALL_UI_MARKETPLACES,
             "quantity": summary["quantity"],
             "sales": summary["sales"],
-            "salesCurrency": "USD",
+            "salesCurrency": summary["salesCurrency"],
         })
 
     except PermissionError as exc:
