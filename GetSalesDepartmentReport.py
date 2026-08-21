@@ -142,11 +142,12 @@ def fetch_sku_sales(token, min_year, atomic_marketplaces):
     return records
 
 
-def build_report(records, mapping, atomic_marketplaces, years):
+def build_report(records, mapping, atomic_marketplaces, years, current_month):
     asin_to_main_sku = mapping["asin_to_main_sku"]
     asin_to_group = mapping["asin_to_group"]
 
     asin_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
+    group_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
     unmapped_totals = defaultdict(int)
 
     for rec in records:
@@ -170,14 +171,23 @@ def build_report(records, mapping, atomic_marketplaces, years):
             continue
         asin_year_months[asin][year][month - 1] += qty
 
+    # Comparing a full prior year against a current year that's still in progress
+    # skews the % low (it's missing months that haven't happened yet), so growth
+    # is measured only over the months already completed this year.
+    completed_months = max(current_month - 1, 0)
+
     def make_item(asin, year_months):
         year_rows = [
             {"year": year, "months": year_months.get(year, [0] * 12), "total": sum(year_months.get(year, [0] * 12))}
             for year in years
         ]
-        this_year_total = year_rows[0]["total"]
-        last_year_total = year_rows[1]["total"] if len(year_rows) > 1 else 0
-        growth_pct = round((this_year_total - last_year_total) / last_year_total * 100, 1) if last_year_total > 0 else None
+        this_year_partial = sum(year_rows[0]["months"][:completed_months])
+        last_year_partial = sum(year_rows[1]["months"][:completed_months]) if len(year_rows) > 1 else 0
+        growth_pct = (
+            round((this_year_partial - last_year_partial) / last_year_partial * 100, 1)
+            if last_year_partial > 0
+            else None
+        )
         return {
             "asin": asin,
             "mainSku": asin_to_main_sku.get(asin, ""),
@@ -191,6 +201,12 @@ def build_report(records, mapping, atomic_marketplaces, years):
         group = asin_to_group.get(asin, "UNGROUPED")
         groups[group].append(make_item(asin, year_months))
         covered_asins.add(asin)
+        for year, months in year_months.items():
+            if year not in years:
+                continue
+            acc = group_year_months[group][year]
+            for i, qty in enumerate(months):
+                acc[i] += qty
 
     # Include catalog ASINs with zero sales in this window too, so groups show the full lineup.
     for asin, group in asin_to_group.items():
@@ -201,9 +217,12 @@ def build_report(records, mapping, atomic_marketplaces, years):
     group_list = []
     for group, items in groups.items():
         items.sort(key=lambda item: item["years"][0]["total"], reverse=True)
+        group_summary = make_item(None, group_year_months.get(group, {}))
         group_list.append({
             "group": group,
             "totalThisYear": sum(item["years"][0]["total"] for item in items),
+            "yearRows": group_summary["years"],
+            "growthPct": group_summary["growthPct"],
             "items": items,
         })
     group_list.sort(key=lambda g: (g["group"] == LAST_GROUP, -g["totalThisYear"]))
@@ -231,17 +250,20 @@ def GetSalesDepartmentReport(request):
 
         atomic_marketplaces = expand_marketplaces(selected_marketplaces)
 
-        current_year = datetime.now(LA_TZ).year
+        now = datetime.now(LA_TZ)
+        current_year = now.year
+        current_month = now.month
         years = [current_year, current_year - 1, current_year - 2, current_year - 3]
 
         mapping = load_mapping()
         token = pb_authenticate()
         records = fetch_sku_sales(token, min_year=years[-1], atomic_marketplaces=atomic_marketplaces)
-        groups, unmapped = build_report(records, mapping, atomic_marketplaces, years)
+        groups, unmapped = build_report(records, mapping, atomic_marketplaces, years, current_month)
 
         return json_response({
             "status": "success",
             "years": years,
+            "currentMonth": current_month,
             "marketplaces": selected_marketplaces or ALL_UI_MARKETPLACES,
             "groups": groups,
             "unmapped": unmapped,
