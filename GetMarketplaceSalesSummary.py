@@ -54,9 +54,16 @@ def json_response(body, status=200):
 
 def expand_marketplaces(selected):
     codes = selected if selected else ALL_UI_MARKETPLACES
+    normalized = [str(code).strip().lower() for code in codes]
+
     atomic = set()
-    for code in codes:
-        atomic |= UI_MARKETPLACE_TO_ATOMIC.get(str(code).strip().lower(), set())
+    for code in normalized:
+        # "eu" is only meaningful as its own deliberate selection - folded into
+        # an "all marketplaces" or multi-code request it would double-count
+        # against the individual EU countries, which are tracked separately.
+        if code == "eu" and normalized != ["eu"]:
+            continue
+        atomic |= UI_MARKETPLACE_TO_ATOMIC.get(code, set())
     return atomic
 
 

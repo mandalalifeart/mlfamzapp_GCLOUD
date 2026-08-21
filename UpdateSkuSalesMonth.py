@@ -364,7 +364,6 @@ def sku_row_to_body(row):
         "month": row["MONTH"],
         "year": row["YEAR"],
         "quantity": row["QUANTITY"],
-        "sales": round(row.get("AMOUNT", 0.0), 2),
     }
 
 
