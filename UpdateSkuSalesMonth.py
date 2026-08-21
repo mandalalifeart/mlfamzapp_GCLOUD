@@ -9,6 +9,42 @@ import requests
 
 from MlfReport import DB_MARKETPLACE_MAP, EU_MARKETPLACES
 
+# EU_MARKETPLACES includes se (SEK) and pl (PLN) alongside the eurozone
+# countries - their amounts must be converted to EUR before being folded into
+# the combined "eu" row below, or that total silently mixes currencies.
+EU_MARKETPLACE_CURRENCY = {
+    "de": "EUR", "fr": "EUR", "it": "EUR", "es": "EUR",
+    "nl": "EUR", "be": "EUR", "ie": "EUR",
+    "se": "SEK", "pl": "PLN",
+}
+
+FX_API_URL = "https://api.frankfurter.app"
+# Only used if the historical FX API call fails, so a month can still be
+# processed instead of erroring out - approximate rates, not kept precise.
+FALLBACK_EUR_RATES = {"SEK": 0.088, "PLN": 0.23}
+_fx_to_eur_cache = {}
+
+
+def get_fx_rate_to_eur(currency, month, year):
+    if currency == "EUR":
+        return 1.0
+    key = (currency, month, year)
+    if key in _fx_to_eur_cache:
+        return _fx_to_eur_cache[key]
+
+    date_str = f"{year:04d}-{month:02d}-01"
+    try:
+        response = requests.get(
+            f"{FX_API_URL}/{date_str}", params={"from": currency, "to": "EUR"}, timeout=15
+        )
+        response.raise_for_status()
+        rate = response.json()["rates"]["EUR"]
+    except Exception:
+        rate = FALLBACK_EUR_RATES.get(currency, 1.0)
+
+    _fx_to_eur_cache[key] = rate
+    return rate
+
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
@@ -199,7 +235,9 @@ def build_db_rows(order_rows, month, year):
         add_row(row["sku"], asin, marketplace_code, qty, amount)
 
         if marketplace_code in EU_MARKETPLACES:
-            add_row(row["sku"], asin, "eu", qty, amount)
+            currency = EU_MARKETPLACE_CURRENCY.get(marketplace_code, "EUR")
+            rate_to_eur = get_fx_rate_to_eur(currency, month, year)
+            add_row(row["sku"], asin, "eu", qty, amount * rate_to_eur)
 
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
 

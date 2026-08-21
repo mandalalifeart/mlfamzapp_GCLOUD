@@ -39,14 +39,12 @@ UI_MARKETPLACE_TO_ATOMIC = {
 ALL_UI_MARKETPLACES = ["usa", "eu", "uk", "de", "fr", "es", "it", "se", "nl", "be", "ie", "pl", "jp", "au"]
 
 # Each marketplace's `sales` figure is in that marketplace's own local
-# transaction currency (never converted) - summing raw sales across
-# marketplaces only makes sense within one currency. "eu" is a preexisting
-# exception: the ingest pipeline (UpdateSkuSalesMonth) writes it as a single
-# combined row across all 9 EU_MARKETPLACES, which include se (SEK) and pl
-# (PLN) alongside the eurozone countries - those amounts are already mixed
-# together at the source and can't be split back out after the fact, so the
-# "eu" bucket is labeled EUR (its dominant currency) knowing it may include a
-# small non-EUR share.
+# transaction currency (never converted at write time) - summing raw sales
+# across marketplaces only makes sense within one currency. "eu" is a
+# preexisting exception: the ingest pipeline (UpdateSkuSalesMonth) writes it
+# as a single combined row across all 9 EU_MARKETPLACES, which include se
+# (SEK) and pl (PLN) alongside the eurozone countries - those get converted
+# to EUR at write time there, so the "eu" bucket read here is genuinely EUR.
 MARKETPLACE_CURRENCY = {
     "usa": "USD",
     "uk": "GBP",
@@ -63,6 +61,34 @@ MARKETPLACE_CURRENCY = {
     "au": "AUD",
     "eu": "EUR",
 }
+
+FX_API_URL = "https://api.frankfurter.app/latest"
+# Only used if the live FX API call fails, so the summary still renders
+# (roughly) instead of erroring out - approximate rates, not kept precise.
+FALLBACK_USD_RATES = {
+    "EUR": 0.92,
+    "GBP": 0.79,
+    "SEK": 10.5,
+    "PLN": 4.0,
+    "JPY": 150.0,
+    "AUD": 1.52,
+}
+
+
+def fetch_usd_rates(currencies):
+    """1 USD = <rate> <currency>, for each non-USD currency actually present in the data."""
+    needed = sorted(c for c in currencies if c != "USD")
+    if not needed:
+        return {}
+    try:
+        response = requests.get(
+            FX_API_URL, params={"from": "USD", "to": ",".join(needed)}, timeout=10
+        )
+        response.raise_for_status()
+        rates = response.json().get("rates", {})
+        return {c: rates[c] for c in needed if c in rates}
+    except Exception:
+        return {c: FALLBACK_USD_RATES[c] for c in needed if c in FALLBACK_USD_RATES}
 
 
 def cors_headers():
@@ -163,6 +189,17 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         currency = MARKETPLACE_CURRENCY.get(marketplace, "USD")
         sales_year_months_by_currency[currency][year][month - 1] += rec.get("sales") or 0
 
+    # Convert every currency bucket into USD so marketplaces can be blended
+    # into one total - a live rate is fetched per request rather than stored,
+    # since this is a display-time conversion, not a historical record.
+    usd_rates = fetch_usd_rates(sales_year_months_by_currency.keys())
+    sales_year_months_usd = defaultdict(lambda: [0.0] * 12)
+    for currency, year_months in sales_year_months_by_currency.items():
+        rate = 1.0 if currency == "USD" else usd_rates.get(currency)
+        for year, months in year_months.items():
+            for i, value in enumerate(months):
+                sales_year_months_usd[year][i] += (value / rate) if rate else value
+
     # Comparing a full prior year against a current year that's still in progress
     # skews the % low, so growth is measured only over the months already
     # completed this year - same rule GetSalesDepartmentReport.py uses.
@@ -187,10 +224,7 @@ def build_summary(records, atomic_marketplaces, years, current_month):
 
     return {
         "quantity": make_metric(quantity_year_months),
-        "salesByCurrency": {
-            currency: make_metric(year_months, round_decimals=2)
-            for currency, year_months in sales_year_months_by_currency.items()
-        },
+        "sales": make_metric(sales_year_months_usd, round_decimals=2),
     }
 
 
@@ -224,7 +258,8 @@ def GetMarketplaceSalesSummary(request):
             "currentMonth": current_month,
             "marketplaces": selected_marketplaces or ALL_UI_MARKETPLACES,
             "quantity": summary["quantity"],
-            "salesByCurrency": summary["salesByCurrency"],
+            "sales": summary["sales"],
+            "salesCurrency": "USD",
         })
 
     except PermissionError as exc:
