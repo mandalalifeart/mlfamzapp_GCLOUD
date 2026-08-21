@@ -145,13 +145,19 @@ def parse_orders_from_xml(xml_payload):
             if qty <= 0:
                 continue
 
-            amount_raw = safe_strip(order_item.findtext("ItemPrice")) or safe_strip(
-                order_item.findtext("ItemPrice/Amount")
-            )
-            try:
-                amount = float(amount_raw) if amount_raw else 0.0
-            except ValueError:
-                amount = 0.0
+            # ItemPrice isn't a flat <Amount> - it's a list of <Component> entries
+            # (Principal/Shipping/Tax/ShippingTax etc). "Sales" here means the
+            # item's own sale price, so only the Principal component(s) count -
+            # shipping and tax are deliberately excluded.
+            amount = 0.0
+            for component in order_item.findall("ItemPrice/Component"):
+                if safe_strip(component.findtext("Type")) != "Principal":
+                    continue
+                amount_raw = safe_strip(component.findtext("Amount"))
+                try:
+                    amount += float(amount_raw) if amount_raw else 0.0
+                except ValueError:
+                    pass
 
             rows.append({
                 "sku": sku,
