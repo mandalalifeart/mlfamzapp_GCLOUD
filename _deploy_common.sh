@@ -76,7 +76,7 @@ run_deploy() {
   local existing_keys
   existing_keys="$(gcloud functions describe "$FUNCTION_NAME" --region="$REGION" \
     "${describe_gen2_flag[@]}" --format="flattened(${env_path})" 2>/dev/null \
-    | sed -n "s/^${env_path//./\\.}\.\([A-Za-z0-9_]*\):.*/\1/p")"
+    | sed -n "s/^${env_path//./\\.}\.\([A-Za-z0-9_]*\):.*/\1/p" || true)"
   if [[ -n "$existing_keys" ]]; then
     local overlap=""
     for var in "${required_vars[@]}"; do
