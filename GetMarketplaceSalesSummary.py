@@ -38,6 +38,32 @@ UI_MARKETPLACE_TO_ATOMIC = {
 }
 ALL_UI_MARKETPLACES = ["usa", "eu", "uk", "de", "fr", "es", "it", "se", "nl", "be", "ie", "pl", "jp", "au"]
 
+# Each marketplace's `sales` figure is in that marketplace's own local
+# transaction currency (never converted) - summing raw sales across
+# marketplaces only makes sense within one currency. "eu" is a preexisting
+# exception: the ingest pipeline (UpdateSkuSalesMonth) writes it as a single
+# combined row across all 9 EU_MARKETPLACES, which include se (SEK) and pl
+# (PLN) alongside the eurozone countries - those amounts are already mixed
+# together at the source and can't be split back out after the fact, so the
+# "eu" bucket is labeled EUR (its dominant currency) knowing it may include a
+# small non-EUR share.
+MARKETPLACE_CURRENCY = {
+    "usa": "USD",
+    "uk": "GBP",
+    "de": "EUR",
+    "fr": "EUR",
+    "es": "EUR",
+    "it": "EUR",
+    "nl": "EUR",
+    "be": "EUR",
+    "ie": "EUR",
+    "se": "SEK",
+    "pl": "PLN",
+    "jp": "JPY",
+    "au": "AUD",
+    "eu": "EUR",
+}
+
 
 def cors_headers():
     return {
@@ -118,10 +144,14 @@ def fetch_country_sales(token, min_year, atomic_marketplaces):
 
 def build_summary(records, atomic_marketplaces, years, current_month):
     quantity_year_months = defaultdict(lambda: [0] * 12)
-    sales_year_months = defaultdict(lambda: [0.0] * 12)
+    # Sales are kept in separate buckets per currency rather than one blind
+    # sum - a USD total and a EUR total are not the same number and adding
+    # them together would be meaningless.
+    sales_year_months_by_currency = defaultdict(lambda: defaultdict(lambda: [0.0] * 12))
 
     for rec in records:
-        if rec.get("marketplace") not in atomic_marketplaces:
+        marketplace = rec.get("marketplace")
+        if marketplace not in atomic_marketplaces:
             continue
         year = int(rec.get("year") or 0)
         if year not in years:
@@ -130,7 +160,8 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         if not 1 <= month <= 12:
             continue
         quantity_year_months[year][month - 1] += rec.get("quantity") or 0
-        sales_year_months[year][month - 1] += rec.get("sales") or 0
+        currency = MARKETPLACE_CURRENCY.get(marketplace, "USD")
+        sales_year_months_by_currency[currency][year][month - 1] += rec.get("sales") or 0
 
     # Comparing a full prior year against a current year that's still in progress
     # skews the % low, so growth is measured only over the months already
@@ -156,7 +187,10 @@ def build_summary(records, atomic_marketplaces, years, current_month):
 
     return {
         "quantity": make_metric(quantity_year_months),
-        "sales": make_metric(sales_year_months, round_decimals=2),
+        "salesByCurrency": {
+            currency: make_metric(year_months, round_decimals=2)
+            for currency, year_months in sales_year_months_by_currency.items()
+        },
     }
 
 
@@ -190,7 +224,7 @@ def GetMarketplaceSalesSummary(request):
             "currentMonth": current_month,
             "marketplaces": selected_marketplaces or ALL_UI_MARKETPLACES,
             "quantity": summary["quantity"],
-            "sales": summary["sales"],
+            "salesByCurrency": summary["salesByCurrency"],
         })
 
     except PermissionError as exc:
