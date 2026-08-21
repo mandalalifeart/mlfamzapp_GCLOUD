@@ -15,7 +15,11 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 
 # Same UI-marketplace-to-atomic-marketplace mapping as GetSalesDepartmentReport.py.
 # Kept in sync manually - each Cloud Function file here is deployed independently.
-EU_ATOMIC = {"de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}
+# "eu" is Amazon's own generic EU marketplace code - the ingest pipeline
+# (UpdateSkuSalesMonth) writes it as its own row alongside (not instead of)
+# each individual EU country's row, so it must be read as its own bucket here
+# too rather than re-summed from the individual countries (which would
+# double-count going forward, since the two are written independently).
 UI_MARKETPLACE_TO_ATOMIC = {
     "usa": {"usa"},
     "uk": {"uk"},
@@ -30,7 +34,7 @@ UI_MARKETPLACE_TO_ATOMIC = {
     "be": {"be"},
     "ie": {"ie"},
     "pl": {"pl"},
-    "eu": EU_ATOMIC,
+    "eu": {"eu"},
 }
 ALL_UI_MARKETPLACES = ["usa", "eu", "uk", "de", "fr", "es", "it", "se", "nl", "be", "ie", "pl", "jp", "au"]
 

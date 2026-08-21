@@ -364,6 +364,7 @@ def sku_row_to_body(row):
         "month": row["MONTH"],
         "year": row["YEAR"],
         "quantity": row["QUANTITY"],
+        "sales": round(row.get("AMOUNT", 0.0), 2),
     }
 
 
@@ -373,7 +374,10 @@ def country_row_to_body(row):
         "month": row["MONTH"],
         "year": row["YEAR"],
         "quantity": row["QUANTITY"],
-        "amount": row["AMOUNT"],
+        # PocketBase's country_sales field is named "sales", not "amount" - this
+        # previously sent "amount", a field the collection doesn't have, so
+        # PocketBase silently dropped it and every row's sales stayed at 0.
+        "sales": row["AMOUNT"],
     }
 
 
