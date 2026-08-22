@@ -67,13 +67,23 @@ def load_mapping():
     sku_to_asin = {}
     asin_to_main_sku = {}
     asin_to_group = {}
+    ignored_skus = set()
 
     with open(MAPPING_CSV_PATH, newline="") as f:
         for row in csv.DictReader(f):
             sku = (row.get("SKU") or "").strip()
             asin = (row.get("ASIN") or "").strip()
             group = (row.get("GROUP") or "").strip() or "UNGROUPED"
-            if not sku or not asin:
+            if not sku:
+                continue
+            # IGNORE rows are excluded by SKU alone, before any ASIN lookup -
+            # several of them were entered with a placeholder ASIN (or one
+            # that's since been retired on Amazon), and chasing down the real
+            # ASIN for a SKU we're deliberately excluding isn't worth doing.
+            if group == "IGNORE":
+                ignored_skus.add(sku)
+                continue
+            if not asin:
                 continue
             sku_to_asin[sku] = asin
             asin_to_main_sku.setdefault(asin, sku)
@@ -83,6 +93,7 @@ def load_mapping():
         "sku_to_asin": sku_to_asin,
         "asin_to_main_sku": asin_to_main_sku,
         "asin_to_group": asin_to_group,
+        "ignored_skus": ignored_skus,
     }
     return _mapping_cache
 
@@ -154,6 +165,7 @@ def fetch_sku_sales(token, min_year, atomic_marketplaces):
 def build_report(records, mapping, atomic_marketplaces, years, current_month):
     asin_to_main_sku = mapping["asin_to_main_sku"]
     asin_to_group = mapping["asin_to_group"]
+    ignored_skus = mapping["ignored_skus"]
 
     asin_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
     group_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
@@ -170,6 +182,12 @@ def build_report(records, mapping, atomic_marketplaces, years, current_month):
             continue
         sku = rec.get("sku") or ""
         qty = int(rec.get("quantity") or 0)
+        # SKUs mapped to IGNORE are dropped by SKU alone, before any ASIN
+        # check - they're not counted here at all (their units still count
+        # in the country-level marketplace totals, a separate report), and
+        # they never land in "unmapped" even if their ASIN doesn't match.
+        if sku in ignored_skus:
+            continue
         # Group by the sale's own ASIN field (set from the order data), not by
         # matching its SKU string against the mapping CSV - a product can be sold
         # under multiple SKU spellings (e.g. Pareo5Blue / Pareo5Blue502) that all
