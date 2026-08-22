@@ -1,0 +1,116 @@
+import csv
+import json
+import os
+from collections import defaultdict
+from pathlib import Path
+
+import requests
+
+POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
+POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
+POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
+POCKETBASE_STATS_COLLECTION = os.environ.get("POCKETBASE_STATS_COLLECTION", "sku_statistics")
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
+
+MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
+
+STATS_FIELDS = [
+    "uk_balance", "uk_on_the_way", "uk_next_shipment",
+    "de_balance", "de_on_the_way", "de_next_shipment",
+    "usa_balance", "usa_on_the_way", "usa_next_shipment",
+    "malani_balance", "malani_order", "next_order",
+]
+
+
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Content-Type": "application/json",
+    }
+
+
+def json_response(body, status=200):
+    return json.dumps(body), status, cors_headers()
+
+
+def load_mapping():
+    # Same GROUP/IGNORE handling as GetSalesDepartmentReport.load_mapping -
+    # IGNORE-group SKUs are deliberately excluded products, not candidates to reorder.
+    rows = []
+    with open(MAPPING_CSV_PATH, newline="") as f:
+        for row in csv.DictReader(f):
+            sku = (row.get("SKU") or "").strip()
+            asin = (row.get("ASIN") or "").strip()
+            group = (row.get("GROUP") or "").strip() or "UNGROUPED"
+            if not sku or group == "IGNORE":
+                continue
+            rows.append({"sku": sku, "asin": asin, "group": group})
+    return rows
+
+
+def pb_authenticate():
+    response = requests.post(
+        f"{POCKETBASE_URL}/api/collections/_superusers/auth-with-password",
+        json={"identity": POCKETBASE_ADMIN_EMAIL, "password": POCKETBASE_ADMIN_PASSWORD},
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"PocketBase auth failed: HTTP {response.status_code} - {response.text}")
+    token = response.json().get("token")
+    if not token:
+        raise RuntimeError("PocketBase auth response missing token")
+    return token
+
+
+def fetch_sku_statistics(token):
+    records = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page},
+            timeout=60,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        records.extend(data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return records
+
+
+def GetNextOrderData(request):
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if request.method != "POST":
+        return json_response({"error": "Method not allowed"}, 405)
+
+    try:
+        mapping_rows = load_mapping()
+        token = pb_authenticate()
+        stats_records = fetch_sku_statistics(token)
+        stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
+
+        groups = defaultdict(list)
+        for row in mapping_rows:
+            stats = stats_by_sku.get(row["sku"], {})
+            item = {"sku": row["sku"], "asin": row["asin"]}
+            for field in STATS_FIELDS:
+                item[field] = stats.get(field) or 0
+            groups[row["group"]].append(item)
+
+        group_list = []
+        for group, items in groups.items():
+            items.sort(key=lambda i: i["sku"])
+            group_list.append({"group": group, "items": items})
+        group_list.sort(key=lambda g: g["group"])
+
+        return json_response({"status": "success", "groups": group_list})
+
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

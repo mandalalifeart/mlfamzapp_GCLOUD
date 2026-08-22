@@ -17,6 +17,16 @@ def GetMarketplaceSalesSummary(request):
     from GetMarketplaceSalesSummary import GetMarketplaceSalesSummary as _impl
     return _impl(request)
 
+
+def GetNextOrderData(request):
+    from GetNextOrderData import GetNextOrderData as _impl
+    return _impl(request)
+
+
+def UpdateNextOrderField(request):
+    from UpdateNextOrderField import UpdateNextOrderField as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
