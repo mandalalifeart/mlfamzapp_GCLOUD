@@ -55,6 +55,13 @@ POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
+# 2022-2024 sku_sales/country_sales were backfilled from an authoritative
+# export (SALES_with_ASIN.xlsx / AMAZON.xlsx) on 2026-08-23 - the live
+# request/update pipeline (both the single-month Update page and the
+# Batch Update page, which both funnel writes through this function) must
+# not overwrite those years. 2025 onward stays on the live pipeline as usual.
+LOCKED_YEARS_MAX = 2024
+
 
 def cors_headers():
     return {
@@ -502,6 +509,18 @@ def UpdateSkuSalesMonth(request):
 
         if int(confirm_month or 0) != start_month or int(confirm_year or 0) != start_year:
             return json_response({"error": "Month/year confirmation mismatch"}, 400)
+
+        if not dry_run and start_year <= LOCKED_YEARS_MAX:
+            return json_response(
+                {
+                    "error": (
+                        f"{start_year} is locked - {LOCKED_YEARS_MAX} and earlier were backfilled from an "
+                        f"authoritative export and can't be overwritten by the update pipeline. "
+                        f"Only {LOCKED_YEARS_MAX + 1} and later can be written."
+                    )
+                },
+                403,
+            )
 
         report_ids = collect_report_ids_from_body(body)
         if not report_ids:
