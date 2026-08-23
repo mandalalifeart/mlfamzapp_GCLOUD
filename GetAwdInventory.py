@@ -30,15 +30,16 @@ def GetAwdInventory(request):
     # actually exposes an AWD client before wiring up the real call - the
     # class/module name isn't confirmed yet.
     try:
-        import sp_api.api as sp_api_module
+        from sp_api.api import AmazonWarehousingAndDistribution
 
-        available = sorted(n for n in dir(sp_api_module) if not n.startswith("_"))
-        awd_candidates = [n for n in available if "awd" in n.lower()]
+        methods = sorted(
+            n for n in dir(AmazonWarehousingAndDistribution)
+            if not n.startswith("_") and callable(getattr(AmazonWarehousingAndDistribution, n))
+        )
 
         return json_response({
             "status": "diagnostic",
-            "awd_candidates": awd_candidates,
-            "all_api_classes": available,
+            "methods": methods,
         })
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
