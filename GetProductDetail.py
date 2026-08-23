@@ -145,11 +145,13 @@ def GetProductDetail(request):
         if main_sku:
             stats_record = find_one(token, POCKETBASE_STATS_COLLECTION, f'sku="{pb_escape(main_sku)}"')
 
-        stock = {
-            "usa_balance": (stats_record or {}).get("usa_balance") or 0,
-            "de_balance": (stats_record or {}).get("de_balance") or 0,
-            "uk_balance": (stats_record or {}).get("uk_balance") or 0,
-        }
+        stock_fields = [
+            "uk_balance", "uk_on_the_way", "uk_next_shipment",
+            "de_balance", "de_on_the_way", "de_next_shipment",
+            "usa_balance", "usa_on_the_way", "usa_next_shipment",
+            "malani_balance", "malani_order", "next_order",
+        ]
+        stock = {field: (stats_record or {}).get(field) or 0 for field in stock_fields}
 
         return json_response({
             "status": "success",
