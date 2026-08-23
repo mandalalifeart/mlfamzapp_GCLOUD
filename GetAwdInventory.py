@@ -39,8 +39,18 @@ def GetAwdInventory(request):
             "lwa_client_secret": CLIENT_SECRET_USA,
         }
         client = AmazonWarehousingAndDistribution(credentials=credentials, marketplace=Marketplaces.US)
-        response = client.list_inventory()
 
-        return json_response({"status": "success", "payload": response.payload})
+        inventory = []
+        next_token = None
+        while True:
+            kwargs = {"nextToken": next_token} if next_token else {}
+            response = client.list_inventory(**kwargs)
+            payload = response.payload or {}
+            inventory.extend(payload.get("inventory", []))
+            next_token = payload.get("pagination", {}).get("nextToken")
+            if not next_token:
+                break
+
+        return json_response({"status": "success", "rowCount": len(inventory), "inventory": inventory})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
