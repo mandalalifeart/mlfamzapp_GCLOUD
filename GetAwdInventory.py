@@ -30,24 +30,16 @@ def GetAwdInventory(request):
     # actually exposes an AWD client before wiring up the real call - the
     # class/module name isn't confirmed yet.
     try:
+        import inspect
         from sp_api.api import AmazonWarehousingAndDistribution
-        from sp_api.base import Marketplaces
 
-        credentials = {
-            "refresh_token": REFRESH_TOKEN_USA,
-            "lwa_app_id": CLIENT_ID_USA,
-            "lwa_client_secret": CLIENT_SECRET_USA,
-        }
-        client = AmazonWarehousingAndDistribution(credentials=credentials, marketplace=Marketplaces.US)
-
-        methods = sorted(
-            n for n in dir(client)
-            if not n.startswith("_") and callable(getattr(client, n))
-        )
+        init_source = inspect.getsource(AmazonWarehousingAndDistribution.__init__)
+        class_source = inspect.getsource(AmazonWarehousingAndDistribution)
 
         return json_response({
             "status": "diagnostic",
-            "methods": methods,
+            "init_source": init_source,
+            "class_source_head": class_source[:3000],
         })
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
