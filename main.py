@@ -27,6 +27,11 @@ def UpdateNextOrderField(request):
     from UpdateNextOrderField import UpdateNextOrderField as _impl
     return _impl(request)
 
+
+def GetUkInventory(request):
+    from GetUkInventory import GetUkInventory as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
