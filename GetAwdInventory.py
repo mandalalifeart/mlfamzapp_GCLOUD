@@ -31,15 +31,24 @@ def GetAwdInventory(request):
     # class/module name isn't confirmed yet.
     try:
         import inspect
-        from sp_api.api import AmazonWarehousingAndDistribution
+        from sp_api.api import AmazonWarehousingAndDistributionV20240509 as AWD
 
-        init_source = inspect.getsource(AmazonWarehousingAndDistribution.__init__)
-        class_source = inspect.getsource(AmazonWarehousingAndDistribution)
+        methods = sorted(
+            n for n in vars(AWD)
+            if not n.startswith("_") and callable(getattr(AWD, n))
+        )
+
+        method_sources = {}
+        for name in methods:
+            try:
+                method_sources[name] = inspect.getsource(getattr(AWD, name))[:600]
+            except Exception as exc:
+                method_sources[name] = f"<no source: {exc}>"
 
         return json_response({
             "status": "diagnostic",
-            "init_source": init_source,
-            "class_source_head": class_source[:3000],
+            "methods": methods,
+            "method_sources": method_sources,
         })
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
