@@ -32,6 +32,11 @@ def GetUkInventory(request):
     from GetUkInventory import GetUkInventory as _impl
     return _impl(request)
 
+
+def GetDeInventory(request):
+    from GetDeInventory import GetDeInventory as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
