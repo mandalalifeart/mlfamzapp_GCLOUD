@@ -1,8 +1,6 @@
-import csv
 import json
 import os
 from collections import defaultdict
-from pathlib import Path
 
 import requests
 
@@ -10,9 +8,8 @@ POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_STATS_COLLECTION = os.environ.get("POCKETBASE_STATS_COLLECTION", "sku_statistics")
+POCKETBASE_MAPPING_COLLECTION = os.environ.get("POCKETBASE_MAPPING_COLLECTION", "asin_group_mapping")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
-
-MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
 
 STATS_FIELDS = [
     "uk_balance", "uk_on_the_way", "uk_next_shipment",
@@ -35,7 +32,27 @@ def json_response(body, status=200):
     return json.dumps(body), status, cors_headers()
 
 
-def load_mapping():
+def fetch_mapping_records(token):
+    records = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_MAPPING_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        records.extend(data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return records
+
+
+def load_mapping(token):
     # Same GROUP/IGNORE handling as GetSalesDepartmentReport.load_mapping -
     # IGNORE-group SKUs are deliberately excluded products, not candidates to reorder.
     # sku_to_asin covers every row (IGNORE included) so an sku_statistics record
@@ -43,18 +60,17 @@ def load_mapping():
     # SKU string - can still be resolved to its ASIN for the join below.
     rows = []
     sku_to_asin = {}
-    with open(MAPPING_CSV_PATH, newline="") as f:
-        for row in csv.DictReader(f):
-            sku = (row.get("SKU") or "").strip()
-            asin = (row.get("ASIN") or "").strip()
-            group = (row.get("GROUP") or "").strip() or "UNGROUPED"
-            if not sku:
-                continue
-            if asin:
-                sku_to_asin[sku] = asin
-            if group == "IGNORE":
-                continue
-            rows.append({"sku": sku, "asin": asin, "group": group})
+    for row in fetch_mapping_records(token):
+        sku = (row.get("sku") or "").strip()
+        asin = (row.get("asin") or "").strip()
+        group = (row.get("group") or "").strip() or "UNGROUPED"
+        if not sku:
+            continue
+        if asin:
+            sku_to_asin[sku] = asin
+        if group == "IGNORE":
+            continue
+        rows.append({"sku": sku, "asin": asin, "group": group})
     return rows, sku_to_asin
 
 
@@ -99,8 +115,8 @@ def GetNextOrderData(request):
         return json_response({"error": "Method not allowed"}, 405)
 
     try:
-        mapping_rows, sku_to_asin = load_mapping()
         token = pb_authenticate()
+        mapping_rows, sku_to_asin = load_mapping(token)
         stats_records = fetch_sku_statistics(token)
         stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
 

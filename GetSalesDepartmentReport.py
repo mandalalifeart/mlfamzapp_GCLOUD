@@ -1,9 +1,8 @@
-import csv
 import json
 import os
+import time
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
@@ -12,10 +11,9 @@ POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_SKU_COLLECTION = os.environ.get("POCKETBASE_SKU_COLLECTION", "sku_sales")
+POCKETBASE_MAPPING_COLLECTION = os.environ.get("POCKETBASE_MAPPING_COLLECTION", "asin_group_mapping")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 LA_TZ = ZoneInfo("America/Los_Angeles")
-
-MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
 
 # "eu" is Amazon's own generic EU marketplace code - the ingest pipeline
 # (UpdateSkuSalesMonth) writes it as its own row alongside (not instead of)
@@ -56,12 +54,37 @@ def json_response(body, status=200):
     return json.dumps(body), status, cors_headers()
 
 
+# Short TTL (not "forever for the instance's lifetime") so a mapping change
+# made elsewhere (e.g. the "Move to Group" button) shows up on this warm
+# instance's next request within a minute, without needing a cold start.
 _mapping_cache = None
+_mapping_cache_at = 0.0
+MAPPING_CACHE_TTL_SECONDS = 60
+
+
+def fetch_mapping_records(token):
+    records = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_MAPPING_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        records.extend(data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return records
 
 
 def load_mapping():
-    global _mapping_cache
-    if _mapping_cache is not None:
+    global _mapping_cache, _mapping_cache_at
+    if _mapping_cache is not None and (time.time() - _mapping_cache_at) < MAPPING_CACHE_TTL_SECONDS:
         return _mapping_cache
 
     sku_to_asin = {}
@@ -69,25 +92,25 @@ def load_mapping():
     asin_to_group = {}
     ignored_skus = set()
 
-    with open(MAPPING_CSV_PATH, newline="") as f:
-        for row in csv.DictReader(f):
-            sku = (row.get("SKU") or "").strip()
-            asin = (row.get("ASIN") or "").strip()
-            group = (row.get("GROUP") or "").strip() or "UNGROUPED"
-            if not sku:
-                continue
-            # IGNORE rows are excluded by SKU alone, before any ASIN lookup -
-            # several of them were entered with a placeholder ASIN (or one
-            # that's since been retired on Amazon), and chasing down the real
-            # ASIN for a SKU we're deliberately excluding isn't worth doing.
-            if group == "IGNORE":
-                ignored_skus.add(sku)
-                continue
-            if not asin:
-                continue
-            sku_to_asin[sku] = asin
-            asin_to_main_sku.setdefault(asin, sku)
-            asin_to_group.setdefault(asin, group)
+    token = pb_authenticate()
+    for row in fetch_mapping_records(token):
+        sku = (row.get("sku") or "").strip()
+        asin = (row.get("asin") or "").strip()
+        group = (row.get("group") or "").strip() or "UNGROUPED"
+        if not sku:
+            continue
+        # IGNORE rows are excluded by SKU alone, before any ASIN lookup -
+        # several of them were entered with a placeholder ASIN (or one
+        # that's since been retired on Amazon), and chasing down the real
+        # ASIN for a SKU we're deliberately excluding isn't worth doing.
+        if group == "IGNORE":
+            ignored_skus.add(sku)
+            continue
+        if not asin:
+            continue
+        sku_to_asin[sku] = asin
+        asin_to_main_sku.setdefault(asin, sku)
+        asin_to_group.setdefault(asin, group)
 
     _mapping_cache = {
         "sku_to_asin": sku_to_asin,
@@ -95,6 +118,7 @@ def load_mapping():
         "asin_to_group": asin_to_group,
         "ignored_skus": ignored_skus,
     }
+    _mapping_cache_at = time.time()
     return _mapping_cache
 
 
@@ -170,6 +194,7 @@ def build_report(records, mapping, atomic_marketplaces, years, current_month):
     asin_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
     group_year_months = defaultdict(lambda: defaultdict(lambda: [0] * 12))
     unmapped_totals = defaultdict(int)
+    unmapped_asin_by_sku = {}
 
     for rec in records:
         if rec.get("marketplace") not in atomic_marketplaces:
@@ -195,6 +220,8 @@ def build_report(records, mapping, atomic_marketplaces, years, current_month):
         asin = (rec.get("ASIN") or "").strip()
         if not asin or asin not in asin_to_group:
             unmapped_totals[sku] += qty
+            if asin and sku not in unmapped_asin_by_sku:
+                unmapped_asin_by_sku[sku] = asin
             continue
         asin_year_months[asin][year][month - 1] += qty
 
@@ -255,7 +282,7 @@ def build_report(records, mapping, atomic_marketplaces, years, current_month):
     group_list.sort(key=lambda g: (g["group"] == LAST_GROUP, -g["totalThisYear"]))
 
     unmapped = [
-        {"sku": sku, "totalQuantity": qty}
+        {"sku": sku, "totalQuantity": qty, "asin": unmapped_asin_by_sku.get(sku, "")}
         for sku, qty in sorted(unmapped_totals.items(), key=lambda kv: kv[1], reverse=True)
     ][:50]
 
@@ -298,7 +325,5 @@ def GetSalesDepartmentReport(request):
 
     except PermissionError as exc:
         return json_response({"error": str(exc)}, 403)
-    except FileNotFoundError:
-        return json_response({"error": "ASIN mapping file (asin_group_mapping.csv) is missing"}, 500)
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

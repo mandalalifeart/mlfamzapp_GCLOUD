@@ -1,7 +1,5 @@
-import csv
 import json
 import os
-from pathlib import Path
 
 import requests
 
@@ -9,9 +7,8 @@ POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_STATS_COLLECTION = os.environ.get("POCKETBASE_STATS_COLLECTION", "sku_statistics")
+POCKETBASE_MAPPING_COLLECTION = os.environ.get("POCKETBASE_MAPPING_COLLECTION", "asin_group_mapping")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
-
-MAPPING_CSV_PATH = Path(__file__).with_name("asin_group_mapping.csv")
 
 # Only the columns the NextOrder page lets a user edit - everything else in
 # sku_statistics is written by the import pipelines, not from the browser.
@@ -45,14 +42,27 @@ def pb_authenticate():
     return token
 
 
-def load_sku_to_asin():
+def load_sku_to_asin(token):
     sku_to_asin = {}
-    with open(MAPPING_CSV_PATH, newline="") as f:
-        for row in csv.DictReader(f):
-            sku = (row.get("SKU") or "").strip()
-            asin = (row.get("ASIN") or "").strip()
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_MAPPING_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        for row in data.get("items", []):
+            sku = (row.get("sku") or "").strip()
+            asin = (row.get("asin") or "").strip()
             if sku and asin:
                 sku_to_asin[sku] = asin
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
     return sku_to_asin
 
 
@@ -118,8 +128,8 @@ def UpdateNextOrderField(request):
         if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
             return json_response({"error": "value must be a non-negative number"}, 400)
 
-        sku_to_asin = load_sku_to_asin()
         token = pb_authenticate()
+        sku_to_asin = load_sku_to_asin(token)
         record = find_record(token, sku, sku_to_asin)
 
         if record:
