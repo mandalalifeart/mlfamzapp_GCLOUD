@@ -31,10 +31,18 @@ def GetAwdInventory(request):
     # class/module name isn't confirmed yet.
     try:
         from sp_api.api import AmazonWarehousingAndDistribution
+        from sp_api.base import Marketplaces
+
+        credentials = {
+            "refresh_token": REFRESH_TOKEN_USA,
+            "lwa_app_id": CLIENT_ID_USA,
+            "lwa_client_secret": CLIENT_SECRET_USA,
+        }
+        client = AmazonWarehousingAndDistribution(credentials=credentials, marketplace=Marketplaces.US)
 
         methods = sorted(
-            n for n in dir(AmazonWarehousingAndDistribution)
-            if not n.startswith("_") and callable(getattr(AmazonWarehousingAndDistribution, n))
+            n for n in dir(client)
+            if not n.startswith("_") and callable(getattr(client, n))
         )
 
         return json_response({
