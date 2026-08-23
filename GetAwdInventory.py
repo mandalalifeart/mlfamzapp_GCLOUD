@@ -37,7 +37,6 @@ def GetAwdInventory(request):
 
         return json_response({
             "status": "diagnostic",
-            "sp_api_version": getattr(__import__("sp_api"), "__version__", "unknown"),
             "awd_candidates": awd_candidates,
             "all_api_classes": available,
         })
