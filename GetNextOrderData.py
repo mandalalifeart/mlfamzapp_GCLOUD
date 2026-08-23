@@ -38,16 +38,24 @@ def json_response(body, status=200):
 def load_mapping():
     # Same GROUP/IGNORE handling as GetSalesDepartmentReport.load_mapping -
     # IGNORE-group SKUs are deliberately excluded products, not candidates to reorder.
+    # sku_to_asin covers every row (IGNORE included) so an sku_statistics record
+    # filed under any SKU spelling - even one belonging to an ignored/retired
+    # SKU string - can still be resolved to its ASIN for the join below.
     rows = []
+    sku_to_asin = {}
     with open(MAPPING_CSV_PATH, newline="") as f:
         for row in csv.DictReader(f):
             sku = (row.get("SKU") or "").strip()
             asin = (row.get("ASIN") or "").strip()
             group = (row.get("GROUP") or "").strip() or "UNGROUPED"
-            if not sku or group == "IGNORE":
+            if not sku:
+                continue
+            if asin:
+                sku_to_asin[sku] = asin
+            if group == "IGNORE":
                 continue
             rows.append({"sku": sku, "asin": asin, "group": group})
-    return rows
+    return rows, sku_to_asin
 
 
 def pb_authenticate():
@@ -91,14 +99,23 @@ def GetNextOrderData(request):
         return json_response({"error": "Method not allowed"}, 405)
 
     try:
-        mapping_rows = load_mapping()
+        mapping_rows, sku_to_asin = load_mapping()
         token = pb_authenticate()
         stats_records = fetch_sku_statistics(token)
         stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
 
+        # Index sku_statistics by ASIN (resolved via the mapping, not PocketBase
+        # itself - the collection is still keyed by sku) so a record filed under
+        # any SKU spelling sharing that ASIN is found, not just an exact SKU match.
+        stats_by_asin = {}
+        for rec in stats_records:
+            asin = sku_to_asin.get(rec.get("sku") or "")
+            if asin and asin not in stats_by_asin:
+                stats_by_asin[asin] = rec
+
         groups = defaultdict(list)
         for row in mapping_rows:
-            stats = stats_by_sku.get(row["sku"], {})
+            stats = stats_by_sku.get(row["sku"]) or stats_by_asin.get(row["asin"]) or {}
             item = {"sku": row["sku"], "asin": row["asin"]}
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
