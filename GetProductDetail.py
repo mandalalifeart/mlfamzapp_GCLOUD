@@ -128,6 +128,12 @@ def GetProductDetail(request):
         main_sku = mapping_record.get("sku") if mapping_record else ""
         group = mapping_record.get("group") if mapping_record else ""
 
+        # IGNORE is a valid destination group (excludes a SKU from every report)
+        # but real mapping rows rarely use it, so add it explicitly - same
+        # reasoning as the Sales page's "Move to Group" dropdown.
+        all_mapping_rows = fetch_all(token, POCKETBASE_MAPPING_COLLECTION, "", fields="group")
+        all_groups = sorted({(row.get("group") or "").strip() for row in all_mapping_rows if row.get("group")} | {"IGNORE"})
+
         sales_records = fetch_all(
             token,
             POCKETBASE_SKU_COLLECTION,
@@ -158,6 +164,7 @@ def GetProductDetail(request):
             "asin": asin,
             "mainSku": main_sku,
             "group": group,
+            "allGroups": all_groups,
             "years": years,
             "currentMonth": current_month,
             "marketplaces": marketplaces,
