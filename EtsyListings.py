@@ -17,7 +17,6 @@ from EtsyAuth import (
 
 POCKETBASE_ETSY_LISTINGS_COLLECTION = os.environ.get("POCKETBASE_ETSY_LISTINGS_COLLECTION", "etsy_listings")
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 LISTINGS_PAGE_LIMIT = 100
 # Etsy's rate limit is generous (10 req/sec, 10k/day for a standard app), but
@@ -160,9 +159,9 @@ def pull_and_store_listings():
 
 
 def UpdateEtsyListings(request):
-    if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
-        return json_response({"error": "Unauthorized"}, 401)
-
+    # Unlike the Amazon Ads report pulls, this has no per-call cost/rate-limit
+    # risk worth gating behind ADMIN_KEY - it's also triggered directly by a
+    # "Pull Listings Now" button on the frontend, which can't hold a secret.
     try:
         result = pull_and_store_listings()
         return json_response(result)
