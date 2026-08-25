@@ -87,6 +87,16 @@ def GetAdsKeywordStats(request):
     from AdsKeywordReporting import GetAdsKeywordStats as _impl
     return _impl(request)
 
+
+def UpdateAdsSearchTermStats(request):
+    from AdsSearchTermReporting import UpdateAdsSearchTermStats as _impl
+    return _impl(request)
+
+
+def GetAdsSearchTermStats(request):
+    from AdsSearchTermReporting import GetAdsSearchTermStats as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
