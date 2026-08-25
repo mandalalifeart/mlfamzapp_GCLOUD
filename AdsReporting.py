@@ -170,7 +170,7 @@ def request_campaign_report(base_url, access_token, client_id, ads_profile_id, s
     # ad product at a time) triggers Amazon's per-account throttling (429) in
     # bursts - retry with backoff rather than treating it as a hard failure.
     response = None
-    for attempt in range(4):
+    for attempt in range(6):
         response = requests.post(
             f"{base_url}/reporting/reports",
             headers={
@@ -508,7 +508,9 @@ def submit_report_jobs(connections, start_date, end_date, errors):
                 # burst throttling in the first place (observed firing off two
                 # requests back-to-back with no gap) - cheaper than relying
                 # solely on the 429 retry-with-backoff in request_campaign_report.
-                time.sleep(1)
+                # 1s still let a submission get throttled occasionally in
+                # practice across ~30 requests/run, so this is a bit wider.
+                time.sleep(2)
 
     return jobs
 
