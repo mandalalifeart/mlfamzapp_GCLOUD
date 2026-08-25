@@ -22,16 +22,42 @@ from AdsAuth import (
 
 POCKETBASE_ADS_COLLECTION = os.environ.get("POCKETBASE_ADS_COLLECTION", "ads_connections")
 POCKETBASE_ADS_STATS_COLLECTION = os.environ.get("POCKETBASE_ADS_STATS_COLLECTION", "ads_campaign_stats")
+POCKETBASE_ADS_CAMPAIGNS_COLLECTION = os.environ.get("POCKETBASE_ADS_CAMPAIGNS_COLLECTION", "ads_campaigns")
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 LA_TZ = ZoneInfo("America/Los_Angeles")
 
-AD_PRODUCT = "SPONSORED_PRODUCTS"
-REPORT_TYPE_ID = "spCampaigns"
-REPORT_COLUMNS = [
-    "date", "campaignId", "campaignName", "campaignStatus",
-    "impressions", "clicks", "cost", "purchases7d", "sales7d",
+# Sponsored Products' reporting columns use a "7d" attribution-window suffix
+# (purchases7d/sales7d); Sponsored Brands and Sponsored Display don't - both
+# schemas were confirmed live (report submission accepted with no
+# "invalid configuration" error) against the real account rather than
+# guessed, same as the original spCampaigns validation.
+AD_PRODUCTS = [
+    {
+        "key": "SP",
+        "ad_product": "SPONSORED_PRODUCTS",
+        "report_type_id": "spCampaigns",
+        "columns": ["date", "campaignId", "campaignName", "campaignStatus", "impressions", "clicks", "cost", "purchases7d", "sales7d"],
+        "sales_field": "sales7d",
+        "purchases_field": "purchases7d",
+    },
+    {
+        "key": "SB",
+        "ad_product": "SPONSORED_BRANDS",
+        "report_type_id": "sbCampaigns",
+        "columns": ["date", "campaignId", "campaignName", "campaignStatus", "impressions", "clicks", "cost", "purchases", "sales"],
+        "sales_field": "sales",
+        "purchases_field": "purchases",
+    },
+    {
+        "key": "SD",
+        "ad_product": "SPONSORED_DISPLAY",
+        "report_type_id": "sdCampaigns",
+        "columns": ["date", "campaignId", "campaignName", "campaignStatus", "impressions", "clicks", "cost", "purchases", "sales"],
+        "sales_field": "sales",
+        "purchases_field": "purchases",
+    },
 ]
 # Amazon's docs site is a JS SPA that can't be scraped for the exact status
 # enum, so both spellings are accepted defensively rather than guessing one.
@@ -139,30 +165,39 @@ def refresh_access_token(profile_key, refresh_token):
     return access_token
 
 
-def request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date):
-    response = requests.post(
-        f"{base_url}/reporting/reports",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Amazon-Advertising-API-ClientId": client_id,
-            "Amazon-Advertising-API-Scope": str(ads_profile_id),
-            "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
-        },
-        json={
-            "name": f"spCampaigns {start_date} to {end_date}",
-            "startDate": start_date,
-            "endDate": end_date,
-            "configuration": {
-                "adProduct": AD_PRODUCT,
-                "groupBy": ["campaign"],
-                "columns": REPORT_COLUMNS,
-                "reportTypeId": REPORT_TYPE_ID,
-                "timeUnit": "DAILY",
-                "format": "GZIP_JSON",
+def request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date, product):
+    # Submitting SP+SB+SD reports for every profile up front (rather than one
+    # ad product at a time) triggers Amazon's per-account throttling (429) in
+    # bursts - retry with backoff rather than treating it as a hard failure.
+    response = None
+    for attempt in range(4):
+        response = requests.post(
+            f"{base_url}/reporting/reports",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Amazon-Advertising-API-ClientId": client_id,
+                "Amazon-Advertising-API-Scope": str(ads_profile_id),
+                "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
             },
-        },
-        timeout=30,
-    )
+            json={
+                "name": f"{product['report_type_id']} {start_date} to {end_date}",
+                "startDate": start_date,
+                "endDate": end_date,
+                "configuration": {
+                    "adProduct": product["ad_product"],
+                    "groupBy": ["campaign"],
+                    "columns": product["columns"],
+                    "reportTypeId": product["report_type_id"],
+                    "timeUnit": "DAILY",
+                    "format": "GZIP_JSON",
+                },
+            },
+            timeout=30,
+        )
+        if response.status_code != 429:
+            break
+        time.sleep(5 * (attempt + 1))
+
     if response.status_code == 425:
         # Amazon rejects a repeat request for the same profile/date/report
         # type with 425 and names the still-in-flight report's id instead of
@@ -183,6 +218,12 @@ def request_campaign_report(base_url, access_token, client_id, ads_profile_id, s
 
 def check_report_status(job):
     response = requests.get(f"{job['base_url']}/reporting/reports/{job['report_id']}", headers=job["headers"], timeout=15)
+    if response.status_code == 429:
+        # Polling ~3x as many jobs per round (SP+SB+SD) makes transient
+        # throttling on the status check itself more likely - treat it as
+        # still-pending rather than a hard failure, same round's other jobs
+        # aren't affected.
+        return "pending", None
     if response.status_code != 200:
         raise RuntimeError(f"Report status check failed: HTTP {response.status_code} - {response.text}")
     body = response.json()
@@ -197,6 +238,167 @@ def check_report_status(job):
     return "pending", None
 
 
+CAMPAIGN_STATE_KEEP = {"ENABLED", "PAUSED"}
+
+
+def fetch_sp_campaigns(base_url, access_token, client_id, ads_profile_id):
+    response = requests.post(
+        f"{base_url}/sp/campaigns/list",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/vnd.spCampaign.v3+json",
+            "Accept": "application/vnd.spCampaign.v3+json",
+        },
+        json={"stateFilter": {"include": list(CAMPAIGN_STATE_KEEP)}},
+        timeout=30,
+    )
+    response.raise_for_status()
+    campaigns = []
+    for c in response.json().get("campaigns", []):
+        budget = c.get("budget") or {}
+        campaigns.append({
+            "campaign_id": str(c.get("campaignId")),
+            "campaign_name": c.get("name", ""),
+            "campaign_status": (c.get("state") or "").upper(),
+            "targeting_type": c.get("targetingType", ""),
+            "budget": budget.get("budget", 0),
+            "budget_type": budget.get("budgetType", ""),
+        })
+    return campaigns
+
+
+def fetch_sb_campaigns(base_url, access_token, client_id, ads_profile_id):
+    response = requests.post(
+        f"{base_url}/sb/v4/campaigns/list",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/vnd.sbcampaignresource.v4+json",
+            "Accept": "application/vnd.sbcampaignresource.v4+json",
+        },
+        json={},
+        timeout=30,
+    )
+    response.raise_for_status()
+    campaigns = []
+    for c in response.json().get("campaigns", []):
+        state = (c.get("state") or "").upper()
+        if state not in CAMPAIGN_STATE_KEEP:
+            continue
+        campaigns.append({
+            "campaign_id": str(c.get("campaignId")),
+            "campaign_name": c.get("name", ""),
+            "campaign_status": state,
+            "targeting_type": "",
+            "budget": c.get("budget", 0),
+            "budget_type": c.get("budgetType", ""),
+        })
+    return campaigns
+
+
+def fetch_sd_campaigns(base_url, access_token, client_id, ads_profile_id):
+    # SD's campaign list is still the older, unversioned endpoint - a bare
+    # array response with lowercase state values, unlike SP/SB.
+    response = requests.get(
+        f"{base_url}/sd/campaigns",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    campaigns = []
+    for c in response.json():
+        state = (c.get("state") or "").upper()
+        if state not in CAMPAIGN_STATE_KEEP:
+            continue
+        campaigns.append({
+            "campaign_id": str(c.get("campaignId")),
+            "campaign_name": c.get("name", ""),
+            "campaign_status": state,
+            "targeting_type": "",
+            "budget": c.get("budget", 0),
+            "budget_type": c.get("budgetType", ""),
+        })
+    return campaigns
+
+
+CAMPAIGN_LIST_FETCHERS = {"SP": fetch_sp_campaigns, "SB": fetch_sb_campaigns, "SD": fetch_sd_campaigns}
+
+
+def pull_campaign_lists(connections, errors):
+    all_campaigns = []
+    ad_product_by_key = {p["key"]: p["ad_product"] for p in AD_PRODUCTS}
+
+    for connection in connections:
+        profile_key = connection.get("region")
+        refresh_token = connection.get("refresh_token")
+        if profile_key not in AD_PROFILES or not refresh_token:
+            continue
+
+        try:
+            access_token = refresh_access_token(profile_key, refresh_token)
+        except Exception as exc:
+            errors.append(f"{profile_key}: token refresh failed (campaign list): {exc}")
+            continue
+
+        client_id = AD_PROFILES[profile_key]["client_id"]
+        for ads_profile in connection.get("profiles", []) or []:
+            if ads_profile.get("accountType") == "agency":
+                continue
+
+            region = ads_profile.get("region")
+            base_url = ADS_REGION_ENDPOINTS.get(region)
+            ads_profile_id = ads_profile.get("profileId")
+            if not base_url or not ads_profile_id:
+                continue
+
+            for key, fetcher in CAMPAIGN_LIST_FETCHERS.items():
+                try:
+                    campaigns = fetcher(base_url, access_token, client_id, ads_profile_id)
+                except Exception as exc:
+                    errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}) {key} list: {exc}")
+                    time.sleep(1)
+                    continue
+                for c in campaigns:
+                    all_campaigns.append({
+                        **c,
+                        "profile_id": str(ads_profile_id),
+                        "ad_product": ad_product_by_key[key],
+                        "country_code": ads_profile.get("countryCode", ""),
+                        "currency_code": ads_profile.get("currencyCode", ""),
+                    })
+                time.sleep(1)
+
+    return all_campaigns
+
+
+def pb_list_campaign_ids(token, profile_id):
+    ids = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"filter": f'profile_id = "{profile_id}"', "fields": "id", "perPage": 200, "page": page},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        ids.extend(item["id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return ids
+
+
 def download_report_rows(download_url):
     response = requests.get(download_url, timeout=60)
     response.raise_for_status()
@@ -204,7 +406,7 @@ def download_report_rows(download_url):
         return json.loads(gz.read().decode("utf-8"))
 
 
-def campaign_row_to_body(ads_profile, row):
+def campaign_row_to_body(ads_profile, row, product):
     date_str = row.get("date", "")
     year, month = 0, 0
     try:
@@ -220,15 +422,15 @@ def campaign_row_to_body(ads_profile, row):
         "campaign_status": row.get("campaignStatus", ""),
         "country_code": ads_profile.get("countryCode", ""),
         "currency_code": ads_profile.get("currencyCode", ""),
-        "ad_product": AD_PRODUCT,
+        "ad_product": product["ad_product"],
         "date": date_str,
         "month": month,
         "year": year,
         "impressions": row.get("impressions", 0),
         "clicks": row.get("clicks", 0),
         "spend": row.get("cost", 0),
-        "sales": row.get("sales7d", 0),
-        "orders": row.get("purchases7d", 0),
+        "sales": row.get(product["sales_field"], 0),
+        "orders": row.get(product["purchases_field"], 0),
     }
 
 
@@ -265,17 +467,26 @@ def submit_report_jobs(connections, start_date, end_date, errors):
                 "Amazon-Advertising-API-ClientId": client_id,
                 "Amazon-Advertising-API-Scope": str(ads_profile_id),
             }
-            try:
-                report_id = request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date)
-                jobs.append({
-                    "profile_key": profile_key,
-                    "ads_profile": ads_profile,
-                    "base_url": base_url,
-                    "headers": headers,
-                    "report_id": report_id,
-                })
-            except Exception as exc:
-                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): {exc}")
+            for product in AD_PRODUCTS:
+                try:
+                    report_id = request_campaign_report(
+                        base_url, access_token, client_id, ads_profile_id, start_date, end_date, product
+                    )
+                    jobs.append({
+                        "profile_key": profile_key,
+                        "ads_profile": ads_profile,
+                        "base_url": base_url,
+                        "headers": headers,
+                        "report_id": report_id,
+                        "product": product,
+                    })
+                except Exception as exc:
+                    errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}) {product['key']}: {exc}")
+                # A small pace between submissions avoids triggering Amazon's
+                # burst throttling in the first place (observed firing off two
+                # requests back-to-back with no gap) - cheaper than relying
+                # solely on the 429 retry-with-backoff in request_campaign_report.
+                time.sleep(1)
 
     return jobs
 
@@ -292,16 +503,16 @@ def poll_jobs_until_done(jobs, errors):
             try:
                 state, download_url = check_report_status(job)
             except Exception as exc:
-                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')}: {exc}")
+                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')} {job['product']['key']}: {exc}")
                 continue
             if state == "pending":
                 still_pending.append(job)
                 continue
             try:
                 rows = download_report_rows(download_url)
-                all_rows.extend(campaign_row_to_body(job["ads_profile"], row) for row in rows)
+                all_rows.extend(campaign_row_to_body(job["ads_profile"], row, job["product"]) for row in rows)
             except Exception as exc:
-                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')}: download failed: {exc}")
+                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')} {job['product']['key']}: download failed: {exc}")
         pending = still_pending
         if pending:
             time.sleep(REPORT_POLL_DELAY_SECONDS)
@@ -309,7 +520,8 @@ def poll_jobs_until_done(jobs, errors):
     for job in pending:
         errors.append(
             f"{job['profile_key']}/{job['ads_profile'].get('profileId')} "
-            f"({job['ads_profile'].get('countryCode')}): report did not complete after {REPORT_POLL_ROUNDS} polls"
+            f"({job['ads_profile'].get('countryCode')}) {job['product']['key']}: "
+            f"report did not complete after {REPORT_POLL_ROUNDS} polls"
         )
 
     return all_rows
@@ -322,6 +534,7 @@ def pull_and_store_campaign_stats(start_date, end_date):
     errors = []
     jobs = submit_report_jobs(connections, start_date, end_date, errors)
     all_rows = poll_jobs_until_done(jobs, errors)
+    all_campaigns = pull_campaign_lists(connections, errors)
 
     profile_ids = {row["profile_id"] for row in all_rows}
     ops = []
@@ -336,10 +549,32 @@ def pull_and_store_campaign_stats(start_date, end_date):
         for row in all_rows
     )
 
+    # ads_campaigns is a full snapshot of currently-live (ENABLED/PAUSED)
+    # campaigns, independent of any date range - it exists so a campaign
+    # with zero activity in the stats period still shows up, which a
+    # performance report alone never surfaces. Each profile's prior snapshot
+    # is fully replaced rather than merged.
+    campaign_profile_ids = {c["profile_id"] for c in all_campaigns}
+    for profile_id in campaign_profile_ids:
+        existing_campaign_ids = pb_list_campaign_ids(pb_token, profile_id)
+        ops.extend(
+            {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records/{rid}"}
+            for rid in existing_campaign_ids
+        )
+    ops.extend(
+        {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records", "body": c}
+        for c in all_campaigns
+    )
+
     for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
         pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
 
-    return {"rowsWritten": len(all_rows), "profilesPulled": len(profile_ids), "errors": errors}
+    return {
+        "rowsWritten": len(all_rows),
+        "profilesPulled": len(profile_ids),
+        "campaignsListed": len(all_campaigns),
+        "errors": errors,
+    }
 
 
 def UpdateAdsCampaignStats(request):
@@ -419,11 +654,43 @@ def GetAdsCampaignStats(request):
 
     try:
         token = pb_authenticate()
+        campaigns = {}
+
+        def make_bucket(item):
+            return {
+                "campaignId": item.get("campaign_id"),
+                "campaignName": item.get("campaign_name", ""),
+                "campaignStatus": item.get("campaign_status", ""),
+                "adProduct": item.get("ad_product", ""),
+                "countryCode": item.get("country_code", ""),
+                "currencyCode": item.get("currency_code", ""),
+                "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
+            }
+
+        # Seed from the current campaign list first, so a paused/zero-activity
+        # campaign still shows up with zero stats - a performance report never
+        # emits a row for a campaign with no impressions in the period.
+        campaign_filter = f'country_code = "{country_code}"' if country_code else ""
+        page = 1
+        while True:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={k: v for k, v in {"filter": campaign_filter, "perPage": 200, "page": page}.items() if v},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("items", []):
+                campaigns[(item.get("profile_id"), item.get("campaign_id"))] = make_bucket(item)
+            if page >= data.get("totalPages", 1):
+                break
+            page += 1
+
         filter_str = f"(month = {month} && year = {year})"
         if country_code:
             filter_str += f' && country_code = "{country_code}"'
 
-        campaigns = {}
         page = 1
         while True:
             response = requests.get(
@@ -436,14 +703,7 @@ def GetAdsCampaignStats(request):
             data = response.json()
             for item in data.get("items", []):
                 key = (item.get("profile_id"), item.get("campaign_id"))
-                bucket = campaigns.setdefault(key, {
-                    "campaignId": item.get("campaign_id"),
-                    "campaignName": item.get("campaign_name", ""),
-                    "campaignStatus": item.get("campaign_status", ""),
-                    "countryCode": item.get("country_code", ""),
-                    "currencyCode": item.get("currency_code", ""),
-                    "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
-                })
+                bucket = campaigns.setdefault(key, make_bucket(item))
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
                 bucket["spend"] += item.get("spend", 0)
