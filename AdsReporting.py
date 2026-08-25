@@ -165,10 +165,13 @@ def refresh_access_token(profile_key, refresh_token):
     return access_token
 
 
-def request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date, product):
+def request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date, product, group_by=("campaign",)):
     # Submitting SP+SB+SD reports for every profile up front (rather than one
     # ad product at a time) triggers Amazon's per-account throttling (429) in
     # bursts - retry with backoff rather than treating it as a hard failure.
+    # group_by defaults to campaign-level (used by the campaign stats
+    # pipeline); AdsKeywordReporting.py reuses this same function with
+    # group_by=["targeting"] rather than duplicating the retry/425 handling.
     response = None
     for attempt in range(6):
         response = requests.post(
@@ -185,7 +188,7 @@ def request_campaign_report(base_url, access_token, client_id, ads_profile_id, s
                 "endDate": end_date,
                 "configuration": {
                     "adProduct": product["ad_product"],
-                    "groupBy": ["campaign"],
+                    "groupBy": list(group_by),
                     "columns": product["columns"],
                     "reportTypeId": product["report_type_id"],
                     "timeUnit": "DAILY",
