@@ -59,7 +59,16 @@ def fetch_listing_sku(listing_id, access_token, errors):
             errors.append(f"listing {listing_id} inventory: HTTP {response.status_code}")
             return ""
         products = response.json().get("products", []) or []
-        skus = [p.get("sku") for p in products if p.get("sku") and not p.get("is_deleted")]
+        # Multiple product variations under one listing (e.g. different
+        # colors) sometimes share the same SKU string - dedupe while
+        # preserving order rather than showing it repeated.
+        seen = set()
+        skus = []
+        for p in products:
+            sku = p.get("sku")
+            if sku and not p.get("is_deleted") and sku not in seen:
+                seen.add(sku)
+                skus.append(sku)
         return ", ".join(skus)
     except requests.RequestException as exc:
         errors.append(f"listing {listing_id} inventory: {exc}")
