@@ -40,8 +40,13 @@ REPORT_FAILED_STATUSES = {"FAILURE", "FAILED", "CANCELLED"}
 # Reports are submitted for every profile up front, then polled together in
 # rounds (rather than one profile fully polled before the next starts) - a
 # dozen profiles at ~30-90s each would otherwise blow well past the Cloud
-# Function timeout if handled strictly sequentially.
-REPORT_POLL_ROUNDS = 30
+# Function timeout if handled strictly sequentially. In practice spCampaigns
+# report generation observed against the live account regularly took well
+# over 5 minutes per profile, so the poll budget is set close to Cloud
+# Scheduler's 30-minute HTTP attemptDeadline ceiling (with headroom left for
+# the submit phase and the final PocketBase batch write) rather than a
+# conservative guess.
+REPORT_POLL_ROUNDS = 145
 REPORT_POLL_DELAY_SECONDS = 10
 
 
