@@ -64,15 +64,15 @@ AD_PRODUCTS = [
 REPORT_DONE_STATUSES = {"COMPLETED", "SUCCESS"}
 REPORT_FAILED_STATUSES = {"FAILURE", "FAILED", "CANCELLED"}
 # Reports are submitted for every profile up front, then polled together in
-# rounds (rather than one profile fully polled before the next starts) - a
-# dozen profiles at ~30-90s each would otherwise blow well past the Cloud
-# Function timeout if handled strictly sequentially. In practice spCampaigns
-# report generation observed against the live account regularly took well
-# over 5 minutes per profile, so the poll budget is set close to Cloud
-# Scheduler's 30-minute HTTP attemptDeadline ceiling (with headroom left for
-# the submit phase and the final PocketBase batch write) rather than a
-# conservative guess.
-REPORT_POLL_ROUNDS = 145
+# rounds (rather than one profile fully polled before the next starts) -
+# since all pending jobs are checked every round regardless of count, total
+# wall time is bounded by the slowest job, not the number of profiles/ad
+# products. Confirmed live: a first-time sbCampaigns/sdCampaigns report on
+# this account took ~25 minutes to complete (spCampaigns was faster, a few
+# minutes), so the poll budget is set close to Cloud Scheduler's 30-minute
+# HTTP attemptDeadline ceiling - the real limiting factor - with headroom
+# left for the submit phase.
+REPORT_POLL_ROUNDS = 165
 REPORT_POLL_DELAY_SECONDS = 10
 
 
