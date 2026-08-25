@@ -332,9 +332,14 @@ def fetch_sd_campaigns(base_url, access_token, client_id, ads_profile_id):
 CAMPAIGN_LIST_FETCHERS = {"SP": fetch_sp_campaigns, "SB": fetch_sb_campaigns, "SD": fetch_sd_campaigns}
 
 
-def pull_campaign_lists(connections, errors):
-    all_campaigns = []
+def pull_and_store_campaign_lists(pb_token, connections, errors):
+    # Written per-profile as soon as that profile's lists are fetched, rather
+    # than accumulated into one big list and written at the very end - a
+    # single end-of-run batch write loses everything if the request is
+    # killed by the platform's own timeout before it gets there (this is
+    # exactly what happened to the first 31-day stats backfill attempt).
     ad_product_by_key = {p["key"]: p["ad_product"] for p in AD_PRODUCTS}
+    total_written = 0
 
     for connection in connections:
         profile_key = connection.get("region")
@@ -359,6 +364,7 @@ def pull_campaign_lists(connections, errors):
             if not base_url or not ads_profile_id:
                 continue
 
+            profile_campaigns = []
             for key, fetcher in CAMPAIGN_LIST_FETCHERS.items():
                 try:
                     campaigns = fetcher(base_url, access_token, client_id, ads_profile_id)
@@ -367,7 +373,7 @@ def pull_campaign_lists(connections, errors):
                     time.sleep(1)
                     continue
                 for c in campaigns:
-                    all_campaigns.append({
+                    profile_campaigns.append({
                         **c,
                         "profile_id": str(ads_profile_id),
                         "ad_product": ad_product_by_key[key],
@@ -376,7 +382,23 @@ def pull_campaign_lists(connections, errors):
                     })
                 time.sleep(1)
 
-    return all_campaigns
+            try:
+                existing_ids = pb_list_campaign_ids(pb_token, str(ads_profile_id))
+                ops = [
+                    {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records/{rid}"}
+                    for rid in existing_ids
+                ]
+                ops.extend(
+                    {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records", "body": c}
+                    for c in profile_campaigns
+                )
+                for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                    pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+                total_written += len(profile_campaigns)
+            except Exception as exc:
+                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): campaign list write failed: {exc}")
+
+    return total_written
 
 
 def pb_list_campaign_ids(token, profile_id):
@@ -491,9 +513,16 @@ def submit_report_jobs(connections, start_date, end_date, errors):
     return jobs
 
 
-def poll_jobs_until_done(jobs, errors):
+def poll_and_store_jobs(pb_token, jobs, errors):
+    # Each completed report's rows are written to PocketBase immediately,
+    # not accumulated and written once at the end - a wide date range makes
+    # report generation slow enough that the whole request can hit the Cloud
+    # Function's own timeout, and the platform kills the request outright at
+    # that point. A single final batch write would lose every row downloaded
+    # during the run; writing as each job finishes means only the
+    # still-pending jobs are lost, and everything else survives.
     pending = list(jobs)
-    all_rows = []
+    total_written = 0
 
     for _ in range(REPORT_POLL_ROUNDS):
         if not pending:
@@ -510,9 +539,16 @@ def poll_jobs_until_done(jobs, errors):
                 continue
             try:
                 rows = download_report_rows(download_url)
-                all_rows.extend(campaign_row_to_body(job["ads_profile"], row, job["product"]) for row in rows)
+                bodies = [campaign_row_to_body(job["ads_profile"], row, job["product"]) for row in rows]
+                ops = [
+                    {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records", "body": b}
+                    for b in bodies
+                ]
+                for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                    pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+                total_written += len(bodies)
             except Exception as exc:
-                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')} {job['product']['key']}: download failed: {exc}")
+                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')} {job['product']['key']}: download/write failed: {exc}")
         pending = still_pending
         if pending:
             time.sleep(REPORT_POLL_DELAY_SECONDS)
@@ -524,55 +560,44 @@ def poll_jobs_until_done(jobs, errors):
             f"report did not complete after {REPORT_POLL_ROUNDS} polls"
         )
 
-    return all_rows
+    return total_written
 
 
 def pull_and_store_campaign_stats(start_date, end_date):
     pb_token = pb_authenticate()
     connections = pb_list_connected(pb_token)
-
     errors = []
-    jobs = submit_report_jobs(connections, start_date, end_date, errors)
-    all_rows = poll_jobs_until_done(jobs, errors)
-    all_campaigns = pull_campaign_lists(connections, errors)
 
-    profile_ids = {row["profile_id"] for row in all_rows}
-    ops = []
+    # Campaign lists first (fast, and independent of the date range) so that
+    # data is safely persisted even if the slower report-polling phase below
+    # times out.
+    campaigns_written = pull_and_store_campaign_lists(pb_token, connections, errors)
+
+    # Clear this date range's existing stats up front, before any report
+    # completes - each completed job's rows are then inserted incrementally
+    # as they arrive (see poll_and_store_jobs), so nothing is deleted after
+    # the fact.
+    profile_ids = set()
+    for connection in connections:
+        for ads_profile in connection.get("profiles", []) or []:
+            if ads_profile.get("accountType") != "agency" and ads_profile.get("profileId"):
+                profile_ids.add(str(ads_profile.get("profileId")))
     for profile_id in profile_ids:
         existing_ids = pb_list_stats_ids(pb_token, profile_id, start_date, end_date)
-        ops.extend(
+        ops = [
             {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records/{rid}"}
             for rid in existing_ids
-        )
-    ops.extend(
-        {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records", "body": row}
-        for row in all_rows
-    )
+        ]
+        for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+            pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
 
-    # ads_campaigns is a full snapshot of currently-live (ENABLED/PAUSED)
-    # campaigns, independent of any date range - it exists so a campaign
-    # with zero activity in the stats period still shows up, which a
-    # performance report alone never surfaces. Each profile's prior snapshot
-    # is fully replaced rather than merged.
-    campaign_profile_ids = {c["profile_id"] for c in all_campaigns}
-    for profile_id in campaign_profile_ids:
-        existing_campaign_ids = pb_list_campaign_ids(pb_token, profile_id)
-        ops.extend(
-            {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records/{rid}"}
-            for rid in existing_campaign_ids
-        )
-    ops.extend(
-        {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records", "body": c}
-        for c in all_campaigns
-    )
-
-    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
-        pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+    jobs = submit_report_jobs(connections, start_date, end_date, errors)
+    rows_written = poll_and_store_jobs(pb_token, jobs, errors)
 
     return {
-        "rowsWritten": len(all_rows),
+        "rowsWritten": rows_written,
         "profilesPulled": len(profile_ids),
-        "campaignsListed": len(all_campaigns),
+        "campaignsListed": campaigns_written,
         "errors": errors,
     }
 
