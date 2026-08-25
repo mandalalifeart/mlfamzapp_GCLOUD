@@ -62,6 +62,21 @@ def GetAdsConnectionStatus(request):
     from AdsAuth import GetAdsConnectionStatus as _impl
     return _impl(request)
 
+
+def UpdateAdsCampaignStats(request):
+    from AdsReporting import UpdateAdsCampaignStats as _impl
+    return _impl(request)
+
+
+def GetAdsAccountSummary(request):
+    from AdsReporting import GetAdsAccountSummary as _impl
+    return _impl(request)
+
+
+def GetAdsCampaignStats(request):
+    from AdsReporting import GetAdsCampaignStats as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
