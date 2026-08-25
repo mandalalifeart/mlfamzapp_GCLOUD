@@ -2,6 +2,7 @@ import gzip
 import io
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -36,8 +37,12 @@ REPORT_COLUMNS = [
 # enum, so both spellings are accepted defensively rather than guessing one.
 REPORT_DONE_STATUSES = {"COMPLETED", "SUCCESS"}
 REPORT_FAILED_STATUSES = {"FAILURE", "FAILED", "CANCELLED"}
-REPORT_POLL_ATTEMPTS = 20
-REPORT_POLL_DELAY_SECONDS = 6
+# Reports are submitted for every profile up front, then polled together in
+# rounds (rather than one profile fully polled before the next starts) - a
+# dozen profiles at ~30-90s each would otherwise blow well past the Cloud
+# Function timeout if handled strictly sequentially.
+REPORT_POLL_ROUNDS = 30
+REPORT_POLL_DELAY_SECONDS = 10
 
 
 def pb_authenticate():
@@ -153,6 +158,16 @@ def request_campaign_report(base_url, access_token, client_id, ads_profile_id, s
         },
         timeout=30,
     )
+    if response.status_code == 425:
+        # Amazon rejects a repeat request for the same profile/date/report
+        # type with 425 and names the still-in-flight report's id instead of
+        # creating a new one - reuse that id rather than treating it as an
+        # error (this fires often since a timed-out client retry still lands
+        # the original request server-side).
+        match = re.search(r"duplicate of\s*:\s*([\w-]+)", response.text)
+        if match:
+            return match.group(1)
+        raise RuntimeError(f"Report request duplicate (425) but no id found: {response.text}")
     if response.status_code not in (200, 202):
         raise RuntimeError(f"Report request failed: HTTP {response.status_code} - {response.text}")
     report_id = response.json().get("reportId")
@@ -161,27 +176,20 @@ def request_campaign_report(base_url, access_token, client_id, ads_profile_id, s
     return report_id
 
 
-def poll_report(base_url, access_token, client_id, ads_profile_id, report_id):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Amazon-Advertising-API-ClientId": client_id,
-        "Amazon-Advertising-API-Scope": str(ads_profile_id),
-    }
-    for _ in range(REPORT_POLL_ATTEMPTS):
-        response = requests.get(f"{base_url}/reporting/reports/{report_id}", headers=headers, timeout=15)
-        if response.status_code != 200:
-            raise RuntimeError(f"Report status check failed: HTTP {response.status_code} - {response.text}")
-        body = response.json()
-        status = (body.get("status") or "").upper()
-        if status in REPORT_DONE_STATUSES:
-            download_url = body.get("url") or body.get("location")
-            if not download_url:
-                raise RuntimeError(f"Report completed but no download url in response: {body}")
-            return download_url
-        if status in REPORT_FAILED_STATUSES:
-            raise RuntimeError(f"Report generation failed: {body}")
-        time.sleep(REPORT_POLL_DELAY_SECONDS)
-    raise RuntimeError(f"Report {report_id} did not complete after {REPORT_POLL_ATTEMPTS} polls")
+def check_report_status(job):
+    response = requests.get(f"{job['base_url']}/reporting/reports/{job['report_id']}", headers=job["headers"], timeout=15)
+    if response.status_code != 200:
+        raise RuntimeError(f"Report status check failed: HTTP {response.status_code} - {response.text}")
+    body = response.json()
+    status = (body.get("status") or "").upper()
+    if status in REPORT_DONE_STATUSES:
+        download_url = body.get("url") or body.get("location")
+        if not download_url:
+            raise RuntimeError(f"Report completed but no download url in response: {body}")
+        return "done", download_url
+    if status in REPORT_FAILED_STATUSES:
+        raise RuntimeError(f"Report generation failed: {body}")
+    return "pending", None
 
 
 def download_report_rows(download_url):
@@ -219,30 +227,8 @@ def campaign_row_to_body(ads_profile, row):
     }
 
 
-def pull_profile_stats(profile_key, client_id, access_token, ads_profile, start_date, end_date, errors):
-    region = ads_profile.get("region")
-    base_url = ADS_REGION_ENDPOINTS.get(region)
-    ads_profile_id = ads_profile.get("profileId")
-    if not base_url or not ads_profile_id:
-        return []
-
-    try:
-        report_id = request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date)
-        download_url = poll_report(base_url, access_token, client_id, ads_profile_id, report_id)
-        rows = download_report_rows(download_url)
-        return [campaign_row_to_body(ads_profile, row) for row in rows]
-    except Exception as exc:
-        errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): {exc}")
-        return []
-
-
-def pull_and_store_campaign_stats(start_date, end_date):
-    pb_token = pb_authenticate()
-    connections = pb_list_connected(pb_token)
-
-    all_rows = []
-    errors = []
-
+def submit_report_jobs(connections, start_date, end_date, errors):
+    jobs = []
     for connection in connections:
         profile_key = connection.get("region")
         refresh_token = connection.get("refresh_token")
@@ -257,9 +243,80 @@ def pull_and_store_campaign_stats(start_date, end_date):
 
         client_id = AD_PROFILES[profile_key]["client_id"]
         for ads_profile in connection.get("profiles", []) or []:
-            all_rows.extend(
-                pull_profile_stats(profile_key, client_id, access_token, ads_profile, start_date, end_date, errors)
-            )
+            # Amazon Attribution "agency" profiles don't support sponsored-ads
+            # campaign reports (HTTP 400 "Invalid Advertiser or Marketplace
+            # ID") - skip them rather than retry a permanent failure daily.
+            if ads_profile.get("accountType") == "agency":
+                continue
+
+            region = ads_profile.get("region")
+            base_url = ADS_REGION_ENDPOINTS.get(region)
+            ads_profile_id = ads_profile.get("profileId")
+            if not base_url or not ads_profile_id:
+                continue
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Amazon-Advertising-API-ClientId": client_id,
+                "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            }
+            try:
+                report_id = request_campaign_report(base_url, access_token, client_id, ads_profile_id, start_date, end_date)
+                jobs.append({
+                    "profile_key": profile_key,
+                    "ads_profile": ads_profile,
+                    "base_url": base_url,
+                    "headers": headers,
+                    "report_id": report_id,
+                })
+            except Exception as exc:
+                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): {exc}")
+
+    return jobs
+
+
+def poll_jobs_until_done(jobs, errors):
+    pending = list(jobs)
+    all_rows = []
+
+    for _ in range(REPORT_POLL_ROUNDS):
+        if not pending:
+            break
+        still_pending = []
+        for job in pending:
+            try:
+                state, download_url = check_report_status(job)
+            except Exception as exc:
+                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')}: {exc}")
+                continue
+            if state == "pending":
+                still_pending.append(job)
+                continue
+            try:
+                rows = download_report_rows(download_url)
+                all_rows.extend(campaign_row_to_body(job["ads_profile"], row) for row in rows)
+            except Exception as exc:
+                errors.append(f"{job['profile_key']}/{job['ads_profile'].get('profileId')}: download failed: {exc}")
+        pending = still_pending
+        if pending:
+            time.sleep(REPORT_POLL_DELAY_SECONDS)
+
+    for job in pending:
+        errors.append(
+            f"{job['profile_key']}/{job['ads_profile'].get('profileId')} "
+            f"({job['ads_profile'].get('countryCode')}): report did not complete after {REPORT_POLL_ROUNDS} polls"
+        )
+
+    return all_rows
+
+
+def pull_and_store_campaign_stats(start_date, end_date):
+    pb_token = pb_authenticate()
+    connections = pb_list_connected(pb_token)
+
+    errors = []
+    jobs = submit_report_jobs(connections, start_date, end_date, errors)
+    all_rows = poll_jobs_until_done(jobs, errors)
 
     profile_ids = {row["profile_id"] for row in all_rows}
     ops = []
