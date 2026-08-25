@@ -692,10 +692,16 @@ def GetAdsCampaignStats(request):
                 "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
             }
 
-        # Seed from the current campaign list first, so a paused/zero-activity
-        # campaign still shows up with zero stats - a performance report never
-        # emits a row for a campaign with no impressions in the period.
-        campaign_filter = f'country_code = "{country_code}"' if country_code else ""
+        # Seed from the current campaign list first, so a zero-activity
+        # ENABLED campaign still shows up with zero stats - a performance
+        # report never emits a row for a campaign with no impressions in the
+        # period. Only ENABLED campaigns are seeded (paused/archived are
+        # deliberately excluded from this view), and the stats merge below
+        # only adds to campaigns already seeded here rather than creating new
+        # entries for a since-paused campaign's historical spend.
+        campaign_filter = 'campaign_status = "ENABLED"'
+        if country_code:
+            campaign_filter += f' && country_code = "{country_code}"'
         page = 1
         while True:
             response = requests.get(
@@ -728,7 +734,12 @@ def GetAdsCampaignStats(request):
             data = response.json()
             for item in data.get("items", []):
                 key = (item.get("profile_id"), item.get("campaign_id"))
-                bucket = campaigns.setdefault(key, make_bucket(item))
+                # Only add to a campaign already seeded as ENABLED above -
+                # otherwise a since-paused campaign's historical spend would
+                # create a new (non-ENABLED) entry and defeat the filter.
+                bucket = campaigns.get(key)
+                if not bucket:
+                    continue
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
                 bucket["spend"] += item.get("spend", 0)
