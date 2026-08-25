@@ -3,8 +3,23 @@ import os
 
 import requests
 
-AD_CLIENT_ID_USA = os.environ["AD_CLIENT_ID_USA"]
-AD_CLIENT_SECRET_USA = os.environ["AD_CLIENT_SECRET_USA"]
+# Amazon Ads uses separate LWA Security Profiles per marketplace group, same
+# as the existing SP-API CLIENT_ID_USA/CLIENT_ID_EU split - a grant from one
+# profile does not authorize the other, so each is its own connection with
+# its own refresh token.
+AD_PROFILES = {
+    "USA": {
+        "client_id": os.environ["AD_CLIENT_ID_USA"],
+        "client_secret": os.environ["AD_CLIENT_SECRET_USA"],
+        "label": "USA",
+    },
+    "EU": {
+        "client_id": os.environ["AD_CLIENT_ID_EU"],
+        "client_secret": os.environ["AD_CLIENT_SECRET_EU"],
+        "label": "EU",
+    },
+}
+
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
@@ -12,18 +27,20 @@ POCKETBASE_ADS_COLLECTION = os.environ.get("POCKETBASE_ADS_COLLECTION", "ads_con
 
 ALLOWED_ORIGIN = "https://mlfamzappfire.web.app"
 FRONTEND_ADS_URL = f"{ALLOWED_ORIGIN}/ads"
-# Must exactly match an "Allowed Return URL" registered on the Amazon Ads
+# Must exactly match an "Allowed Return URL" registered on EACH Amazon Ads
 # Security Profile (Login with Amazon) - this is the Gen2 Cloud Function's
-# default cloudfunctions.net URL, same pattern as API_BASE elsewhere.
+# default cloudfunctions.net URL, same pattern as API_BASE elsewhere. Both
+# profiles share this one callback; `state` on the authorize URL says which
+# profile's credentials to use when the code comes back.
 REDIRECT_URI = os.environ.get(
     "ADS_REDIRECT_URI",
     "https://us-central1-mlfamzapp.cloudfunctions.net/AdsOAuthCallback",
 )
 
 LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
-# One LWA grant covers all regions the Ads account has profiles in - each
-# region has its own Advertising API host, so profile discovery has to hit
-# all three rather than picking one.
+# A grant can still show profiles across regions (NA/EU/FE all have their own
+# Advertising API host), so discovery hits all three regardless of which
+# security profile authorized it.
 ADS_REGION_ENDPOINTS = {
     "NA": "https://advertising-api.amazon.com",
     "EU": "https://advertising-api-eu.amazon.com",
@@ -58,11 +75,11 @@ def pb_authenticate():
     return token
 
 
-def get_connection_record(token):
+def get_connection_record(token, profile_key):
     response = requests.get(
         f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_COLLECTION}/records",
         headers={"Authorization": token},
-        params={"perPage": 1},
+        params={"perPage": 1, "filter": f'region = "{profile_key}"'},
         timeout=15,
     )
     response.raise_for_status()
@@ -70,35 +87,37 @@ def get_connection_record(token):
     return items[0] if items else None
 
 
-def save_connection(token, fields):
-    existing = get_connection_record(token)
+def save_connection(token, profile_key, fields):
+    existing = get_connection_record(token, profile_key)
     headers = {"Authorization": token, "Content-Type": "application/json"}
+    body = {"region": profile_key, **fields}
     if existing:
         response = requests.patch(
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_COLLECTION}/records/{existing['id']}",
             headers=headers,
-            json=fields,
+            json=body,
             timeout=15,
         )
     else:
         response = requests.post(
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_COLLECTION}/records",
             headers=headers,
-            json=fields,
+            json=body,
             timeout=15,
         )
     if response.status_code not in (200, 201):
         raise RuntimeError(f"PocketBase write failed: HTTP {response.status_code} - {response.text}")
 
 
-def exchange_code_for_tokens(code):
+def exchange_code_for_tokens(code, profile_key):
+    profile = AD_PROFILES[profile_key]
     response = requests.post(
         LWA_TOKEN_URL,
         data={
             "grant_type": "authorization_code",
             "code": code,
-            "client_id": AD_CLIENT_ID_USA,
-            "client_secret": AD_CLIENT_SECRET_USA,
+            "client_id": profile["client_id"],
+            "client_secret": profile["client_secret"],
             "redirect_uri": REDIRECT_URI,
         },
         timeout=15,
@@ -108,7 +127,8 @@ def exchange_code_for_tokens(code):
     return response.json()
 
 
-def discover_profiles(access_token):
+def discover_profiles(access_token, profile_key):
+    client_id = AD_PROFILES[profile_key]["client_id"]
     profiles = []
     errors = []
     for region, base_url in ADS_REGION_ENDPOINTS.items():
@@ -117,7 +137,7 @@ def discover_profiles(access_token):
                 f"{base_url}/v2/profiles",
                 headers={
                     "Authorization": f"Bearer {access_token}",
-                    "Amazon-Advertising-API-ClientId": AD_CLIENT_ID_USA,
+                    "Amazon-Advertising-API-ClientId": client_id,
                 },
                 timeout=15,
             )
@@ -141,36 +161,37 @@ def discover_profiles(access_token):
 def AdsOAuthCallback(request):
     error = request.args.get("error")
     code = request.args.get("code")
+    profile_key = request.args.get("state") or "USA"
 
+    if profile_key not in AD_PROFILES:
+        return "", 302, {"Location": f"{FRONTEND_ADS_URL}?error=unknown_profile"}
     if error:
         return "", 302, {"Location": f"{FRONTEND_ADS_URL}?error={error}"}
     if not code:
         return "", 302, {"Location": f"{FRONTEND_ADS_URL}?error=missing_code"}
 
     try:
-        tokens = exchange_code_for_tokens(code)
+        tokens = exchange_code_for_tokens(code, profile_key)
         refresh_token = tokens.get("refresh_token")
         access_token = tokens.get("access_token")
         if not refresh_token or not access_token:
             raise RuntimeError("Token response missing refresh_token/access_token")
 
-        profiles, profile_errors = discover_profiles(access_token)
+        profiles, profile_errors = discover_profiles(access_token, profile_key)
 
         pb_token = pb_authenticate()
-        save_connection(pb_token, {
-            "region": "ALL",
+        save_connection(pb_token, profile_key, {
             "refresh_token": refresh_token,
             "status": "connected",
             "profiles": profiles,
             "last_error": "; ".join(profile_errors) if profile_errors else "",
         })
 
-        return "", 302, {"Location": f"{FRONTEND_ADS_URL}?connected=1"}
+        return "", 302, {"Location": f"{FRONTEND_ADS_URL}?connected={profile_key}"}
     except Exception as exc:
         try:
             pb_token = pb_authenticate()
-            save_connection(pb_token, {
-                "region": "ALL",
+            save_connection(pb_token, profile_key, {
                 "refresh_token": "",
                 "status": "error",
                 "profiles": [],
@@ -187,26 +208,30 @@ def GetAdsConnectionStatus(request):
 
     try:
         token = pb_authenticate()
-        record = get_connection_record(token)
-        connected = bool(record) and record.get("status") == "connected"
-        return json_response({
-            "connected": connected,
-            "status": (record.get("status") if record else "not_connected"),
-            "lastError": (record.get("last_error") if record else "") or "",
-            "profiles": (record.get("profiles") if connected else []) or [],
-            "authorizeUrl": build_authorize_url(),
-        })
+        connections = {}
+        for profile_key in AD_PROFILES:
+            record = get_connection_record(token, profile_key)
+            connected = bool(record) and record.get("status") == "connected"
+            connections[profile_key] = {
+                "connected": connected,
+                "status": (record.get("status") if record else "not_connected"),
+                "lastError": (record.get("last_error") if record else "") or "",
+                "profiles": (record.get("profiles") if connected else []) or [],
+                "authorizeUrl": build_authorize_url(profile_key),
+            }
+        return json_response({"connections": connections})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
 
 
-def build_authorize_url():
+def build_authorize_url(profile_key):
     from urllib.parse import urlencode
 
     params = {
-        "client_id": AD_CLIENT_ID_USA,
+        "client_id": AD_PROFILES[profile_key]["client_id"],
         "scope": "advertising::campaign_management",
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
+        "state": profile_key,
     }
     return f"https://www.amazon.com/ap/oa?{urlencode(params)}"
