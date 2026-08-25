@@ -52,6 +52,16 @@ def GetAwdInventory(request):
     from GetAwdInventory import GetAwdInventory as _impl
     return _impl(request)
 
+
+def AdsOAuthCallback(request):
+    from AdsAuth import AdsOAuthCallback as _impl
+    return _impl(request)
+
+
+def GetAdsConnectionStatus(request):
+    from AdsAuth import GetAdsConnectionStatus as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
