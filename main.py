@@ -97,6 +97,31 @@ def GetAdsSearchTermStats(request):
     from AdsSearchTermReporting import GetAdsSearchTermStats as _impl
     return _impl(request)
 
+
+def EtsyOAuthStart(request):
+    from EtsyAuth import EtsyOAuthStart as _impl
+    return _impl(request)
+
+
+def EtsyOAuthCallback(request):
+    from EtsyAuth import EtsyOAuthCallback as _impl
+    return _impl(request)
+
+
+def GetEtsyConnectionStatus(request):
+    from EtsyAuth import GetEtsyConnectionStatus as _impl
+    return _impl(request)
+
+
+def UpdateEtsyListings(request):
+    from EtsyListings import UpdateEtsyListings as _impl
+    return _impl(request)
+
+
+def GetEtsyListings(request):
+    from EtsyListings import GetEtsyListings as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
