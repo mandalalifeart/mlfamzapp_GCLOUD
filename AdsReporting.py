@@ -675,12 +675,20 @@ def GetAdsCampaignStats(request):
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
 
-    month = request.args.get("month", type=int) if hasattr(request, "args") else None
-    year = request.args.get("year", type=int) if hasattr(request, "args") else None
+    start_date = request.args.get("start_date") if hasattr(request, "args") else None
+    end_date = request.args.get("end_date") if hasattr(request, "args") else None
     country_code = request.args.get("country_code") if hasattr(request, "args") else None
-    if not month or not year:
+
+    if not start_date or not end_date:
+        # Back-compat: no explicit range means "this month" - same default
+        # the frontend used before the date-range picker was added.
+        month = request.args.get("month", type=int) if hasattr(request, "args") else None
+        year = request.args.get("year", type=int) if hasattr(request, "args") else None
         now_la = datetime.now(LA_TZ)
         month, year = month or now_la.month, year or now_la.year
+        start_date = f"{year:04d}-{month:02d}-01"
+        next_month_first = datetime(year + (month == 12), (month % 12) + 1, 1)
+        end_date = (next_month_first - timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
         token = pb_authenticate()
@@ -723,7 +731,7 @@ def GetAdsCampaignStats(request):
                 break
             page += 1
 
-        filter_str = f"(month = {month} && year = {year})"
+        filter_str = f'(date >= "{start_date}" && date <= "{end_date}")'
         if country_code:
             filter_str += f' && country_code = "{country_code}"'
 
@@ -758,6 +766,6 @@ def GetAdsCampaignStats(request):
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
 
-        return json_response({"month": month, "year": year, "campaigns": rows})
+        return json_response({"startDate": start_date, "endDate": end_date, "campaigns": rows})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
