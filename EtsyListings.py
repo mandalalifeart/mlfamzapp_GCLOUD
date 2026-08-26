@@ -301,3 +301,48 @@ def GetEtsyListings(request):
         return json_response({"listings": listings})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
+
+
+def GetEtsyListingDetail(request):
+    """Read-only: full detail for one listing (description, tags, materials,
+    photo URLs) - fields GetEtsyListings/UpdateEtsyListings don't pull since
+    they're only needed when actually looking at a specific listing to plan
+    an improvement, not for every listing on every routine pull."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    listing_id = request.args.get("listing_id") if hasattr(request, "args") else None
+    if not listing_id:
+        return json_response({"error": "listing_id is required"}, 400)
+
+    try:
+        pb_token = pb_authenticate()
+        connection = pb_get_connection(pb_token)
+        if not connection or connection.get("status") != "connected":
+            return json_response({"error": "Etsy is not connected"}, 400)
+
+        access_token, new_refresh_token = refresh_access_token(connection["refresh_token"])
+        if new_refresh_token != connection.get("refresh_token"):
+            pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
+
+        headers = {"x-api-key": api_key_header(), "Authorization": f"Bearer {access_token}"}
+        listing_resp = requests.get(f"{ETSY_API_BASE}/listings/{listing_id}", headers=headers, timeout=15)
+        if listing_resp.status_code != 200:
+            return json_response({"error": f"HTTP {listing_resp.status_code} - {listing_resp.text}"}, 502)
+        listing = listing_resp.json()
+
+        images_resp = requests.get(f"{ETSY_API_BASE}/listings/{listing_id}/images", headers=headers, timeout=15)
+        images = [img.get("url_570xN") or img.get("url_fullxfull", "")
+                  for img in (images_resp.json().get("results", []) if images_resp.status_code == 200 else [])]
+
+        return json_response({
+            "listingId": listing_id,
+            "title": listing.get("title", ""),
+            "description": listing.get("description", ""),
+            "tags": listing.get("tags", []),
+            "materials": listing.get("materials", []),
+            "whoMade": listing.get("who_made", ""),
+            "images": images,
+        })
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)

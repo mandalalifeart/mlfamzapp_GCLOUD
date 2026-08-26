@@ -123,6 +123,11 @@ def GetEtsyListings(request):
     return _impl(request)
 
 
+def GetEtsyListingDetail(request):
+    from EtsyListings import GetEtsyListingDetail as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)
