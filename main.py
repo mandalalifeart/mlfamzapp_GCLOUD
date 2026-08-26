@@ -128,6 +128,21 @@ def GetEtsyListingDetail(request):
     return _impl(request)
 
 
+def UpdateEtsyListingContent(request):
+    from EtsyListings import UpdateEtsyListingContent as _impl
+    return _impl(request)
+
+
+def MonitorEtsyExperiments(request):
+    from EtsyListingExperiments import MonitorEtsyExperiments as _impl
+    return _impl(request)
+
+
+def StartEtsyExperiment(request):
+    from EtsyListingExperiments import StartEtsyExperiment as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)

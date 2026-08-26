@@ -17,6 +17,7 @@ from EtsyAuth import (
 
 POCKETBASE_ETSY_LISTINGS_COLLECTION = os.environ.get("POCKETBASE_ETSY_LISTINGS_COLLECTION", "etsy_listings")
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 LISTINGS_PAGE_LIMIT = 100
 # Etsy's rate limit is generous (10 req/sec, 10k/day for a standard app), but
@@ -344,5 +345,61 @@ def GetEtsyListingDetail(request):
             "whoMade": listing.get("who_made", ""),
             "images": images,
         })
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
+def UpdateEtsyListingContent(request):
+    """Writes description and/or tags to a LIVE public Etsy listing.
+    Deliberately narrow: only touches the two fields explicitly passed in
+    the request body, never title/price/quantity/images, and only for one
+    listing_id at a time - there is no bulk-edit path. This is a real,
+    customer-facing write (affects search ranking/buyer-facing copy) but is
+    fully reversible (no money/inventory moved), unlike MCF order creation."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    body = request.get_json(silent=True) or {}
+    listing_id = body.get("listing_id")
+    description = body.get("description")
+    tags = body.get("tags")
+    if not listing_id:
+        return json_response({"error": "listing_id is required"}, 400)
+    if description is None and tags is None:
+        return json_response({"error": "Provide at least one of description/tags to update"}, 400)
+    if tags is not None and len(tags) > 13:
+        return json_response({"error": f"Etsy allows at most 13 tags, got {len(tags)}"}, 400)
+
+    try:
+        pb_token = pb_authenticate()
+        connection = pb_get_connection(pb_token)
+        if not connection or connection.get("status") != "connected":
+            return json_response({"error": "Etsy is not connected"}, 400)
+
+        shop_id = connection["shop_id"]
+        access_token, new_refresh_token = refresh_access_token(connection["refresh_token"])
+        if new_refresh_token != connection.get("refresh_token"):
+            pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
+
+        update_body = {}
+        if description is not None:
+            update_body["description"] = description
+        if tags is not None:
+            update_body["tags"] = tags
+
+        headers = {"x-api-key": api_key_header(), "Authorization": f"Bearer {access_token}",
+                   "Content-Type": "application/json"}
+        response = requests.patch(
+            f"{ETSY_API_BASE}/shops/{shop_id}/listings/{listing_id}",
+            headers=headers,
+            json=update_body,
+            timeout=15,
+        )
+        if response.status_code not in (200, 201):
+            return json_response({"error": f"HTTP {response.status_code} - {response.text}"}, 502)
+
+        return json_response({"updated": True, "listingId": listing_id, "fields": list(update_body.keys())})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
