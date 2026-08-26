@@ -27,8 +27,14 @@ REDIRECT_URI = os.environ.get(
 ETSY_AUTHORIZE_URL = "https://www.etsy.com/oauth/connect"
 ETSY_TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 ETSY_API_BASE = "https://api.etsy.com/v3/application"
-# Read-only: listings + shop info only, per the scope this connection is for.
-ETSY_SCOPES = "listings_r shops_r transactions_r"
+# transactions_w added 2026-08-26 so UpdateEtsyTrackingFromAmazon can push
+# tracking numbers back to Etsy (createReceiptShipment) - everything else
+# here is still read-only. Existing connections authorized before this change
+# only carry the old read-only scopes; the refresh token doesn't gain the new
+# scope automatically, so the user must reconnect via the /etsy page once for
+# tracking pushes to start working (a 403 with an insufficient_scope-style
+# error from Etsy is the symptom if this step is skipped).
+ETSY_SCOPES = "listings_r shops_r transactions_r transactions_w"
 
 
 def cors_headers():

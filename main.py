@@ -152,6 +152,11 @@ def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)
 
+
+def UpdateEtsyTrackingFromAmazon(request):
+    from EtsyMcfFulfillment import UpdateEtsyTrackingFromAmazon as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover

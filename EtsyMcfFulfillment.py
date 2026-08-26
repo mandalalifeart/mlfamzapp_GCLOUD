@@ -6,7 +6,9 @@ from email.mime.text import MIMEText
 import requests
 
 from EtsyAuth import (
+    ETSY_API_BASE,
     POCKETBASE_URL,
+    api_key_header,
     cors_headers,
     json_response,
     pb_authenticate,
@@ -265,14 +267,23 @@ def find_receipt(shop_id, access_token, receipt_id):
     return None, errors
 
 
+def fulfillment_outbound_client():
+    from sp_api.api import FulfillmentOutbound
+    from sp_api.base import Marketplaces
+
+    credentials = {
+        "refresh_token": os.environ["REFRESH_TOKEN_USA"],
+        "lwa_app_id": os.environ["CLIENT_ID_USA"],
+        "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
+    }
+    return FulfillmentOutbound(credentials=credentials, marketplace=Marketplaces.US)
+
+
 def create_mcf_order(receipt, sku_map):
     """Builds and submits one real Amazon MCF fulfillment order for a single
     Etsy receipt. Raises on any unmapped SKU rather than partially fulfilling
     an order. This is the one function in this file with a real, hard-to-
     reverse side effect - callers must gate it deliberately."""
-    from sp_api.api import FulfillmentOutbound
-    from sp_api.base import Marketplaces
-
     transactions = receipt.get("transactions", []) or []
     items = []
     for idx, txn in enumerate(transactions):
@@ -300,12 +311,7 @@ def create_mcf_order(receipt, sku_map):
     if receipt.get("second_line"):
         address["addressLine2"] = receipt["second_line"]
 
-    credentials = {
-        "refresh_token": os.environ["REFRESH_TOKEN_USA"],
-        "lwa_app_id": os.environ["CLIENT_ID_USA"],
-        "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
-    }
-    client = FulfillmentOutbound(credentials=credentials, marketplace=Marketplaces.US)
+    client = fulfillment_outbound_client()
     created = datetime.fromtimestamp(
         receipt.get("create_timestamp") or receipt.get("created_timestamp") or 0, tz=timezone.utc
     )
@@ -375,15 +381,7 @@ def CheckMcfAccess(request):
         return json_response({"error": "Unauthorized"}, 401)
 
     try:
-        from sp_api.api import FulfillmentOutbound
-        from sp_api.base import Marketplaces
-
-        credentials = {
-            "refresh_token": os.environ["REFRESH_TOKEN_USA"],
-            "lwa_app_id": os.environ["CLIENT_ID_USA"],
-            "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
-        }
-        client = FulfillmentOutbound(credentials=credentials, marketplace=Marketplaces.US)
+        client = fulfillment_outbound_client()
         resp = client.list_all_fulfillment_orders(queryStartDate="2026-01-01T00:00:00Z")
         orders = (resp.payload or {}).get("FulfillmentOrders", [])
         return json_response({
@@ -396,3 +394,229 @@ def CheckMcfAccess(request):
             "error": str(exc),
             "type": exc.__class__.__name__,
         }, 200)
+
+
+def load_in_progress_orders(pb_token):
+    """receipt_id list for every etsy_orders row still mcf_status="in_progress"
+    - these are the ones a real Amazon MCF order was created for (by hand or
+    via CreateMcfOrderForReceipt) but that haven't had a tracking number
+    pushed back to Etsy yet."""
+    receipt_ids = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+            headers={"Authorization": pb_token},
+            params={"filter": 'mcf_status = "in_progress"', "fields": "receipt_id", "perPage": 200, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        receipt_ids.extend(item["receipt_id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return receipt_ids
+
+
+def fetch_etsy_carrier_names(access_token, origin_country_iso="US"):
+    """Etsy's createReceiptShipment carrier_name must match one of the names
+    this endpoint returns (confirmed via Etsy's own OpenAPI spec) - there is
+    no fixed enum to hardcode against, so the valid set is fetched live."""
+    response = requests.get(
+        f"{ETSY_API_BASE}/shipping-carriers",
+        headers={"x-api-key": api_key_header(), "Authorization": f"Bearer {access_token}"},
+        params={"origin_country_iso": origin_country_iso},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return [c["name"] for c in response.json().get("results", []) if c.get("name")]
+
+
+# Amazon's package carrierCode values (e.g. "FEDEX", "AMZN_US") don't always
+# spell the carrier the same way Etsy's shipping-carriers list does (e.g.
+# "FedEx") - these are the mappings confirmed to not line up with a plain
+# case-insensitive equality check. "AMZN_US" (Amazon Logistics) deliberately
+# has no entry: Etsy has no equivalent carrier, so it's left to fall through
+# to "no confident match" rather than mapped to something wrong.
+AMAZON_TO_ETSY_CARRIER_HINTS = {
+    "FEDEX": "fedex",
+    "FEDEX_SMARTPOST": "fedex",
+    "UPS_MI": "ups",
+    "DHL_GLOBAL_MAIL": "dhl",
+    "DHL_ECOMMERCE": "dhl",
+}
+
+
+def map_carrier_name(amazon_carrier_code, etsy_carrier_names):
+    """Maps one Amazon package carrierCode to one of Etsy's valid carrier
+    names, or None if there's no confident match - callers must skip pushing
+    tracking for a package rather than guess, since a wrong carrier_name on
+    Etsy sends the buyer a shipment notification pointing at the wrong
+    tracking system."""
+    if not amazon_carrier_code:
+        return None
+    code_lower = amazon_carrier_code.strip().lower()
+    for name in etsy_carrier_names:
+        if name.lower() == code_lower:
+            return name
+    hint = AMAZON_TO_ETSY_CARRIER_HINTS.get(amazon_carrier_code.strip().upper(), code_lower)
+    for name in etsy_carrier_names:
+        if hint in name.lower():
+            return name
+    return None
+
+
+def extract_shipped_packages(payload):
+    """All packages from SHIPPED fulfillment shipments on a getFulfillmentOrder
+    response - empty if the order hasn't shipped yet (still Pending/Processing
+    on Amazon's side)."""
+    packages = []
+    for shipment in payload.get("fulfillmentShipments") or []:
+        if shipment.get("fulfillmentShipmentStatus") != "SHIPPED":
+            continue
+        for pkg in shipment.get("fulfillmentShipmentPackage") or []:
+            tracking = pkg.get("trackingNumber") or pkg.get("amazonFulfillmentTrackingNumber")
+            if tracking:
+                packages.append({"trackingNumber": tracking, "carrierCode": pkg.get("carrierCode", "")})
+    return packages
+
+
+def push_tracking_to_etsy(access_token, shop_id, receipt_id, tracking_code, carrier_name):
+    response = requests.post(
+        f"{ETSY_API_BASE}/shops/{shop_id}/receipts/{receipt_id}/tracking",
+        headers={"x-api-key": api_key_header(), "Authorization": f"Bearer {access_token}"},
+        json={"tracking_code": tracking_code, "carrier_name": carrier_name, "send_bcc": False},
+        timeout=30,
+    )
+    if response.status_code not in (200, 201):
+        raise RuntimeError(f"Etsy tracking update failed: HTTP {response.status_code} - {response.text}")
+    return response.json()
+
+
+def format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors):
+    lines = [
+        f"Etsy tracking sync (from Amazon MCF) - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        "",
+        f"{len(shipped)} order(s) marked shipped on Etsy with tracking, "
+        f"{still_processing} still processing on Amazon, "
+        f"{len(skipped_no_carrier_match)} shipped but skipped (no carrier match), "
+        f"{len(errors)} error(s).",
+        "",
+    ]
+    for entry in shipped:
+        lines.append(f"  Receipt {entry['receiptId']}: {entry['carrier']} {entry['tracking']}")
+    if skipped_no_carrier_match:
+        lines.append("")
+        lines.append("Skipped (Amazon carrier code didn't match any Etsy carrier - needs a manual update):")
+        for entry in skipped_no_carrier_match:
+            lines.append(f"  Receipt {entry['receiptId']}: Amazon carrierCode '{entry['carrierCode']}', tracking {entry['tracking']}")
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors:
+            lines.append(f"  {err}")
+    return "\n".join(lines)
+
+
+def send_tracking_email(text):
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD or not REPORT_EMAIL_TO:
+        return
+    msg = MIMEText(text)
+    msg["Subject"] = f"Etsy tracking sync - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    msg["From"] = GMAIL_USER
+    msg["To"] = REPORT_EMAIL_TO
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+
+
+def send_tracking_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    if len(text) > 3900:
+        text = text[:3900] + "\n...(truncated, see email for full report)"
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=15,
+    )
+
+
+def UpdateEtsyTrackingFromAmazon(request):
+    """Daily job: for every Etsy order with mcf_status="in_progress" (a real
+    Amazon MCF order was placed for it), checks whether that Amazon
+    fulfillment order has shipped, and if so pushes the real tracking
+    number(s) back to Etsy via createReceiptShipment - this is what actually
+    marks the Etsy order shipped and notifies the buyer. Requires the Etsy
+    connection to carry the transactions_w scope (added 2026-08-26); an
+    old read-only-only connection needs reconnecting via /etsy first."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    try:
+        pb_token = pb_authenticate()
+        connection = pb_get_connection(pb_token)
+        if not connection or connection.get("status") != "connected":
+            return json_response({"error": "Etsy is not connected"}, 400)
+
+        shop_id = connection["shop_id"]
+        access_token, new_refresh_token = refresh_access_token(connection["refresh_token"])
+        if new_refresh_token != connection.get("refresh_token"):
+            pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
+
+        receipt_ids = load_in_progress_orders(pb_token)
+        if not receipt_ids:
+            return json_response({"inProgress": 0, "shipped": 0, "stillProcessing": 0, "errors": []})
+
+        etsy_carrier_names = fetch_etsy_carrier_names(access_token)
+        client = fulfillment_outbound_client()
+
+        shipped = []
+        skipped_no_carrier_match = []
+        still_processing = 0
+        errors = []
+
+        for receipt_id in receipt_ids:
+            try:
+                resp = client.get_fulfillment_order(sellerFulfillmentOrderId=f"ETSY-{receipt_id}")
+                packages = extract_shipped_packages(resp.payload or {})
+                if not packages:
+                    still_processing += 1
+                    continue
+
+                pushed_any = False
+                for pkg in packages:
+                    carrier_name = map_carrier_name(pkg["carrierCode"], etsy_carrier_names)
+                    if not carrier_name:
+                        skipped_no_carrier_match.append({
+                            "receiptId": receipt_id,
+                            "carrierCode": pkg["carrierCode"],
+                            "tracking": pkg["trackingNumber"],
+                        })
+                        continue
+                    push_tracking_to_etsy(access_token, shop_id, receipt_id, pkg["trackingNumber"], carrier_name)
+                    shipped.append({"receiptId": receipt_id, "carrier": carrier_name, "tracking": pkg["trackingNumber"]})
+                    pushed_any = True
+
+                if pushed_any:
+                    set_order_mcf_status(pb_token, receipt_id, "shipped")
+            except Exception as exc:
+                errors.append(f"Receipt {receipt_id}: {exc}")
+
+        report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors)
+        send_tracking_email(report_text)
+        send_tracking_telegram(report_text)
+
+        return json_response({
+            "inProgress": len(receipt_ids),
+            "shipped": len(shipped),
+            "stillProcessing": still_processing,
+            "skippedNoCarrierMatch": skipped_no_carrier_match,
+            "errors": errors,
+        })
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
