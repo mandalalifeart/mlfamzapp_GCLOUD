@@ -84,6 +84,18 @@ def fetch_receipts(shop_id, access_token, min_created, max_created, errors):
     return receipts
 
 
+def txn_sku_label(txn):
+    """"variation:sku" (e.g. "Blue:PAREO_ACA_6B") using the transaction's own
+    variations list, or the bare sku when it carries no variation. Empty when
+    the transaction has no SKU at all (~36% don't, per DiagnoseEtsyOrders)."""
+    sku = txn.get("sku")
+    if not sku:
+        return ""
+    variations = txn.get("variations") or []
+    variation_name = " / ".join(v.get("formatted_value", "") for v in variations if v.get("formatted_value"))
+    return f"{variation_name}:{sku}" if variation_name else sku
+
+
 def receipt_to_order_body(shop_id, receipt, marketplace):
     transactions = receipt.get("transactions", []) or []
     total = receipt.get("grandtotal") or {}
@@ -94,15 +106,22 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
     dt = datetime.fromtimestamp(created, tz=timezone.utc) if created else None
 
     item_count = sum(txn.get("quantity", 0) or 0 for txn in transactions)
-    # e.g. "2x Blue Boho Pareo (SKU: PAREO_ACA_6B), 1x Mandala Cushion Cover"
-    # - a readable one-line stand-in for the full transaction list on the
-    # orders table. Not every transaction has a SKU (~36% don't, per
-    # DiagnoseEtsyOrders), so the "(SKU: ...)" suffix is omitted for those.
+    # Readable one-line stand-in for the full transaction list, kept for any
+    # older consumer of this field - the orders table itself now renders one
+    # row per transaction from line_items instead of parsing this string.
     items_summary = ", ".join(
-        f"{txn.get('quantity', 0)}x {txn.get('title', '')}"
-        + (f" (SKU: {txn.get('sku')})" if txn.get("sku") else "")
-        for txn in transactions
+        f"{txn.get('quantity', 0)}x {txn.get('title', '')}" for txn in transactions
     )
+    # One entry per transaction (line item) so the frontend can give each
+    # SKU its own table row instead of cramming them into items_summary.
+    line_items = [
+        {
+            "title": txn.get("title", ""),
+            "quantity": txn.get("quantity", 0) or 0,
+            "sku": txn_sku_label(txn),
+        }
+        for txn in transactions
+    ]
 
     return {
         "shop_id": str(shop_id),
@@ -117,6 +136,7 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
         "currency": total.get("currency_code", ""),
         "item_count": item_count,
         "items_summary": items_summary,
+        "line_items": line_items,
         "is_shipped": bool(receipt.get("is_shipped")),
         "status": "Shipped" if receipt.get("is_shipped") else "Pending",
     }
@@ -477,6 +497,7 @@ def GetEtsyOrders(request):
                     "currency": item.get("currency", ""),
                     "itemCount": item.get("item_count", 0),
                     "itemsSummary": item.get("items_summary", ""),
+                    "lineItems": item.get("line_items") or [],
                     "status": item.get("status", ""),
                 })
             if len(orders) >= limit or page >= data.get("totalPages", 1):

@@ -47,7 +47,12 @@ def fetch_active_listings(shop_id, access_token):
     return listings
 
 
-def fetch_listing_sku(listing_id, access_token, errors):
+def fetch_listing_skus(listing_id, access_token, errors):
+    """Returns one entry per inventory product/variation on the listing, as
+    "variation:sku" (e.g. "Blue:CoverPoufRectBlue93"), or the bare sku when
+    the product has no variation properties. Each variation gets its own row
+    on the listings table rather than being packed into one comma-joined
+    cell - a single listing can genuinely carry many distinct SKUs."""
     headers = {"x-api-key": api_key_header(), "Authorization": f"Bearer {access_token}"}
     try:
         response = requests.get(
@@ -57,14 +62,8 @@ def fetch_listing_sku(listing_id, access_token, errors):
         )
         if response.status_code != 200:
             errors.append(f"listing {listing_id} inventory: HTTP {response.status_code}")
-            return ""
+            return []
         products = response.json().get("products", []) or []
-        # Multiple product variations under one listing (e.g. different
-        # colors) sometimes share the same SKU string, so the bare SKU alone
-        # doesn't distinguish them - prefix each with its variation name
-        # (the product's property values, e.g. "Blue" or "Blue / Large"),
-        # giving entries like "Blue-PAREO_ACA_6B". A product with no
-        # variation properties (single-SKU listing) keeps just the SKU.
         seen = set()
         entries = []
         for p in products:
@@ -74,14 +73,14 @@ def fetch_listing_sku(listing_id, access_token, errors):
             variation_name = " / ".join(
                 ", ".join(pv.get("values") or []) for pv in (p.get("property_values") or []) if pv.get("values")
             )
-            entry = f"{variation_name}-{sku}" if variation_name else sku
+            entry = f"{variation_name}:{sku}" if variation_name else sku
             if entry not in seen:
                 seen.add(entry)
                 entries.append(entry)
-        return ", ".join(entries)
+        return entries
     except requests.RequestException as exc:
         errors.append(f"listing {listing_id} inventory: {exc}")
-        return ""
+        return []
 
 
 def listing_to_body(shop_id, listing, sku):
@@ -157,8 +156,9 @@ def pull_and_store_listings():
 
     bodies = []
     for listing in listings:
-        sku = fetch_listing_sku(listing.get("listing_id"), access_token, errors)
-        bodies.append(listing_to_body(shop_id, listing, sku))
+        skus = fetch_listing_skus(listing.get("listing_id"), access_token, errors)
+        for sku in (skus or [""]):
+            bodies.append(listing_to_body(shop_id, listing, sku))
         time.sleep(INVENTORY_FETCH_DELAY_SECONDS)
 
     existing_ids = pb_list_listing_ids(pb_token, shop_id)
