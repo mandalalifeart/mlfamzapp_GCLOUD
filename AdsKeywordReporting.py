@@ -31,6 +31,10 @@ REPORT_POLL_DELAY_SECONDS = 10
 # discovered from the HTTP 400 "Allowed values" list Amazon returns for a
 # bad column, same as the campaign-report schemas). SD has no keyword
 # columns at all - it only targets products/audiences, not keywords.
+# "keywordBid" (added 2026-08-26, confirmed via the same allowed-values
+# probe) is valid for SP/SB but not present at all in sdTargeting's allowed
+# column list - SD uses algorithmic/different bidding with no per-target
+# bid value to report, so SD rows simply have no bid.
 AD_KEYWORD_PRODUCTS = [
     {
         "key": "SP",
@@ -38,7 +42,7 @@ AD_KEYWORD_PRODUCTS = [
         "report_type_id": "spTargeting",
         "columns": [
             "date", "campaignId", "campaignName", "campaignStatus", "adGroupId", "adGroupName",
-            "keywordId", "keyword", "keywordType", "matchType", "targeting",
+            "keywordId", "keyword", "keywordType", "matchType", "targeting", "keywordBid",
             "impressions", "clicks", "cost", "purchases7d", "sales7d",
         ],
         "sales_field": "sales7d",
@@ -50,7 +54,7 @@ AD_KEYWORD_PRODUCTS = [
         "report_type_id": "sbTargeting",
         "columns": [
             "date", "campaignId", "campaignName", "campaignStatus", "adGroupId", "adGroupName",
-            "keywordId", "keywordText", "keywordType", "matchType",
+            "keywordId", "keywordText", "keywordType", "matchType", "keywordBid",
             "targetingId", "targetingExpression", "targetingText", "targetingType",
             "impressions", "clicks", "cost", "purchases", "sales",
         ],
@@ -112,6 +116,7 @@ def keyword_row_to_body(ads_profile, row, product):
         "spend": row.get("cost", 0),
         "sales": row.get(product["sales_field"], 0),
         "orders": row.get(product["purchases_field"], 0),
+        "bid": row.get("keywordBid"),
     }
 
 
@@ -336,12 +341,18 @@ def GetAdsKeywordStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
+                    "bid": None, "_bidDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
                 bucket["spend"] += item.get("spend", 0)
                 bucket["sales"] += item.get("sales", 0)
                 bucket["orders"] += item.get("orders", 0)
+                # bid is a current setting, not a metric to sum - keep the
+                # value from whichever row in range is most recent.
+                if item.get("bid") is not None and item.get("date", "") >= bucket["_bidDate"]:
+                    bucket["bid"] = item.get("bid")
+                    bucket["_bidDate"] = item.get("date", "")
             if page >= data.get("totalPages", 1):
                 break
             page += 1
@@ -349,6 +360,7 @@ def GetAdsKeywordStats(request):
         rows = sorted(keywords.values(), key=lambda k: -k["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
+            row.pop("_bidDate", None)
 
         return json_response({"startDate": start_date, "endDate": end_date, "keywords": rows})
     except Exception as exc:
