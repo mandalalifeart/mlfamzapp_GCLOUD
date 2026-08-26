@@ -122,6 +122,11 @@ def GetEtsyListings(request):
     from EtsyListings import GetEtsyListings as _impl
     return _impl(request)
 
+
+def DiagnoseEtsyOrders(request):
+    from EtsyOrders import DiagnoseEtsyOrders as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover

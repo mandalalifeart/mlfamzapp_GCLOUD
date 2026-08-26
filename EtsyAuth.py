@@ -28,7 +28,7 @@ ETSY_AUTHORIZE_URL = "https://www.etsy.com/oauth/connect"
 ETSY_TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 ETSY_API_BASE = "https://api.etsy.com/v3/application"
 # Read-only: listings + shop info only, per the scope this connection is for.
-ETSY_SCOPES = "listings_r shops_r"
+ETSY_SCOPES = "listings_r shops_r transactions_r"
 
 
 def cors_headers():
