@@ -224,6 +224,27 @@ def load_order_counts_by_listing(token):
     return counts
 
 
+# Thresholds are deliberately simple/absolute rather than percentile-based -
+# with 75 listings there isn't enough spread for percentiles to be stable,
+# and a flat cutoff is easier for a human to reason about ("50+ views, still
+# 0 orders" is a clear enough signal on its own).
+LOW_VISIBILITY_VIEWS = 20
+NEEDS_ATTENTION_VIEWS = 50
+
+
+def compute_insight(views, num_favorers, orders_count):
+    """A cheap first-pass read on whether a listing's problem is visibility
+    (not being found - a tags/title/SEO fix) or conversion (being found but
+    not bought - a price/photos/description fix), using only data this app
+    already pulls from Etsy. Not a substitute for actually looking at the
+    listing, just a triage signal for which listings are worth a look."""
+    if views >= NEEDS_ATTENTION_VIEWS and orders_count == 0:
+        return "Needs attention: high views, no sales - check price/photos/description"
+    if views < LOW_VISIBILITY_VIEWS:
+        return "Low visibility: few views - check tags/title/keywords"
+    return "OK"
+
+
 def GetEtsyListings(request):
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
@@ -274,6 +295,7 @@ def GetEtsyListings(request):
             bucket = order_counts.get(str(listing["listingId"]), {"orders": 0, "quantity": 0})
             listing["ordersCount"] = bucket["orders"]
             listing["orderedQuantity"] = bucket["quantity"]
+            listing["insight"] = compute_insight(listing["views"], listing["numFavorers"], listing["ordersCount"])
 
         listings.sort(key=lambda l: l["title"])
         return json_response({"listings": listings})
