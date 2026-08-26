@@ -148,6 +148,16 @@ def GetAmazonListingItem(request):
     return _impl(request)
 
 
+def DeleteAmazonListingItem(request):
+    from AmazonListingOps import DeleteAmazonListingItem as _impl
+    return _impl(request)
+
+
+def ProcessAmazonRelistQueue(request):
+    from AmazonListingOps import ProcessAmazonRelistQueue as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)

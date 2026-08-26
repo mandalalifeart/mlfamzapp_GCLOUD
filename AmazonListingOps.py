@@ -1,7 +1,39 @@
 import os
 
+import requests
+
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 SELLER_ID = os.environ.get("AMAZON_SELLER_ID", "")
+POCKETBASE_URL = os.environ.get("POCKETBASE_URL", "").rstrip("/")
+POCKETBASE_ADMIN_EMAIL = os.environ.get("POCKETBASE_ADMIN_EMAIL", "")
+POCKETBASE_ADMIN_PASSWORD = os.environ.get("POCKETBASE_ADMIN_PASSWORD", "")
+POCKETBASE_RELIST_QUEUE_COLLECTION = os.environ.get("POCKETBASE_RELIST_QUEUE_COLLECTION", "amazon_relist_queue")
+
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+
+
+def pb_authenticate():
+    response = requests.post(
+        f"{POCKETBASE_URL}/api/collections/_superusers/auth-with-password",
+        json={"identity": POCKETBASE_ADMIN_EMAIL, "password": POCKETBASE_ADMIN_PASSWORD},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()["token"]
+
+
+def send_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=15,
+    )
 
 
 def cors_headers():
@@ -66,3 +98,112 @@ def GetAmazonListingItem(request):
             "error": str(exc),
             "type": exc.__class__.__name__,
         }, 200)
+
+
+def DeleteAmazonListingItem(request):
+    """Deletes one live SKU's listing on amazon.com via SP-API Listings
+    Items API. Real, customer-facing, largely irreversible (the ASIN's
+    existing reviews/sales history/organic ranking are gone once deleted) -
+    double-gated (ADMIN_KEY + confirm=yes) same as the MCF order-creation
+    function, no bulk path."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    sku = request.args.get("sku") if hasattr(request, "args") else None
+    confirm = request.args.get("confirm") if hasattr(request, "args") else None
+    if not sku:
+        return json_response({"error": "sku is required"}, 400)
+    if confirm != "yes":
+        return json_response({"error": "Pass confirm=yes to actually delete this live listing"}, 400)
+    if not SELLER_ID:
+        return json_response({"error": "AMAZON_SELLER_ID env var is not set"}, 500)
+
+    try:
+        from sp_api.base import Marketplaces
+
+        client = listings_client()
+        resp = client.delete_listings_item(
+            sellerId=SELLER_ID,
+            sku=sku,
+            marketplaceIds=[Marketplaces.US.marketplace_id],
+        )
+        return json_response({"deleted": True, "sku": sku, "response": resp.payload})
+    except Exception as exc:
+        return json_response({"deleted": False, "sku": sku, "error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def ProcessAmazonRelistQueue(request):
+    """Daily-scheduled: submits the queued relist for any amazon_relist_queue
+    row that's due (scheduled_for <= now) and still pending, via
+    put_listings_item - creates the new standalone listing (no parentage
+    attributes) using the exact attribute set captured at queue time.
+    Notifies email + Telegram on each outcome."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    import time
+
+    try:
+        from sp_api.base import Marketplaces
+
+        pb_token = pb_authenticate()
+        now = int(time.time())
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records",
+            headers={"Authorization": pb_token},
+            params={"filter": f'status = "pending" && scheduled_for <= {now}', "perPage": 50},
+            timeout=15,
+        )
+        response.raise_for_status()
+        due = response.json().get("items", [])
+
+        processed = []
+        for item in due:
+            sku = item["sku"]
+            try:
+                client = listings_client()
+                resp = client.put_listings_item(
+                    sellerId=SELLER_ID,
+                    sku=sku,
+                    marketplaceIds=[Marketplaces.US.marketplace_id],
+                    productType=item.get("product_type"),
+                    attributes=item.get("attributes"),
+                )
+                requests.patch(
+                    f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records/{item['id']}",
+                    headers={"Authorization": pb_token},
+                    json={"status": "done"},
+                    timeout=15,
+                )
+                processed.append({"sku": sku, "ok": True})
+                text = f"Amazon relist complete: SKU {sku} is live again as a standalone listing (no longer part of its old variation family)."
+            except Exception as exc:
+                requests.patch(
+                    f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records/{item['id']}",
+                    headers={"Authorization": pb_token},
+                    json={"status": "error", "last_error": str(exc)},
+                    timeout=15,
+                )
+                processed.append({"sku": sku, "ok": False, "error": str(exc)})
+                text = f"Amazon relist FAILED for SKU {sku}: {exc}"
+
+            send_telegram(text)
+            if GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
+                from email.mime.text import MIMEText
+                import smtplib
+                msg = MIMEText(text)
+                msg["Subject"] = f"Amazon relist - {sku}"
+                msg["From"] = GMAIL_USER
+                msg["To"] = REPORT_EMAIL_TO
+                with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                    server.starttls()
+                    server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                    server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+
+        return json_response({"checked": len(due), "processed": processed})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
