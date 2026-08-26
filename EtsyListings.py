@@ -98,6 +98,7 @@ def listing_to_body(shop_id, listing, sku):
         "price_currency": price.get("currency_code", ""),
         "url": listing.get("url", ""),
         "updated_at": str(listing.get("last_modified_timestamp", "")),
+        "debug_raw": listing,
     }
 
 
