@@ -35,6 +35,13 @@ UI_MARKETPLACE_TO_ATOMIC = {
     "ie": {"ie"},
     "pl": {"pl"},
     "eu": {"eu"},
+    # Etsy (added 2026-08-26) - deliberately NOT in ALL_UI_MARKETPLACES below,
+    # so "All marketplaces" stays Amazon-only; each is only reachable by an
+    # explicit selection, same as how ca/mex are present in country_sales but
+    # absent from this list.
+    "etsy_usa": {"etsy_usa"},
+    "etsy_eu": {"etsy_eu"},
+    "etsy_uk": {"etsy_uk"},
 }
 ALL_UI_MARKETPLACES = ["usa", "eu", "uk", "de", "fr", "es", "it", "se", "nl", "be", "ie", "pl", "jp", "au"]
 
@@ -60,6 +67,12 @@ MARKETPLACE_CURRENCY = {
     "jp": "JPY",
     "au": "AUD",
     "eu": "EUR",
+    # Etsy receipts are always in the shop's own currency regardless of the
+    # buyer's country/marketplace bucket (USD for this shop) - unlike Amazon,
+    # there's no per-marketplace local currency to track here.
+    "etsy_usa": "USD",
+    "etsy_eu": "USD",
+    "etsy_uk": "USD",
 }
 
 FX_API_URL = "https://api.frankfurter.app/latest"
