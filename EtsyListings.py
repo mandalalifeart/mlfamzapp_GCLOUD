@@ -191,6 +191,39 @@ def UpdateEtsyListings(request):
         return json_response({"error": str(exc)}, 500)
 
 
+POCKETBASE_ETSY_ORDERS_COLLECTION = os.environ.get("POCKETBASE_ETSY_ORDERS_COLLECTION", "etsy_orders")
+
+
+def load_order_counts_by_listing(token):
+    """Orders/quantity sold per listing_id, aggregated from etsy_orders'
+    line_items. Only reflects whatever window UpdateEtsyOrders has pulled
+    into PocketBase so far (currently a rolling ~35 days), not lifetime
+    Etsy sales history - Etsy's API has no per-listing sales-count field."""
+    counts = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ETSY_ORDERS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 200, "page": page, "fields": "line_items"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            for li in item.get("line_items") or []:
+                listing_id = li.get("listingId") or ""
+                if not listing_id:
+                    continue
+                bucket = counts.setdefault(listing_id, {"orders": 0, "quantity": 0})
+                bucket["orders"] += 1
+                bucket["quantity"] += li.get("quantity", 0) or 0
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return counts
+
+
 def GetEtsyListings(request):
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
@@ -235,6 +268,12 @@ def GetEtsyListings(request):
             if page >= data.get("totalPages", 1):
                 break
             page += 1
+
+        order_counts = load_order_counts_by_listing(token)
+        for listing in listings:
+            bucket = order_counts.get(str(listing["listingId"]), {"orders": 0, "quantity": 0})
+            listing["ordersCount"] = bucket["orders"]
+            listing["orderedQuantity"] = bucket["quantity"]
 
         listings.sort(key=lambda l: l["title"])
         return json_response({"listings": listings})

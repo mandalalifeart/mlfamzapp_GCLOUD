@@ -119,6 +119,7 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
             "title": txn.get("title", ""),
             "quantity": txn.get("quantity", 0) or 0,
             "sku": txn_sku_label(txn),
+            "listingId": str(txn.get("listing_id", "")),
         }
         for txn in transactions
     ]

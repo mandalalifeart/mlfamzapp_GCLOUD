@@ -59,55 +59,68 @@ def load_sku_asin_map(pb_token):
 
 
 def build_fulfillment_plan(receipts, sku_map):
-    matched = []
-    unmatched = []
+    """One entry per pending order (receipt), each carrying its own line
+    items (sku/quantity) and a single fulfillable/remark verdict for the
+    whole order - fulfillable only if every line item on it resolved to a
+    known ASIN."""
+    orders = []
     for receipt in receipts:
         if receipt.get("is_shipped"):
             continue
-        buyer = receipt.get("name", "")
-        receipt_id = receipt.get("receipt_id")
-        for txn in receipt.get("transactions", []) or []:
+        transactions = receipt.get("transactions", []) or []
+        line_items = []
+        reasons = []
+        for txn in transactions:
             sku = txn.get("sku")
-            entry = {
-                "receiptId": receipt_id,
-                "buyer": buyer,
-                "title": txn.get("title", ""),
+            match = sku_map.get(sku) if sku else None
+            item = {
                 "sku": sku or "",
                 "quantity": txn.get("quantity", 0) or 0,
+                "title": txn.get("title", ""),
             }
-            match = sku_map.get(sku) if sku else None
             if match and match.get("asin"):
-                entry["asin"] = match["asin"]
-                entry["group"] = match.get("group", "")
-                matched.append(entry)
+                item["asin"] = match["asin"]
             else:
-                entry["reason"] = "no SKU on this order line" if not sku else "SKU not found in asin_group_mapping"
-                unmatched.append(entry)
-    return matched, unmatched
+                reason = "no SKU on this order line" if not sku else f"SKU '{sku}' not found in asin_group_mapping"
+                item["reason"] = reason
+                reasons.append(reason)
+            line_items.append(item)
+
+        if not transactions:
+            reasons.append("order has no line items")
+        fulfillable = not reasons
+
+        orders.append({
+            "receiptId": receipt.get("receipt_id"),
+            "buyer": receipt.get("name", ""),
+            "lineItems": line_items,
+            "fulfillable": fulfillable,
+            "remark": "Fulfillable" if fulfillable else "Not fulfillable: " + "; ".join(reasons),
+        })
+    return orders
 
 
-def format_report_text(matched, unmatched):
+def format_report_text(orders):
+    fulfillable_count = sum(1 for o in orders if o["fulfillable"])
     lines = [
         f"Etsy -> Amazon MCF fulfillment report - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         "*** DRY RUN - matching/reporting only, no MCF orders are being placed yet ***",
         "",
-        f"Matched ({len(matched)} line item(s) - would be sent to MCF once live):",
+        f"{len(orders)} pending order(s), {fulfillable_count} fulfillable, {len(orders) - fulfillable_count} not.",
+        "",
     ]
-    if matched:
-        for m in matched:
-            lines.append(f"  - Receipt {m['receiptId']} / {m['buyer']}: {m['quantity']}x {m['title']} "
-                          f"[SKU {m['sku']} -> ASIN {m['asin']}, group {m['group']}]")
-    else:
-        lines.append("  (none)")
+    if not orders:
+        lines.append("(no pending orders)")
+        return "\n".join(lines)
 
-    lines.append("")
-    lines.append(f"Unmatched / skipped ({len(unmatched)} line item(s)):")
-    if unmatched:
-        for u in unmatched:
-            lines.append(f"  - Receipt {u['receiptId']} / {u['buyer']}: {u['quantity']}x {u['title']} "
-                          f"[SKU {u['sku'] or '(none)'}] - {u['reason']}")
-    else:
-        lines.append("  (none)")
+    for o in orders:
+        lines.append(f"Order {o['receiptId']} — {o['buyer']}")
+        for li in o["lineItems"]:
+            sku_part = li["sku"] or "(no sku)"
+            asin_part = f" -> ASIN {li['asin']}" if li.get("asin") else ""
+            lines.append(f"  {li['quantity']}x SKU {sku_part}{asin_part} — {li['title']}")
+        lines.append(f"  Remark: {o['remark']}")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -125,20 +138,16 @@ def send_email_report(text):
         server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
 
 
-def send_telegram_report(matched, unmatched):
+def send_telegram_report(orders, report_text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    lines = [
-        f"Etsy -> MCF fulfillment (DRY RUN) - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-        f"Matched: {len(matched)} | Unmatched: {len(unmatched)}",
-    ]
-    for u in unmatched[:15]:
-        lines.append(f"- {u['sku'] or '(no sku)'} — {u['title'][:40]} — {u['reason']}")
-    if len(unmatched) > 15:
-        lines.append(f"...and {len(unmatched) - 15} more unmatched, see email for full report")
+    # Telegram messages cap around 4096 chars - send the same order-by-order
+    # text as the email, but truncate with a pointer to email for the rest.
+    if len(report_text) > 3900:
+        report_text = report_text[:3900] + "\n...(truncated, see email for full report)"
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines)},
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": report_text},
         timeout=15,
     )
 
@@ -167,17 +176,17 @@ def RunEtsyMcfFulfillment(request):
         receipts = fetch_receipts(shop_id, access_token, min_created, max_created, errors)
 
         sku_map = load_sku_asin_map(pb_token)
-        matched, unmatched = build_fulfillment_plan(receipts, sku_map)
+        orders = build_fulfillment_plan(receipts, sku_map)
 
-        report_text = format_report_text(matched, unmatched)
+        report_text = format_report_text(orders)
         send_email_report(report_text)
-        send_telegram_report(matched, unmatched)
+        send_telegram_report(orders, report_text)
 
         return json_response({
             "dryRun": True,
-            "pendingOrdersScanned": sum(1 for r in receipts if not r.get("is_shipped")),
-            "matchedLineItems": len(matched),
-            "unmatchedLineItems": len(unmatched),
+            "pendingOrders": len(orders),
+            "fulfillableOrders": sum(1 for o in orders if o["fulfillable"]),
+            "notFulfillableOrders": sum(1 for o in orders if not o["fulfillable"]),
             "errors": errors,
         })
     except Exception as exc:
