@@ -323,6 +323,11 @@ def create_mcf_order(receipt, sku_map):
         shippingSpeedCategory="Standard",
         destinationAddress=address,
         items=items,
+        # Explicit rather than relying on Amazon's default: "NotRequired"
+        # means the constraint is NOT enforced, i.e. Amazon Logistics stays
+        # allowed as a carrier - matches "Block Amazon Logistics" unchecked
+        # in Seller Central's manual create-order UI.
+        featureConstraints=[{"featureName": "BLOCK_AMAZON_LOGISTICS", "featureFulfillmentPolicy": "NotRequired"}],
     )
     return resp.payload
 
