@@ -49,11 +49,13 @@ def GetAmazonListingItem(request):
         return json_response({"error": "AMAZON_SELLER_ID env var is not set"}, 500)
 
     try:
+        from sp_api.base import Marketplaces
+
         client = listings_client()
         resp = client.get_listings_item(
             sellerId=SELLER_ID,
             sku=sku,
-            marketplaceIds=[client.marketplace.marketplace_id],
+            marketplaceIds=[Marketplaces.US.marketplace_id],
             includedData=["attributes", "issues", "offers", "fulfillmentAvailability", "summaries"],
         )
         return json_response({"listingsAccessGranted": True, "sku": sku, "data": resp.payload})
