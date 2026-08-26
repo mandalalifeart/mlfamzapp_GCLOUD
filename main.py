@@ -158,6 +158,11 @@ def ProcessAmazonRelistQueue(request):
     return _impl(request)
 
 
+def ProbeAdsReportColumns(request):
+    from AdsColumnProbe import ProbeAdsReportColumns as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)
