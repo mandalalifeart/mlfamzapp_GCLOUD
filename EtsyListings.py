@@ -98,7 +98,8 @@ def listing_to_body(shop_id, listing, sku):
         "price_currency": price.get("currency_code", ""),
         "url": listing.get("url", ""),
         "updated_at": str(listing.get("last_modified_timestamp", "")),
-        "debug_raw": listing,
+        "views": listing.get("views", 0) or 0,
+        "num_favorers": listing.get("num_favorers", 0) or 0,
     }
 
 
@@ -228,6 +229,8 @@ def GetEtsyListings(request):
                     "priceAmount": item.get("price_amount", 0),
                     "priceCurrency": item.get("price_currency", ""),
                     "url": item.get("url", ""),
+                    "views": item.get("views", 0),
+                    "numFavorers": item.get("num_favorers", 0),
                 })
             if page >= data.get("totalPages", 1):
                 break
