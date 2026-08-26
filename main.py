@@ -142,6 +142,11 @@ def RunEtsyMcfFulfillment(request):
     from EtsyMcfFulfillment import RunEtsyMcfFulfillment as _impl
     return _impl(request)
 
+
+def CheckMcfAccess(request):
+    from EtsyMcfFulfillment import CheckMcfAccess as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover

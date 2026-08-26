@@ -196,3 +196,38 @@ def RunEtsyMcfFulfillment(request):
         })
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
+
+
+def CheckMcfAccess(request):
+    """Read-only, no-op probe: confirms whether this SP-API app's USA
+    credentials actually have the Fulfillment Outbound (MCF) role granted in
+    Seller Central, before any real order-placement code gets built on top
+    of it. Calls list_all_fulfillment_orders (returns real order history,
+    creates/changes nothing) rather than create_fulfillment_order."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    try:
+        from sp_api.api import FulfillmentOutbound
+        from sp_api.base import Marketplaces
+
+        credentials = {
+            "refresh_token": os.environ["REFRESH_TOKEN_USA"],
+            "lwa_app_id": os.environ["CLIENT_ID_USA"],
+            "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
+        }
+        client = FulfillmentOutbound(credentials=credentials, marketplace=Marketplaces.US)
+        resp = client.list_all_fulfillment_orders(queryStartDate="2026-01-01T00:00:00Z")
+        orders = (resp.payload or {}).get("FulfillmentOrders", [])
+        return json_response({
+            "mcfAccessGranted": True,
+            "fulfillmentOrdersFound": len(orders),
+        })
+    except Exception as exc:
+        return json_response({
+            "mcfAccessGranted": False,
+            "error": str(exc),
+            "type": exc.__class__.__name__,
+        }, 200)
