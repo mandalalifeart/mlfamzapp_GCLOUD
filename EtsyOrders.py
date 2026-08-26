@@ -144,8 +144,12 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
     }
 
 
-def pb_list_order_ids(token, receipt_ids):
-    ids = []
+def pb_list_orders(token, receipt_ids):
+    """Existing etsy_orders rows (id + receipt_id + mcf_status) for the given
+    receipt_ids - mcf_status is set by hand or by CreateMcfOrderForReceipt
+    and must survive UpdateEtsyOrders' delete-then-reinsert upsert, since
+    Etsy's own receipt data has no idea an MCF order was ever created."""
+    rows = []
     for i in range(0, len(receipt_ids), 50):
         chunk = receipt_ids[i:i + 50]
         filter_str = " || ".join(f'receipt_id = "{rid}"' for rid in chunk)
@@ -154,17 +158,17 @@ def pb_list_order_ids(token, receipt_ids):
             response = requests.get(
                 f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
                 headers={"Authorization": token},
-                params={"filter": filter_str, "fields": "id", "perPage": 200, "page": page},
+                params={"filter": filter_str, "fields": "id,receipt_id,mcf_status", "perPage": 200, "page": page},
                 timeout=30,
             )
             if response.status_code != 200:
                 raise RuntimeError(f"PocketBase list failed for orders: HTTP {response.status_code} - {response.text}")
             data = response.json()
-            ids.extend(item["id"] for item in data.get("items", []))
+            rows.extend(data.get("items", []))
             if page >= data.get("totalPages", 1):
                 break
             page += 1
-    return ids
+    return rows
 
 
 def DiagnoseEtsyOrders(request):
@@ -413,12 +417,18 @@ def UpdateEtsyOrders(request):
         # etsy_orders: upsert by receipt_id (delete any existing row for a
         # receipt this pull touched, then reinsert) so a re-run over the same
         # range updates rows whose status changed (e.g. is_shipped flipping)
-        # without duplicating them.
+        # without duplicating them. mcf_status is carried forward from the
+        # existing row since Etsy's own data has no concept of it - it's set
+        # by hand or by CreateMcfOrderForReceipt, and must survive this
+        # delete+reinsert instead of getting silently wiped on the next pull.
         if order_bodies:
-            existing_order_ids = pb_list_order_ids(pb_token, [b["receipt_id"] for b in order_bodies])
+            existing_orders = pb_list_orders(pb_token, [b["receipt_id"] for b in order_bodies])
+            existing_mcf_status = {row["receipt_id"]: row.get("mcf_status", "") for row in existing_orders}
+            for body in order_bodies:
+                body["mcf_status"] = existing_mcf_status.get(body["receipt_id"], "")
             ops.extend(
-                {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{rid}"}
-                for rid in existing_order_ids
+                {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{row['id']}"}
+                for row in existing_orders
             )
             ops.extend(
                 {"method": "POST", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records", "body": b}
@@ -502,6 +512,7 @@ def GetEtsyOrders(request):
                     "lineItems": item.get("line_items") or [],
                     "status": item.get("status", ""),
                     "etsyStatus": item.get("etsy_status", ""),
+                    "mcfStatus": item.get("mcf_status", ""),
                 })
             if len(orders) >= limit or page >= data.get("totalPages", 1):
                 break
