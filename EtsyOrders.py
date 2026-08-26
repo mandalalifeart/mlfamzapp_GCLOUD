@@ -213,9 +213,14 @@ def UpdateEtsyOrders(request):
     shape Amazon orders already use. Every transaction counts toward
     country_sales regardless of SKU; sku_sales only gets transactions that
     have a real SKU set (per the 36%-missing-SKU finding from
-    DiagnoseEtsyOrders - skipped rather than guessed at)."""
+    DiagnoseEtsyOrders - skipped rather than guessed at).
+
+    Default window is a rolling 35 days (for the daily scheduled run - wide
+    enough to catch late-arriving/updated orders without reprocessing the
+    whole year every day); pass min_created/max_created explicitly for a
+    wider one-off backfill, as was done for the initial 365-day pull."""
     now = datetime.now(timezone.utc)
-    default_min = int((now - timedelta(days=365)).timestamp())
+    default_min = int((now - timedelta(days=35)).timestamp())
     default_max = int(now.timestamp())
     min_created = request.args.get("min_created", type=int) if hasattr(request, "args") else None
     max_created = request.args.get("max_created", type=int) if hasattr(request, "args") else None
