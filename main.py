@@ -132,6 +132,11 @@ def UpdateEtsyOrders(request):
     from EtsyOrders import UpdateEtsyOrders as _impl
     return _impl(request)
 
+
+def GetEtsyOrders(request):
+    from EtsyOrders import GetEtsyOrders as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover

@@ -18,6 +18,7 @@ from EtsyAuth import (
 
 POCKETBASE_SKU_COLLECTION = os.environ.get("POCKETBASE_SKU_COLLECTION", "sku_sales")
 POCKETBASE_COUNTRY_COLLECTION = os.environ.get("POCKETBASE_COUNTRY_COLLECTION", "country_sales")
+POCKETBASE_ORDERS_COLLECTION = os.environ.get("POCKETBASE_ETSY_ORDERS_COLLECTION", "etsy_orders")
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
 
 RECEIPTS_PAGE_LIMIT = 100
@@ -81,6 +82,63 @@ def fetch_receipts(shop_id, access_token, min_created, max_created, errors):
             break
         time.sleep(PAGE_DELAY_SECONDS)
     return receipts
+
+
+def receipt_to_order_body(shop_id, receipt, marketplace):
+    transactions = receipt.get("transactions", []) or []
+    total = receipt.get("grandtotal") or {}
+    amount = total.get("amount", 0)
+    divisor = total.get("divisor", 1) or 1
+
+    created = receipt.get("create_timestamp") or receipt.get("created_timestamp") or 0
+    dt = datetime.fromtimestamp(created, tz=timezone.utc) if created else None
+
+    item_count = sum(txn.get("quantity", 0) or 0 for txn in transactions)
+    # e.g. "2x Blue Boho Pareo, 1x Mandala Cushion Cover" - a readable
+    # one-line stand-in for the full transaction list on the orders table.
+    items_summary = ", ".join(
+        f"{txn.get('quantity', 0)}x {txn.get('title', '')}" for txn in transactions
+    )
+
+    return {
+        "shop_id": str(shop_id),
+        "receipt_id": str(receipt.get("receipt_id")),
+        "created": created,
+        "month": dt.month if dt else 0,
+        "year": dt.year if dt else 0,
+        "marketplace": marketplace or "other",
+        "country_iso": receipt.get("country_iso", ""),
+        "buyer_name": receipt.get("name", ""),
+        "total_amount": amount / divisor,
+        "currency": total.get("currency_code", ""),
+        "item_count": item_count,
+        "items_summary": items_summary,
+        "is_shipped": bool(receipt.get("is_shipped")),
+        "status": "Shipped" if receipt.get("is_shipped") else "Pending",
+    }
+
+
+def pb_list_order_ids(token, receipt_ids):
+    ids = []
+    for i in range(0, len(receipt_ids), 50):
+        chunk = receipt_ids[i:i + 50]
+        filter_str = " || ".join(f'receipt_id = "{rid}"' for rid in chunk)
+        page = 1
+        while True:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={"filter": filter_str, "fields": "id", "perPage": 200, "page": page},
+                timeout=30,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"PocketBase list failed for orders: HTTP {response.status_code} - {response.text}")
+            data = response.json()
+            ids.extend(item["id"] for item in data.get("items", []))
+            if page >= data.get("totalPages", 1):
+                break
+            page += 1
+    return ids
 
 
 def DiagnoseEtsyOrders(request):
@@ -243,12 +301,14 @@ def UpdateEtsyOrders(request):
 
         country_totals = {}  # (marketplace, month, year) -> {quantity, sales}
         sku_totals = {}      # (sku, marketplace, month, year) -> quantity
+        order_bodies = []    # one row per receipt, for the orders table on /etsy
         skipped_no_marketplace = 0
         skipped_no_sku = 0
 
         for receipt in receipts:
             country_iso = receipt.get("country_iso", "")
             marketplace = map_marketplace(country_iso)
+            order_bodies.append(receipt_to_order_body(shop_id, receipt, marketplace))
             if not marketplace:
                 skipped_no_marketplace += len(receipt.get("transactions", []) or [])
                 continue
@@ -324,6 +384,21 @@ def UpdateEtsyOrders(request):
                 },
             })
 
+        # etsy_orders: upsert by receipt_id (delete any existing row for a
+        # receipt this pull touched, then reinsert) so a re-run over the same
+        # range updates rows whose status changed (e.g. is_shipped flipping)
+        # without duplicating them.
+        if order_bodies:
+            existing_order_ids = pb_list_order_ids(pb_token, [b["receipt_id"] for b in order_bodies])
+            ops.extend(
+                {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{rid}"}
+                for rid in existing_order_ids
+            )
+            ops.extend(
+                {"method": "POST", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records", "body": b}
+                for b in order_bodies
+            )
+
         for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
             pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
 
@@ -333,9 +408,77 @@ def UpdateEtsyOrders(request):
             "totalReceipts": len(receipts),
             "countryRowsWritten": len(country_totals),
             "skuRowsWritten": len(sku_totals),
+            "ordersWritten": len(order_bodies),
             "transactionsSkippedNoMarketplace": skipped_no_marketplace,
             "transactionsSkippedNoSku": skipped_no_sku,
             "errors": errors,
         })
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
+def GetEtsyOrders(request):
+    """Reads stored order rows from etsy_orders for display on /etsy - no
+    Amazon-style ADMIN_KEY gate needed, this is read-only aggregation of
+    already-pulled data, same as GetEtsyListings."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    min_created = request.args.get("min_created", type=int) if hasattr(request, "args") else None
+    max_created = request.args.get("max_created", type=int) if hasattr(request, "args") else None
+    marketplace = request.args.get("marketplace") if hasattr(request, "args") else None
+    search = request.args.get("search") if hasattr(request, "args") else None
+    limit = request.args.get("limit", type=int) if hasattr(request, "args") else None
+    limit = limit or 200
+
+    try:
+        token = pb_authenticate()
+        filters = []
+        if min_created:
+            filters.append(f"created >= {min_created}")
+        if max_created:
+            filters.append(f"created <= {max_created}")
+        if marketplace:
+            filters.append(f'marketplace = "{marketplace}"')
+        if search:
+            escaped = search.replace('"', '\\"')
+            filters.append(f'(buyer_name ~ "{escaped}" || items_summary ~ "{escaped}")')
+        filter_str = " && ".join(filters)
+
+        orders = []
+        page = 1
+        per_page = min(limit, 200)
+        while len(orders) < limit:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={k: v for k, v in {
+                    "filter": filter_str,
+                    "perPage": per_page,
+                    "page": page,
+                    "sort": "-created",
+                }.items() if v},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("items", []):
+                orders.append({
+                    "receiptId": item.get("receipt_id"),
+                    "created": item.get("created", 0),
+                    "marketplace": item.get("marketplace", ""),
+                    "countryIso": item.get("country_iso", ""),
+                    "buyerName": item.get("buyer_name", ""),
+                    "totalAmount": item.get("total_amount", 0),
+                    "currency": item.get("currency", ""),
+                    "itemCount": item.get("item_count", 0),
+                    "itemsSummary": item.get("items_summary", ""),
+                    "status": item.get("status", ""),
+                })
+            if len(orders) >= limit or page >= data.get("totalPages", 1):
+                break
+            page += 1
+
+        return json_response({"orders": orders[:limit]})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
