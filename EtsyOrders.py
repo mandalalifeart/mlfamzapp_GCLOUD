@@ -94,10 +94,14 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
     dt = datetime.fromtimestamp(created, tz=timezone.utc) if created else None
 
     item_count = sum(txn.get("quantity", 0) or 0 for txn in transactions)
-    # e.g. "2x Blue Boho Pareo, 1x Mandala Cushion Cover" - a readable
-    # one-line stand-in for the full transaction list on the orders table.
+    # e.g. "2x Blue Boho Pareo (SKU: PAREO_ACA_6B), 1x Mandala Cushion Cover"
+    # - a readable one-line stand-in for the full transaction list on the
+    # orders table. Not every transaction has a SKU (~36% don't, per
+    # DiagnoseEtsyOrders), so the "(SKU: ...)" suffix is omitted for those.
     items_summary = ", ".join(
-        f"{txn.get('quantity', 0)}x {txn.get('title', '')}" for txn in transactions
+        f"{txn.get('quantity', 0)}x {txn.get('title', '')}"
+        + (f" (SKU: {txn.get('sku')})" if txn.get("sku") else "")
+        for txn in transactions
     )
 
     return {

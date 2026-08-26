@@ -60,16 +60,25 @@ def fetch_listing_sku(listing_id, access_token, errors):
             return ""
         products = response.json().get("products", []) or []
         # Multiple product variations under one listing (e.g. different
-        # colors) sometimes share the same SKU string - dedupe while
-        # preserving order rather than showing it repeated.
+        # colors) sometimes share the same SKU string, so the bare SKU alone
+        # doesn't distinguish them - prefix each with its variation name
+        # (the product's property values, e.g. "Blue" or "Blue / Large"),
+        # giving entries like "Blue-PAREO_ACA_6B". A product with no
+        # variation properties (single-SKU listing) keeps just the SKU.
         seen = set()
-        skus = []
+        entries = []
         for p in products:
             sku = p.get("sku")
-            if sku and not p.get("is_deleted") and sku not in seen:
-                seen.add(sku)
-                skus.append(sku)
-        return ", ".join(skus)
+            if not sku or p.get("is_deleted"):
+                continue
+            variation_name = " / ".join(
+                ", ".join(pv.get("values") or []) for pv in (p.get("property_values") or []) if pv.get("values")
+            )
+            entry = f"{variation_name}-{sku}" if variation_name else sku
+            if entry not in seen:
+                seen.add(entry)
+                entries.append(entry)
+        return ", ".join(entries)
     except requests.RequestException as exc:
         errors.append(f"listing {listing_id} inventory: {exc}")
         return ""
