@@ -143,6 +143,11 @@ def StartEtsyExperiment(request):
     return _impl(request)
 
 
+def GetAmazonListingItem(request):
+    from AmazonListingOps import GetAmazonListingItem as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)
