@@ -287,8 +287,15 @@ def GetAdsSearchTermStats(request):
             response = requests.get(
                 f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_SEARCH_TERM_COLLECTION}/records",
                 headers={"Authorization": token},
-                params={"filter": filter_str, "perPage": 200, "page": page},
-                timeout=30,
+                params={
+                    "filter": filter_str,
+                    "perPage": 500,
+                    "page": page,
+                    "fields": "profile_id,campaign_id,campaign_name,ad_group_id,ad_group_name,target_text,"
+                              "match_type,search_term,ad_product,country_code,currency_code,impressions,"
+                              "clicks,spend,sales,orders",
+                },
+                timeout=60,
             )
             response.raise_for_status()
             data = response.json()
