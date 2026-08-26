@@ -157,8 +157,10 @@ def pull_and_store_listings():
     bodies = []
     for listing in listings:
         skus = fetch_listing_skus(listing.get("listing_id"), access_token, errors)
-        for sku in (skus or [""]):
-            bodies.append(listing_to_body(shop_id, listing, sku))
+        # One row per listing - multiple variations are newline-joined into
+        # the one sku field (frontend renders them stacked via
+        # white-space: pre-line) rather than each getting its own row.
+        bodies.append(listing_to_body(shop_id, listing, "\n".join(skus)))
         time.sleep(INVENTORY_FETCH_DELAY_SECONDS)
 
     existing_ids = pb_list_listing_ids(pb_token, shop_id)
