@@ -67,6 +67,11 @@ def build_fulfillment_plan(receipts, sku_map):
     for receipt in receipts:
         if receipt.get("is_shipped"):
             continue
+        # Etsy's own receipt "status" field (e.g. "Paid", "Canceled") -
+        # a cancelled order isn't pending, so it's dropped entirely rather
+        # than showing up as "not fulfillable".
+        if receipt.get("status") == "Canceled":
+            continue
         transactions = receipt.get("transactions", []) or []
         line_items = []
         reasons = []

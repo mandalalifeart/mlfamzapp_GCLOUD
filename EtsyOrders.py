@@ -140,7 +140,7 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
         "line_items": line_items,
         "is_shipped": bool(receipt.get("is_shipped")),
         "status": "Shipped" if receipt.get("is_shipped") else "Pending",
-        "debug_raw": {k: v for k, v in receipt.items() if k != "transactions"},
+        "etsy_status": receipt.get("status", ""),
     }
 
 
@@ -501,6 +501,7 @@ def GetEtsyOrders(request):
                     "itemsSummary": item.get("items_summary", ""),
                     "lineItems": item.get("line_items") or [],
                     "status": item.get("status", ""),
+                    "etsyStatus": item.get("etsy_status", ""),
                 })
             if len(orders) >= limit or page >= data.get("totalPages", 1):
                 break
