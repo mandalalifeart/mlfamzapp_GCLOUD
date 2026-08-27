@@ -684,3 +684,25 @@ def GetMcfFulfillmentPreview(request):
         return json_response({"sku": sku, "preview": resp.payload})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def GetMcfOrderById(request):
+    """Read-only: looks up one specific Amazon MCF fulfillment order by its
+    exact sellerFulfillmentOrderId - used to check whether a manually
+    created Seller Central order actually exists under the id the user
+    thinks they used, without waiting for the daily tracking-sync job."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    order_id = request.args.get("order_id") if hasattr(request, "args") else None
+    if not order_id:
+        return json_response({"error": "order_id is required"}, 400)
+
+    try:
+        client = fulfillment_outbound_client()
+        resp = client.get_fulfillment_order(sellerFulfillmentOrderId=order_id)
+        return json_response({"found": True, "orderId": order_id, "data": resp.payload})
+    except Exception as exc:
+        return json_response({"found": False, "orderId": order_id, "error": str(exc), "type": exc.__class__.__name__}, 200)
