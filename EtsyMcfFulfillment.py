@@ -648,3 +648,39 @@ def UpdateEtsyTrackingFromAmazon(request):
         })
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
+
+
+def GetMcfFulfillmentPreview(request):
+    """Read-only: SP-API's getFulfillmentPreview returns the REAL shipping
+    cost Amazon would charge to MCF-fulfill a given SKU/quantity/destination
+    - no order is created, nothing is committed. Used to get real numbers
+    for a launch-viability question (e.g. "would a $27 item with $5 cost
+    work via MCF on Etsy") instead of guessing at fee estimates."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    sku = request.args.get("sku") if hasattr(request, "args") else None
+    if not sku:
+        return json_response({"error": "sku is required"}, 400)
+
+    try:
+        client = fulfillment_outbound_client()
+        resp = client.get_fulfillment_preview(
+            address={
+                "name": "Test Buyer",
+                "addressLine1": "410 Terry Ave N",
+                "city": "Seattle",
+                "stateOrRegion": "WA",
+                "postalCode": "98109",
+                "countryCode": "US",
+            },
+            items=[{"sellerSku": sku, "sellerFulfillmentOrderItemId": "preview-1", "quantity": 1}],
+            shippingSpeedCategories=["Standard"],
+            includeCODFulfillmentPreview=False,
+            includeDeliveryWindows=False,
+        )
+        return json_response({"sku": sku, "preview": resp.payload})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
