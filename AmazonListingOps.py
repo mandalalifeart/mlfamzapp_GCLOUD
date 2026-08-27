@@ -181,7 +181,7 @@ def ProcessAmazonRelistQueue(request):
                     json={"status": "done"},
                     timeout=15,
                 )
-                processed.append({"sku": sku, "ok": True})
+                processed.append({"sku": sku, "ok": True, "response": resp.payload})
                 text = f"Amazon relist complete: SKU {sku} is live again as a standalone listing (no longer part of its old variation family)."
             except Exception as exc:
                 requests.patch(
