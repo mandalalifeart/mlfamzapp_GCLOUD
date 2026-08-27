@@ -170,8 +170,10 @@ def ProcessAmazonRelistQueue(request):
                     sellerId=SELLER_ID,
                     sku=sku,
                     marketplaceIds=[Marketplaces.US.marketplace_id],
-                    productType=item.get("product_type"),
-                    attributes=item.get("attributes"),
+                    body={
+                        "productType": item.get("product_type"),
+                        "attributes": item.get("attributes"),
+                    },
                 )
                 requests.patch(
                     f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records/{item['id']}",
