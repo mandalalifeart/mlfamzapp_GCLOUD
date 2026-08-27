@@ -203,6 +203,11 @@ def GetMcfOrderById(request):
     return _impl(request)
 
 
+def PatchAmazonListingAttribute(request):
+    from AmazonListingOps import PatchAmazonListingAttribute as _impl
+    return _impl(request)
+
+
 def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)

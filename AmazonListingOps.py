@@ -218,3 +218,41 @@ def ProcessAmazonRelistQueue(request):
         return json_response({"checked": len(due), "processed": processed})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
+
+
+def PatchAmazonListingAttribute(request):
+    """Partial update to ONE attribute path on a live listing via SP-API's
+    JSON-Patch-based patch_listings_item, rather than put_listings_item's
+    full-attribute-set replace - much lower risk for touching a single field
+    (e.g. variation_theme) on a listing with other attributes whose exact
+    current state isn't fully known, since a full PUT re-submission risks
+    silently dropping/omitting something not captured. Real write, but far
+    more surgical than delete+relist; still gated behind ADMIN_KEY."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    body = request.get_json(silent=True) or {}
+    sku = body.get("sku")
+    path = body.get("path")
+    value = body.get("value")
+    if not sku or not path or value is None:
+        return json_response({"error": "sku, path, and value are all required"}, 400)
+
+    try:
+        from sp_api.base import Marketplaces
+
+        client = listings_client()
+        resp = client.patch_listings_item(
+            sellerId=SELLER_ID,
+            sku=sku,
+            marketplaceIds=[Marketplaces.US.marketplace_id],
+            body={
+                "productType": "OTTOMAN",
+                "patches": [{"op": "replace", "path": path, "value": value}],
+            },
+        )
+        return json_response({"sku": sku, "response": resp.payload})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
