@@ -139,7 +139,11 @@ def receipt_to_order_body(shop_id, receipt, marketplace):
         "items_summary": items_summary,
         "line_items": line_items,
         "is_shipped": bool(receipt.get("is_shipped")),
-        "status": "Shipped" if receipt.get("is_shipped") else "Pending",
+        "status": (
+            "Cancelled" if receipt.get("status") == "Canceled"
+            else "Shipped" if receipt.get("is_shipped")
+            else "Pending"
+        ),
         "etsy_status": receipt.get("status", ""),
     }
 
