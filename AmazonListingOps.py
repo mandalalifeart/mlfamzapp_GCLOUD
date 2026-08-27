@@ -175,6 +175,15 @@ def ProcessAmazonRelistQueue(request):
                         "attributes": item.get("attributes"),
                     },
                 )
+                # Amazon can return HTTP 200 with status="INVALID" and a real
+                # issues list when required attributes are missing - a
+                # non-exception response is NOT the same as success, and
+                # treating it as one previously reported false "done" here.
+                resp_status = (resp.payload or {}).get("status")
+                if resp_status not in ("ACCEPTED", "VALID"):
+                    raise RuntimeError(
+                        f"Amazon rejected the listing (status={resp_status}): {(resp.payload or {}).get('issues')}"
+                    )
                 requests.patch(
                     f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records/{item['id']}",
                     headers={"Authorization": pb_token},
