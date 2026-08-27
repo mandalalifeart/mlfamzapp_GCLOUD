@@ -106,6 +106,29 @@ def set_order_mcf_status(pb_token, receipt_id, mcf_status):
     patch_resp.raise_for_status()
 
 
+def MarkEtsyOrderInProgress(request):
+    """Lets the /etsy page mark an order's mcf_status "in_progress" by hand
+    - for orders fulfilled outside this system (e.g. created directly in
+    Amazon Seller Central) rather than via CreateMcfOrderForReceipt. No
+    ADMIN_KEY gate, same reasoning as UpdateEtsyListings/UpdateEtsyOrders:
+    triggered directly by a frontend button that can't hold a secret, and
+    this only flips our own tracking field - no real Amazon/Etsy write."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    body = request.get_json(silent=True) or {}
+    receipt_id = body.get("receipt_id") or (request.args.get("receipt_id") if hasattr(request, "args") else None)
+    if not receipt_id:
+        return json_response({"error": "receipt_id is required"}, 400)
+
+    try:
+        pb_token = pb_authenticate()
+        set_order_mcf_status(pb_token, receipt_id, "in_progress")
+        return json_response({"updated": True, "receiptId": receipt_id, "mcfStatus": "in_progress"})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
 def build_fulfillment_plan(receipts, sku_map, mcf_status_map):
     """One entry per pending order (receipt), each carrying its own line
     items (sku/quantity) and a single fulfillable/remark verdict for the

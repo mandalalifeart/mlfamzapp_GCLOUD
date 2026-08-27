@@ -163,6 +163,11 @@ def ProbeAdsReportColumns(request):
     return _impl(request)
 
 
+def MarkEtsyOrderInProgress(request):
+    from EtsyMcfFulfillment import MarkEtsyOrderInProgress as _impl
+    return _impl(request)
+
+
 def DiagnoseEtsyOrders(request):
     from EtsyOrders import DiagnoseEtsyOrders as _impl
     return _impl(request)
