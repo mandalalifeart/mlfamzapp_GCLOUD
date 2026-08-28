@@ -334,6 +334,9 @@ def GetMarketplaceSalesSummary(request):
             "marketplaces": selected_marketplaces or ALL_UI_MARKETPLACES,
             "quantity": summary["quantity"],
             "sales": summary["sales"],
+            "netSales": summary["netSales"],
+            "acos": summary["acos"],
+            "tacos": summary["tacos"],
             "salesCurrency": summary["salesCurrency"],
         })
 
