@@ -50,16 +50,30 @@ def json_response(body, status=200):
     return json.dumps(body), status, cors_headers()
 
 
-def listings_client():
+EU_SELLER_ID = os.environ.get("AMAZON_SELLER_ID_EU", "") or SELLER_ID
+
+# marketplace code -> (credential prefix, sp_api Marketplaces attr name, seller id)
+MARKETPLACE_CONFIG = {
+    "US": ("USA", "US", SELLER_ID),
+    "DE": ("EU", "DE", EU_SELLER_ID),
+    "UK": ("EU", "UK", EU_SELLER_ID),
+    "FR": ("EU", "FR", EU_SELLER_ID),
+    "IT": ("EU", "IT", EU_SELLER_ID),
+    "ES": ("EU", "ES", EU_SELLER_ID),
+}
+
+
+def listings_client(marketplace="US"):
     from sp_api.api import ListingsItems
     from sp_api.base import Marketplaces
 
+    cred_prefix, mp_attr, _ = MARKETPLACE_CONFIG[marketplace]
     credentials = {
-        "refresh_token": os.environ["REFRESH_TOKEN_USA"],
-        "lwa_app_id": os.environ["CLIENT_ID_USA"],
-        "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
+        "refresh_token": os.environ[f"REFRESH_TOKEN_{cred_prefix}"],
+        "lwa_app_id": os.environ[f"CLIENT_ID_{cred_prefix}"],
+        "lwa_client_secret": os.environ[f"CLIENT_SECRET_{cred_prefix}"],
     }
-    return ListingsItems(credentials=credentials, marketplace=Marketplaces.US)
+    return ListingsItems(credentials=credentials, marketplace=getattr(Marketplaces, mp_attr))
 
 
 def GetAmazonListingItem(request):
@@ -75,26 +89,32 @@ def GetAmazonListingItem(request):
         return json_response({"error": "Unauthorized"}, 401)
 
     sku = request.args.get("sku") if hasattr(request, "args") else None
+    marketplace = (request.args.get("marketplace") if hasattr(request, "args") else None) or "US"
     if not sku:
         return json_response({"error": "sku is required"}, 400)
-    if not SELLER_ID:
+    if marketplace not in MARKETPLACE_CONFIG:
+        return json_response({"error": f"unknown marketplace {marketplace}"}, 400)
+    _, _, seller_id = MARKETPLACE_CONFIG[marketplace]
+    if not seller_id:
         return json_response({"error": "AMAZON_SELLER_ID env var is not set"}, 500)
 
     try:
         from sp_api.base import Marketplaces
 
-        client = listings_client()
+        client = listings_client(marketplace)
+        mp_marketplace_id = getattr(Marketplaces, MARKETPLACE_CONFIG[marketplace][1]).marketplace_id
         resp = client.get_listings_item(
-            sellerId=SELLER_ID,
+            sellerId=seller_id,
             sku=sku,
-            marketplaceIds=[Marketplaces.US.marketplace_id],
+            marketplaceIds=[mp_marketplace_id],
             includedData=["attributes", "issues", "offers", "fulfillmentAvailability", "summaries"],
         )
-        return json_response({"listingsAccessGranted": True, "sku": sku, "data": resp.payload})
+        return json_response({"listingsAccessGranted": True, "sku": sku, "marketplace": marketplace, "data": resp.payload})
     except Exception as exc:
         return json_response({
             "listingsAccessGranted": False,
             "sku": sku,
+            "marketplace": marketplace,
             "error": str(exc),
             "type": exc.__class__.__name__,
         }, 200)
