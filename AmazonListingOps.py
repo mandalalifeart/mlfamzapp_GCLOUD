@@ -332,6 +332,10 @@ def AuditAmazonListings(request):
 
     import time
 
+    # Issue codes to suppress from the audit entirely, per user request
+    # (2026-08-28) - "can't access your media at <url>" (300060/300403).
+    IGNORED_ISSUE_CODES = {"300060", "300403"}
+
     try:
         from sp_api.base import Marketplaces
 
@@ -360,6 +364,7 @@ def AuditAmazonListings(request):
                     error_issues = [
                         iss for iss in payload.get("issues", [])
                         if iss.get("severity") == "ERROR"
+                        and str(iss.get("code")) not in IGNORED_ISSUE_CODES
                     ]
                     if error_issues:
                         flagged.append({
