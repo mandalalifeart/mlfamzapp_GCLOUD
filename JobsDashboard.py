@@ -14,6 +14,10 @@ POCKETBASE_ADMIN_EMAIL = os.environ.get("POCKETBASE_ADMIN_EMAIL", "")
 POCKETBASE_ADMIN_PASSWORD = os.environ.get("POCKETBASE_ADMIN_PASSWORD", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 
+# Collections that are PocketBase internals, not part of this app's data -
+# excluded from the "PocketBase Tables" list on /ops.
+SYSTEM_COLLECTION_PREFIXES = ("_",)
+
 
 def cors_headers():
     return {
@@ -127,5 +131,35 @@ def GetJobRunsLog(request):
         resp.raise_for_status()
         data = resp.json()
         return json_response({"items": data.get("items", []), "totalItems": data.get("totalItems", 0)})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
+def GetPocketBaseCollections(request):
+    """Read-only, public: every real (non-system) PocketBase collection
+    name, plus a direct admin-UI link for each - the "PocketBase Tables"
+    list on /ops. Only names/counts are returned, never any record data."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    try:
+        token = pb_authenticate()
+        resp = requests.get(
+            f"{POCKETBASE_URL}/api/collections",
+            headers={"Authorization": token},
+            params={"perPage": 200, "sort": "name"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        items = [
+            {
+                "name": c["name"],
+                "type": c.get("type"),
+                "adminUrl": f"{POCKETBASE_URL}/_/#/collections?collection={c['name']}",
+            }
+            for c in resp.json().get("items", [])
+            if not c["name"].startswith(SYSTEM_COLLECTION_PREFIXES)
+        ]
+        return json_response({"items": items})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)

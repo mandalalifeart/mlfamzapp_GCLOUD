@@ -233,6 +233,11 @@ def GetJobRunsLog(request):
     return _impl(request)
 
 
+def GetPocketBaseCollections(request):
+    from JobsDashboard import GetPocketBaseCollections as _impl
+    return _impl(request)
+
+
 def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)
