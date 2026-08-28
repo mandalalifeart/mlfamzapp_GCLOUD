@@ -262,11 +262,12 @@ def RunEtsyMcfFulfillment(request):
 
         not_fulfillable = sum(1 for o in orders if not o["fulfillable"])
         report_text = format_report_text(orders)
-        # Email only for alerts/errors (something needs the user's attention);
-        # routine "all fulfillable, no issues" days go to Telegram only.
-        if not_fulfillable or errors:
-            send_email_report(report_text)
-        send_telegram_report(orders, report_text)
+        from NotificationRouting import notify
+        notify(
+            "etsy-daily-mcf-fulfillment", "amzbot", report_text,
+            is_error=bool(not_fulfillable or errors),
+            subject=f"Etsy MCF fulfillment report (DRY RUN) - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        )
 
         return json_response({
             "dryRun": True,
@@ -646,11 +647,12 @@ def UpdateEtsyTrackingFromAmazon(request):
                 errors.append(f"Receipt {receipt_id}: {exc}")
 
         report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors)
-        # Email only for alerts/errors; routine shipping updates go to
-        # Telegram only.
-        if skipped_no_carrier_match or errors:
-            send_tracking_email(report_text)
-        send_tracking_telegram(report_text)
+        from NotificationRouting import notify
+        notify(
+            "etsy-daily-tracking-update", "amzbot", report_text,
+            is_error=bool(skipped_no_carrier_match or errors),
+            subject=f"Etsy tracking sync - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        )
 
         return json_response({
             "inProgress": len(receipt_ids),

@@ -171,7 +171,8 @@ def MonitorEtsyExperiments(request):
 
                 if days_since_summary >= SUMMARY_INTERVAL_DAYS:
                     text = format_summary(exp, current, days_running)
-                    send_summary(text)
+                    from NotificationRouting import notify
+                    notify("etsy-daily-experiment-monitor", "amzbot", text, is_error=False)
                     requests.patch(
                         f"{POCKETBASE_URL}/api/collections/{POCKETBASE_EXPERIMENTS_COLLECTION}/records/{exp['id']}",
                         headers={"Authorization": pb_token},

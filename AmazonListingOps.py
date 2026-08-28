@@ -224,20 +224,11 @@ def ProcessAmazonRelistQueue(request):
                 text = f"Amazon relist FAILED for SKU {sku}: {exc}"
                 succeeded = False
 
-            send_telegram(text)
-            # Email only for alerts/errors; a successful routine relist goes
-            # to Telegram only.
-            if not succeeded and GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
-                from email.mime.text import MIMEText
-                import smtplib
-                msg = MIMEText(text)
-                msg["Subject"] = f"Amazon relist - {sku}"
-                msg["From"] = GMAIL_USER
-                msg["To"] = REPORT_EMAIL_TO
-                with smtplib.SMTP("smtp.gmail.com", 587) as server:
-                    server.starttls()
-                    server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-                    server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+            from NotificationRouting import notify
+            notify(
+                "amazon-relist-queue-processor", "amzbot", text,
+                is_error=not succeeded, subject=f"Amazon relist - {sku}",
+            )
 
         return json_response({"checked": len(due), "processed": processed})
     except Exception as exc:
@@ -393,21 +384,12 @@ def AuditAmazonListings(request):
             lines.extend(f"  - {e}" for e in errored_calls[:10])
         text = "\n".join(lines)
 
-        send_telegram(text[:4000])
-        # Email only when there's something to actually act on (real
-        # listing errors, or the audit itself failing) - matches the
-        # standing email-alerts-only policy.
-        if (total_flagged or errored_calls) and GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
-            from email.mime.text import MIMEText
-            import smtplib
-            msg = MIMEText(text)
-            msg["Subject"] = f"Amazon listings audit - {total_flagged} SKU(s) with errors"
-            msg["From"] = GMAIL_USER
-            msg["To"] = REPORT_EMAIL_TO
-            with smtplib.SMTP("smtp.gmail.com", 587) as server:
-                server.starttls()
-                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-                server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+        from NotificationRouting import notify
+        notify(
+            "amazon-weekly-listings-audit", "amzbot", text,
+            is_error=bool(total_flagged or errored_calls),
+            subject=f"Amazon listings audit - {total_flagged} SKU(s) with errors",
+        )
 
         return json_response({
             "skuCount": len(skus),
@@ -416,7 +398,8 @@ def AuditAmazonListings(request):
             "erroredCalls": errored_calls,
         })
     except Exception as exc:
-        send_telegram(f"Weekly Amazon listings audit FAILED: {exc}")
+        from NotificationRouting import notify
+        notify("amazon-weekly-listings-audit", "amzbot", f"Weekly Amazon listings audit FAILED: {exc}", is_error=True)
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
 
 

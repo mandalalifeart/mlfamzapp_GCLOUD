@@ -218,6 +218,21 @@ def AuditAmazonListings(request):
     return _impl(request)
 
 
+def GetScheduledJobs(request):
+    from JobsDashboard import GetScheduledJobs as _impl
+    return _impl(request)
+
+
+def UpdateScheduledJob(request):
+    from JobsDashboard import UpdateScheduledJob as _impl
+    return _impl(request)
+
+
+def GetJobRunsLog(request):
+    from JobsDashboard import GetJobRunsLog as _impl
+    return _impl(request)
+
+
 def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)
