@@ -394,22 +394,25 @@ def AuditAmazonListings(request):
 
         total_flagged = sum(len(v["flagged"]) for v in by_marketplace.values())
 
-        lines = ["Weekly Amazon listings audit (US/DE/UK/FR/IT/ES):"]
+        # One notification per marketplace (not one combined message) - per
+        # user request 2026-08-28, so each marketplace's issues arrive as
+        # their own distinct Telegram message instead of one long combined
+        # one covering all 6.
+        from NotificationRouting import notify
         for marketplace, result in by_marketplace.items():
-            lines.append(f"\n{marketplace}: {result['checked']} listed, {len(result['flagged'])} with errors")
+            marketplace_errors = [e for e in errored_calls if e.startswith(f"{marketplace}/")]
+            lines = [f"Weekly Amazon listings audit - {marketplace}: {result['checked']} listed, {len(result['flagged'])} with errors"]
             for item in result["flagged"]:
                 lines.append(f"  - {item['sku']} ({item['asin']}): {'; '.join(item['issues'])}")
-        if errored_calls:
-            lines.append(f"\n{len(errored_calls)} API call(s) failed during the audit:")
-            lines.extend(f"  - {e}" for e in errored_calls[:10])
-        text = "\n".join(lines)
-
-        from NotificationRouting import notify
-        notify(
-            "amazon-weekly-listings-audit", "amzbot", text,
-            is_error=bool(total_flagged or errored_calls),
-            subject=f"Amazon listings audit - {total_flagged} SKU(s) with errors",
-        )
+            if marketplace_errors:
+                lines.append(f"\n{len(marketplace_errors)} API call(s) failed during the audit:")
+                lines.extend(f"  - {e}" for e in marketplace_errors[:10])
+            text = "\n".join(lines)
+            notify(
+                "amazon-weekly-listings-audit", "amzbot", text,
+                is_error=bool(result["flagged"] or marketplace_errors),
+                subject=f"Amazon listings audit ({marketplace}) - {len(result['flagged'])} SKU(s) with errors",
+            )
 
         return json_response({
             "skuCount": len(skus),
