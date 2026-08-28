@@ -264,16 +264,36 @@ def PatchAmazonListingAttribute(request):
         from sp_api.base import Marketplaces
 
         client = listings_client()
+
+        # productType must match what Amazon's catalog already has for this
+        # SKU's ASIN, not a guessed constant - submitting the wrong one
+        # (this used to hardcode "OTTOMAN") produces its own ERROR-severity
+        # issue (101067 "product type doesn't match the ASIN's product
+        # type") and can prevent the intended patch from actually landing.
+        # Caller can still override explicitly via body.product_type.
+        product_type = body.get("product_type")
+        if not product_type:
+            current = client.get_listings_item(
+                sellerId=SELLER_ID,
+                sku=sku,
+                marketplaceIds=[Marketplaces.US.marketplace_id],
+                includedData=["summaries"],
+            )
+            summaries = (current.payload or {}).get("summaries") or []
+            product_type = summaries[0].get("productType") if summaries else None
+        if not product_type:
+            return json_response({"error": f"Could not determine productType for {sku} - pass product_type explicitly"}, 400)
+
         resp = client.patch_listings_item(
             sellerId=SELLER_ID,
             sku=sku,
             marketplaceIds=[Marketplaces.US.marketplace_id],
             body={
-                "productType": "OTTOMAN",
+                "productType": product_type,
                 "patches": [patch],
             },
         )
-        return json_response({"sku": sku, "response": resp.payload})
+        return json_response({"sku": sku, "productType": product_type, "response": resp.payload})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
 
