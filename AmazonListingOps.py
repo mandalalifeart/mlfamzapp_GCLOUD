@@ -285,3 +285,29 @@ def PatchAmazonListingAttribute(request):
         return json_response({"sku": sku, "response": resp.payload})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def ProbeEuSellerId(request):
+    """One-off diagnostic (not part of the audit pipeline): dumps the raw
+    Sellers API marketplace-participation payload for the EU credentials,
+    to check whether it reveals the EU account's own seller/account id
+    without needing to ask the user to look it up in Seller Central."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    try:
+        from sp_api.api import Sellers
+        from sp_api.base import Marketplaces
+
+        credentials = {
+            "refresh_token": os.environ["REFRESH_TOKEN_EU"],
+            "lwa_app_id": os.environ["CLIENT_ID_EU"],
+            "lwa_client_secret": os.environ["CLIENT_SECRET_EU"],
+        }
+        client = Sellers(credentials=credentials, marketplace=Marketplaces.DE)
+        resp = client.get_marketplace_participation()
+        return json_response({"payload": resp.payload})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
