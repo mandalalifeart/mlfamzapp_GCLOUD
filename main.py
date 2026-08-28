@@ -213,6 +213,11 @@ def ProbeEuSellerId(request):
     return _impl(request)
 
 
+def AuditAmazonListings(request):
+    from AmazonListingOps import AuditAmazonListings as _impl
+    return _impl(request)
+
+
 def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)

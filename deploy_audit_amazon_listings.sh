@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+source ./_deploy_common.sh
+
+PROJECT_ID="mlfamzapp"
+FUNCTION_NAME="AuditAmazonListings"
+REGION="us-central1"
+RUNTIME="python312"
+ENTRY_POINT="AuditAmazonListings"
+SOURCE_DIR="."
+ENV_FILE=".env"
+GEN2=true
+FORCE_PUSH=false
+TIMEOUT_SECONDS=1500
+SERVICE_ACCOUNT="mlfamzapp@appspot.gserviceaccount.com"
+COMMIT_MSG="${1:-UpdateLogic}"
+
+required_vars=(
+  CLIENT_ID_USA
+  CLIENT_SECRET_USA
+  REFRESH_TOKEN_USA
+  CLIENT_ID_EU
+  CLIENT_SECRET_EU
+  REFRESH_TOKEN_EU
+  AMAZON_SELLER_ID
+  AMAZON_SELLER_ID_EU
+  POCKETBASE_URL
+  POCKETBASE_ADMIN_EMAIL
+  POCKETBASE_ADMIN_PASSWORD
+  GMAIL_USER
+  GMAIL_APP_PASSWORD
+  REPORT_EMAIL_TO
+  MCF_TELEGRAM_BOT_TOKEN
+  MCF_TELEGRAM_CHAT_ID
+  ADMIN_KEY
+)
+
+run_deploy

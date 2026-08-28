@@ -287,6 +287,130 @@ def PatchAmazonListingAttribute(request):
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
 
 
+def pb_active_skus():
+    """All SKUs from asin_group_mapping, excluding IGNORE-group placeholder
+    rows - same exclusion rule GetSalesDepartmentReport uses, so the audit
+    doesn't waste calls on SKUs deliberately marked excluded."""
+    token = pb_authenticate()
+    skus = []
+    page = 1
+    while True:
+        resp = requests.get(
+            f"{POCKETBASE_URL}/api/collections/asin_group_mapping/records",
+            headers={"Authorization": token},
+            params={"page": page, "perPage": 200, "filter": 'group != "IGNORE"'},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        skus.extend(item["sku"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    # de-dupe, preserve order
+    seen = set()
+    unique = []
+    for sku in skus:
+        if sku not in seen:
+            seen.add(sku)
+            unique.append(sku)
+    return unique
+
+
+def AuditAmazonListings(request):
+    """Weekly-scheduled: checks every catalog SKU's live listing for
+    ERROR-severity issues across all 6 marketplaces this account sells in
+    (US via the USA account, DE/UK/FR/IT/ES via the separate EU account),
+    and reports a summary. Read-only - only calls get_listings_item, no
+    writes - but gated behind ADMIN_KEY like the other Ads/Listings pulls
+    since it's a real, paced burst of paid-API calls (~100 SKUs x 6
+    marketplaces)."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    import time
+
+    try:
+        from sp_api.base import Marketplaces
+
+        skus = pb_active_skus()
+        by_marketplace = {}
+        errored_calls = []
+
+        for marketplace in MARKETPLACE_CONFIG:
+            _, mp_attr, seller_id = MARKETPLACE_CONFIG[marketplace]
+            mp_id = getattr(Marketplaces, mp_attr).marketplace_id
+            client = listings_client(marketplace)
+            flagged = []
+            checked = 0
+            for sku in skus:
+                try:
+                    resp = client.get_listings_item(
+                        sellerId=seller_id,
+                        sku=sku,
+                        marketplaceIds=[mp_id],
+                        includedData=["issues", "summaries"],
+                    )
+                    payload = resp.payload or {}
+                    if not payload.get("summaries"):
+                        continue  # not listed in this marketplace, not an error
+                    checked += 1
+                    error_issues = [
+                        iss for iss in payload.get("issues", [])
+                        if iss.get("severity") == "ERROR"
+                    ]
+                    if error_issues:
+                        flagged.append({
+                            "sku": sku,
+                            "asin": payload["summaries"][0].get("asin"),
+                            "issues": [f"{iss.get('code')}: {iss.get('message', '')[:140]}" for iss in error_issues],
+                        })
+                except Exception as exc:
+                    errored_calls.append(f"{marketplace}/{sku}: {exc}")
+                time.sleep(0.4)
+            by_marketplace[marketplace] = {"checked": checked, "flagged": flagged}
+
+        total_flagged = sum(len(v["flagged"]) for v in by_marketplace.values())
+
+        lines = ["Weekly Amazon listings audit (US/DE/UK/FR/IT/ES):"]
+        for marketplace, result in by_marketplace.items():
+            lines.append(f"\n{marketplace}: {result['checked']} listed, {len(result['flagged'])} with errors")
+            for item in result["flagged"]:
+                lines.append(f"  - {item['sku']} ({item['asin']}): {'; '.join(item['issues'])}")
+        if errored_calls:
+            lines.append(f"\n{len(errored_calls)} API call(s) failed during the audit:")
+            lines.extend(f"  - {e}" for e in errored_calls[:10])
+        text = "\n".join(lines)
+
+        send_telegram(text[:4000])
+        # Email only when there's something to actually act on (real
+        # listing errors, or the audit itself failing) - matches the
+        # standing email-alerts-only policy.
+        if (total_flagged or errored_calls) and GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
+            from email.mime.text import MIMEText
+            import smtplib
+            msg = MIMEText(text)
+            msg["Subject"] = f"Amazon listings audit - {total_flagged} SKU(s) with errors"
+            msg["From"] = GMAIL_USER
+            msg["To"] = REPORT_EMAIL_TO
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.starttls()
+                server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+
+        return json_response({
+            "skuCount": len(skus),
+            "totalFlagged": total_flagged,
+            "byMarketplace": by_marketplace,
+            "erroredCalls": errored_calls,
+        })
+    except Exception as exc:
+        send_telegram(f"Weekly Amazon listings audit FAILED: {exc}")
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
 def ProbeEuSellerId(request):
     """One-off diagnostic (not part of the audit pipeline): dumps the raw
     Sellers API marketplace-participation payload for the EU credentials,
