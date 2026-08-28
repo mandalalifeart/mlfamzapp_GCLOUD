@@ -368,7 +368,11 @@ def AuditAmazonListings(request):
                             "issues": [f"{iss.get('code')}: {iss.get('message', '')[:140]}" for iss in error_issues],
                         })
                 except Exception as exc:
-                    errored_calls.append(f"{marketplace}/{sku}: {exc}")
+                    if "NOT_FOUND" not in str(exc):
+                        # NOT_FOUND just means this SKU isn't sold in this
+                        # marketplace - expected and common, not a real
+                        # API failure worth reporting.
+                        errored_calls.append(f"{marketplace}/{sku}: {exc}")
                 time.sleep(0.4)
             by_marketplace[marketplace] = {"checked": checked, "flagged": flagged}
 
