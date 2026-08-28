@@ -1,7 +1,5 @@
 import os
-import smtplib
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
 
 import requests
 
@@ -18,9 +16,6 @@ POCKETBASE_EXPERIMENTS_COLLECTION = os.environ.get("POCKETBASE_ETSY_EXPERIMENTS_
 POCKETBASE_SNAPSHOTS_COLLECTION = os.environ.get("POCKETBASE_ETSY_SNAPSHOTS_COLLECTION", "etsy_listing_snapshots")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
-GMAIL_USER = os.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
 
@@ -112,15 +107,8 @@ def format_summary(experiment, current, days_running):
 
 
 def send_summary(text):
-    if GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
-        msg = MIMEText(text)
-        msg["Subject"] = "Etsy growth experiment update"
-        msg["From"] = GMAIL_USER
-        msg["To"] = REPORT_EMAIL_TO
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, [REPORT_EMAIL_TO], msg.as_string())
+    # Telegram only - this is a routine status update (views/orders
+    # before-after), never an alert, so it doesn't go to email.
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",

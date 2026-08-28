@@ -192,6 +192,7 @@ def ProcessAmazonRelistQueue(request):
                 )
                 processed.append({"sku": sku, "ok": True, "response": resp.payload})
                 text = f"Amazon relist complete: SKU {sku} is live again as a standalone listing (no longer part of its old variation family)."
+                succeeded = True
             except Exception as exc:
                 requests.patch(
                     f"{POCKETBASE_URL}/api/collections/{POCKETBASE_RELIST_QUEUE_COLLECTION}/records/{item['id']}",
@@ -201,9 +202,12 @@ def ProcessAmazonRelistQueue(request):
                 )
                 processed.append({"sku": sku, "ok": False, "error": str(exc)})
                 text = f"Amazon relist FAILED for SKU {sku}: {exc}"
+                succeeded = False
 
             send_telegram(text)
-            if GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
+            # Email only for alerts/errors; a successful routine relist goes
+            # to Telegram only.
+            if not succeeded and GMAIL_USER and GMAIL_APP_PASSWORD and REPORT_EMAIL_TO:
                 from email.mime.text import MIMEText
                 import smtplib
                 msg = MIMEText(text)

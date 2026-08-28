@@ -260,15 +260,19 @@ def RunEtsyMcfFulfillment(request):
         mcf_status_map = load_mcf_status_map(pb_token)
         orders = build_fulfillment_plan(receipts, sku_map, mcf_status_map)
 
+        not_fulfillable = sum(1 for o in orders if not o["fulfillable"])
         report_text = format_report_text(orders)
-        send_email_report(report_text)
+        # Email only for alerts/errors (something needs the user's attention);
+        # routine "all fulfillable, no issues" days go to Telegram only.
+        if not_fulfillable or errors:
+            send_email_report(report_text)
         send_telegram_report(orders, report_text)
 
         return json_response({
             "dryRun": True,
             "pendingOrders": len(orders),
             "fulfillableOrders": sum(1 for o in orders if o["fulfillable"]),
-            "notFulfillableOrders": sum(1 for o in orders if not o["fulfillable"]),
+            "notFulfillableOrders": not_fulfillable,
             "errors": errors,
         })
     except Exception as exc:
@@ -636,7 +640,10 @@ def UpdateEtsyTrackingFromAmazon(request):
                 errors.append(f"Receipt {receipt_id}: {exc}")
 
         report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors)
-        send_tracking_email(report_text)
+        # Email only for alerts/errors; routine shipping updates go to
+        # Telegram only.
+        if skipped_no_carrier_match or errors:
+            send_tracking_email(report_text)
         send_tracking_telegram(report_text)
 
         return json_response({
