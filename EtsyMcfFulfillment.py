@@ -507,13 +507,16 @@ def map_carrier_name(amazon_carrier_code, etsy_carrier_names):
 
 
 def extract_shipped_packages(payload):
-    """All packages from SHIPPED fulfillment shipments on a getFulfillmentOrder
-    response - empty if the order hasn't shipped yet (still Pending/Processing
-    on Amazon's side)."""
+    """All packages that already have a real tracking number, from ANY
+    fulfillment shipment - not gated on fulfillmentShipmentStatus=="SHIPPED".
+    Amazon assigns a real carrier tracking number as soon as a shipping
+    label is generated, which can happen while the shipment is still
+    "PENDING" (confirmed live, 2026-08-28, per the user's own correction -
+    a real USPS tracking number was already present on a PENDING shipment).
+    Gating on SHIPPED specifically was needlessly conservative and delayed
+    pushing real, usable tracking to Etsy/the buyer."""
     packages = []
     for shipment in payload.get("fulfillmentShipments") or []:
-        if shipment.get("fulfillmentShipmentStatus") != "SHIPPED":
-            continue
         for pkg in shipment.get("fulfillmentShipmentPackage") or []:
             tracking = pkg.get("trackingNumber") or pkg.get("amazonFulfillmentTrackingNumber")
             if tracking:
