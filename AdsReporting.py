@@ -568,6 +568,157 @@ def poll_and_store_jobs(pb_token, jobs, errors):
     return total_written
 
 
+LEGACY_VIDEO_POLL_ROUNDS = 15
+LEGACY_VIDEO_POLL_DELAY_SECONDS = 8
+
+
+def request_legacy_video_report(base_url, access_token, client_id, ads_profile_id, date_str):
+    """Legacy Sponsored Brands Video campaigns (created before this account's
+    Brand Registry / SBv4 migration - no brandEntityId) never appear in the
+    modern Reporting API v3 SPONSORED_BRANDS report, confirmed empirically
+    2026-08-28 (a byte-identical fresh v3 pull still excluded them) and via
+    Amazon's own docs (v3 only covers SBv4/"SB2"-format campaigns - legacy SB
+    and SBV need the old v2 reporting endpoints). The fix specifically for
+    video creatives is `"creativeType": "video"` on the v2 request - without
+    it the v2 endpoint doesn't return video campaigns either. v2 reports are
+    per single day (`reportDate`), not a date range like v3, but generate far
+    faster (~15-30s vs 15-25min for v3 SB)."""
+    resp = requests.post(
+        f"{base_url}/v2/hsa/campaigns/report",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/json",
+        },
+        json={
+            "reportDate": date_str.replace("-", ""),
+            "creativeType": "video",
+            "metrics": "campaignId,campaignName,campaignStatus,impressions,clicks,cost,attributedSales14d,attributedConversions14d",
+        },
+        timeout=30,
+    )
+    if resp.status_code != 202:
+        raise RuntimeError(f"Legacy video report request failed: HTTP {resp.status_code} - {resp.text}")
+    return resp.json()["reportId"]
+
+
+def poll_legacy_video_report(base_url, headers, report_id):
+    for _ in range(LEGACY_VIDEO_POLL_ROUNDS):
+        resp = requests.get(f"{base_url}/v2/reports/{report_id}", headers=headers, timeout=15)
+        data = resp.json()
+        status = data.get("status")
+        if status == "SUCCESS":
+            download = requests.get(data["location"], headers=headers, timeout=30)
+            try:
+                return json.loads(gzip.GzipFile(fileobj=io.BytesIO(download.content)).read())
+            except Exception:
+                return download.json()
+        if status == "FAILURE":
+            raise RuntimeError(f"Legacy video report generation failed: {data}")
+        time.sleep(LEGACY_VIDEO_POLL_DELAY_SECONDS)
+    raise RuntimeError(f"Legacy video report {report_id} timed out")
+
+
+def legacy_video_row_to_body(ads_profile, row, date_str):
+    return {
+        "profile_id": str(ads_profile.get("profileId")),
+        "campaign_id": str(row.get("campaignId")),
+        "campaign_name": row.get("campaignName", ""),
+        "campaign_status": (row.get("campaignStatus") or "").upper(),
+        "country_code": ads_profile.get("countryCode", ""),
+        "currency_code": ads_profile.get("currencyCode", ""),
+        "ad_product": "SPONSORED_BRANDS",
+        "date": date_str,
+        "month": int(date_str[5:7]),
+        "year": int(date_str[0:4]),
+        "impressions": row.get("impressions", 0),
+        "clicks": row.get("clicks", 0),
+        "spend": row.get("cost", 0),
+        "sales": row.get("attributedSales14d", 0),
+        "orders": row.get("attributedConversions14d", 0),
+    }
+
+
+def pull_and_store_legacy_video_stats(pb_token, connections, start_date, end_date, errors):
+    """Supplements the modern SB pull with legacy-video-only campaigns for
+    every day in the range, per profile - skips any campaign_id already
+    written by the v3 pull for that (profile, date), since the v2 video
+    report also includes modern SBv4 video campaigns already captured
+    correctly there and summing both would double-count them."""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    date_strs = []
+    d = start
+    while d <= end:
+        date_strs.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+
+    rows_written = 0
+    for connection in connections:
+        profile_key = connection.get("region")
+        refresh_token = connection.get("refresh_token")
+        if profile_key not in AD_PROFILES or not refresh_token:
+            continue
+        try:
+            access_token = refresh_access_token(profile_key, refresh_token)
+        except Exception as exc:
+            errors.append(f"legacy-video {profile_key}: token refresh failed: {exc}")
+            continue
+        client_id = AD_PROFILES[profile_key]["client_id"]
+
+        for ads_profile in connection.get("profiles", []) or []:
+            if ads_profile.get("accountType") == "agency":
+                continue
+            region = ads_profile.get("region")
+            base_url = ADS_REGION_ENDPOINTS.get(region)
+            ads_profile_id = ads_profile.get("profileId")
+            if not base_url or not ads_profile_id:
+                continue
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Amazon-Advertising-API-ClientId": client_id,
+                "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            }
+
+            for date_str in date_strs:
+                try:
+                    known_ids = pb_known_campaign_ids(pb_token, str(ads_profile_id), "SPONSORED_BRANDS", date_str)
+                    report_id = request_legacy_video_report(base_url, access_token, client_id, ads_profile_id, date_str)
+                    rows = poll_legacy_video_report(base_url, headers, report_id)
+                    bodies = [
+                        legacy_video_row_to_body(ads_profile, row, date_str)
+                        for row in rows
+                        if str(row.get("campaignId")) not in known_ids and (row.get("cost") or row.get("attributedSales14d"))
+                    ]
+                    ops = [
+                        {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records", "body": b}
+                        for b in bodies
+                    ]
+                    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                        pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+                    rows_written += len(bodies)
+                except Exception as exc:
+                    errors.append(f"legacy-video {profile_key}/{ads_profile_id} {date_str}: {exc}")
+
+    return rows_written
+
+
+def pb_known_campaign_ids(token, profile_id, ad_product, date_str):
+    response = requests.get(
+        f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records",
+        headers={"Authorization": token},
+        params={
+            "filter": f'(profile_id = "{profile_id}" && ad_product = "{ad_product}" && date = "{date_str}")',
+            "perPage": 500,
+            "fields": "campaign_id",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return {item["campaign_id"] for item in response.json().get("items", [])}
+
+
 def pull_and_store_campaign_stats(start_date, end_date):
     pb_token = pb_authenticate()
     connections = pb_list_connected(pb_token)
@@ -599,8 +750,14 @@ def pull_and_store_campaign_stats(start_date, end_date):
     jobs = submit_report_jobs(connections, start_date, end_date, errors)
     rows_written = poll_and_store_jobs(pb_token, jobs, errors)
 
+    # Legacy SB Video campaigns (no brandEntityId) are invisible to the v3
+    # pull above regardless of filters - supplement with the old v2 endpoint,
+    # deduped against what v3 already wrote. See pull_and_store_legacy_video_stats.
+    legacy_video_rows_written = pull_and_store_legacy_video_stats(pb_token, connections, start_date, end_date, errors)
+
     return {
-        "rowsWritten": rows_written,
+        "rowsWritten": rows_written + legacy_video_rows_written,
+        "legacyVideoRowsWritten": legacy_video_rows_written,
         "profilesPulled": len(profile_ids),
         "campaignsListed": campaigns_written,
         "errors": errors,
