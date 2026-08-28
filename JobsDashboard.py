@@ -4,6 +4,11 @@ import os
 import requests
 
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+# Deliberately separate from ADMIN_KEY (which also gates real destructive/
+# paid actions like DeleteAmazonListingItem) - this one only gates flipping
+# notification-routing booleans, so it's safe to bake into the public
+# frontend bundle without exposing the wider ADMIN_KEY there.
+OPS_DASHBOARD_KEY = os.environ.get("OPS_DASHBOARD_KEY", "")
 POCKETBASE_URL = os.environ.get("POCKETBASE_URL", "").rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ.get("POCKETBASE_ADMIN_EMAIL", "")
 POCKETBASE_ADMIN_PASSWORD = os.environ.get("POCKETBASE_ADMIN_PASSWORD", "")
@@ -57,11 +62,12 @@ def GetScheduledJobs(request):
 
 def UpdateScheduledJob(request):
     """Writes to one scheduled_jobs row - the "define what goes as
-    notification" config page's save action. Gated behind ADMIN_KEY since
-    it's a write, even though it only affects notification routing."""
+    notification" config page's save action. Gated behind OPS_DASHBOARD_KEY
+    (not the wider ADMIN_KEY) so the frontend can hold this credential
+    without exposing the key that also gates real destructive actions."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
-    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+    if OPS_DASHBOARD_KEY and (not hasattr(request, "args") or request.args.get("key") != OPS_DASHBOARD_KEY):
         return json_response({"error": "Unauthorized"}, 401)
 
     body = request.get_json(silent=True) or {}
