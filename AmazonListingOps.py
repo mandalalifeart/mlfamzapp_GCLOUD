@@ -260,10 +260,16 @@ def PatchAmazonListingAttribute(request):
     if op != "delete":
         patch["value"] = value
 
+    marketplace = body.get("marketplace") or "US"
+    if marketplace not in MARKETPLACE_CONFIG:
+        return json_response({"error": f"unknown marketplace {marketplace}"}, 400)
+    _, mp_attr, seller_id = MARKETPLACE_CONFIG[marketplace]
+
     try:
         from sp_api.base import Marketplaces
 
-        client = listings_client()
+        client = listings_client(marketplace)
+        mp_id = getattr(Marketplaces, mp_attr).marketplace_id
 
         # productType must match what Amazon's catalog already has for this
         # SKU's ASIN, not a guessed constant - submitting the wrong one
@@ -274,9 +280,9 @@ def PatchAmazonListingAttribute(request):
         product_type = body.get("product_type")
         if not product_type:
             current = client.get_listings_item(
-                sellerId=SELLER_ID,
+                sellerId=seller_id,
                 sku=sku,
-                marketplaceIds=[Marketplaces.US.marketplace_id],
+                marketplaceIds=[mp_id],
                 includedData=["summaries"],
             )
             summaries = (current.payload or {}).get("summaries") or []
@@ -285,15 +291,15 @@ def PatchAmazonListingAttribute(request):
             return json_response({"error": f"Could not determine productType for {sku} - pass product_type explicitly"}, 400)
 
         resp = client.patch_listings_item(
-            sellerId=SELLER_ID,
+            sellerId=seller_id,
             sku=sku,
-            marketplaceIds=[Marketplaces.US.marketplace_id],
+            marketplaceIds=[mp_id],
             body={
                 "productType": product_type,
                 "patches": [patch],
             },
         )
-        return json_response({"sku": sku, "productType": product_type, "response": resp.payload})
+        return json_response({"sku": sku, "marketplace": marketplace, "productType": product_type, "response": resp.payload})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
 
