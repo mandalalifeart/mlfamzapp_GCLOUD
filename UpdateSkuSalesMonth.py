@@ -18,6 +18,13 @@ EU_MARKETPLACE_CURRENCY = {
     "se": "SEK", "pl": "PLN",
 }
 
+# ads_campaign_stats.country_code (from Amazon's own Ads reports) -> the
+# lowercase marketplace codes country_sales already uses everywhere else.
+ADS_COUNTRY_TO_MARKETPLACE = {
+    "US": "usa", "UK": "uk", "DE": "de", "FR": "fr", "IT": "it", "ES": "es",
+    "CA": "ca", "MX": "mex", "JP": "jp",
+}
+
 FX_API_URL = "https://api.frankfurter.app"
 # Only used if the historical FX API call fails, so a month can still be
 # processed instead of erroring out - approximate rates, not kept precise.
@@ -275,6 +282,59 @@ def build_country_rows(db_rows, month, year):
     return sorted(totals.values(), key=lambda item: item["MARKETPLACE"])
 
 
+def fetch_ppc_totals_by_country(token, month, year):
+    """Sums ads_campaign_stats' spend/sales for the given month/year, keyed
+    by the same lowercase marketplace codes country_sales already uses."""
+    totals = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/ads_campaign_stats/records",
+            headers={"Authorization": token},
+            params={"filter": f"(month = {month} && year = {year})", "perPage": 500, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            marketplace_code = ADS_COUNTRY_TO_MARKETPLACE.get(item.get("country_code"))
+            if not marketplace_code:
+                continue
+            bucket = totals.setdefault(marketplace_code, {"spend": 0.0, "sales": 0.0, "currency": item.get("currency_code", "")})
+            bucket["spend"] += float(item.get("spend") or 0)
+            bucket["sales"] += float(item.get("sales") or 0)
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return totals
+
+
+def merge_ppc_into_country_rows(country_rows, month, year):
+    """Adds PPC_SPEND/PPC_SALES to each country_rows entry from Amazon Ads
+    data, plus a converted-to-EUR contribution to the combined "eu" row -
+    same conversion approach build_db_rows already uses for organic sales,
+    so the "eu" row's PPC figures are genuinely all-EUR too, not a mix."""
+    token = pb_authenticate()
+    ppc_totals = fetch_ppc_totals_by_country(token, month, year)
+
+    eu_spend = 0.0
+    eu_sales = 0.0
+    for row in country_rows:
+        ppc = ppc_totals.get(row["MARKETPLACE"], {"spend": 0.0, "sales": 0.0, "currency": ""})
+        row["PPC_SPEND"] = round(ppc["spend"], 2)
+        row["PPC_SALES"] = round(ppc["sales"], 2)
+        if row["MARKETPLACE"] in EU_MARKETPLACE_CURRENCY:
+            currency = EU_MARKETPLACE_CURRENCY[row["MARKETPLACE"]]
+            rate_to_eur = get_fx_rate_to_eur(currency, month, year)
+            eu_spend += ppc["spend"] * rate_to_eur
+            eu_sales += ppc["sales"] * rate_to_eur
+
+    eu_row = next((r for r in country_rows if r["MARKETPLACE"] == "eu"), None)
+    if eu_row is not None:
+        eu_row["PPC_SPEND"] = round(eu_row.get("PPC_SPEND", 0) + eu_spend, 2)
+        eu_row["PPC_SALES"] = round(eu_row.get("PPC_SALES", 0) + eu_sales, 2)
+
+
 def build_dry_run_summary(db_rows):
     by_marketplace = defaultdict(lambda: {"rows": 0, "units": 0, "unique_skus": set(), "amount": 0.0})
 
@@ -428,6 +488,8 @@ def country_row_to_body(row):
         # previously sent "amount", a field the collection doesn't have, so
         # PocketBase silently dropped it and every row's sales stayed at 0.
         "sales": row["AMOUNT"],
+        "ppc_spend": row.get("PPC_SPEND", 0),
+        "ppc_sales": row.get("PPC_SALES", 0),
     }
 
 
@@ -546,6 +608,7 @@ def UpdateSkuSalesMonth(request):
 
         db_rows = build_db_rows(order_rows, start_month, start_year)
         country_rows = build_country_rows(db_rows, start_month, start_year)
+        merge_ppc_into_country_rows(country_rows, start_month, start_year)
         missing_asin_skus = find_missing_asin_skus(db_rows)
         asin_warning = (
             f"{len(missing_asin_skus)} SKU(s) written with empty ASIN: {', '.join(missing_asin_skus)}"
