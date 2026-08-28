@@ -165,7 +165,7 @@ def fetch_country_sales(token, min_year, atomic_marketplaces):
             headers={"Authorization": token},
             params={
                 "filter": build_pb_filter(min_year, atomic_marketplaces),
-                "fields": "marketplace,quantity,sales,month,year",
+                "fields": "marketplace,quantity,sales,ppc_spend,ppc_sales,month,year",
                 "perPage": 500,
                 "page": page,
             },
@@ -183,10 +183,12 @@ def fetch_country_sales(token, min_year, atomic_marketplaces):
 
 def build_summary(records, atomic_marketplaces, years, current_month):
     quantity_year_months = defaultdict(lambda: [0] * 12)
-    # Sales are kept in separate buckets per currency rather than one blind
-    # sum - a USD total and a EUR total are not the same number and adding
-    # them together would be meaningless.
+    # Sales/PPC figures are kept in separate buckets per currency rather than
+    # one blind sum - a USD total and a EUR total are not the same number and
+    # adding them together would be meaningless.
     sales_year_months_by_currency = defaultdict(lambda: defaultdict(lambda: [0.0] * 12))
+    ppc_spend_year_months_by_currency = defaultdict(lambda: defaultdict(lambda: [0.0] * 12))
+    ppc_sales_year_months_by_currency = defaultdict(lambda: defaultdict(lambda: [0.0] * 12))
 
     for rec in records:
         marketplace = rec.get("marketplace")
@@ -201,6 +203,8 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         quantity_year_months[year][month - 1] += rec.get("quantity") or 0
         currency = MARKETPLACE_CURRENCY.get(marketplace, "USD")
         sales_year_months_by_currency[currency][year][month - 1] += rec.get("sales") or 0
+        ppc_spend_year_months_by_currency[currency][year][month - 1] += rec.get("ppc_spend") or 0
+        ppc_sales_year_months_by_currency[currency][year][month - 1] += rec.get("ppc_sales") or 0
 
     # A single-currency selection (one marketplace, or several that share a
     # currency) is shown in that native currency - only a genuinely mixed
@@ -210,15 +214,24 @@ def build_summary(records, atomic_marketplaces, years, current_month):
     if len(present_currencies) <= 1:
         sales_currency = present_currencies[0] if present_currencies else "USD"
         sales_year_months_final = sales_year_months_by_currency.get(sales_currency, defaultdict(lambda: [0.0] * 12))
+        ppc_spend_year_months_final = ppc_spend_year_months_by_currency.get(sales_currency, defaultdict(lambda: [0.0] * 12))
+        ppc_sales_year_months_final = ppc_sales_year_months_by_currency.get(sales_currency, defaultdict(lambda: [0.0] * 12))
     else:
         sales_currency = "USD"
         usd_rates = fetch_usd_rates(present_currencies)
-        sales_year_months_final = defaultdict(lambda: [0.0] * 12)
-        for currency, year_months in sales_year_months_by_currency.items():
-            rate = 1.0 if currency == "USD" else usd_rates.get(currency)
-            for year, months in year_months.items():
-                for i, value in enumerate(months):
-                    sales_year_months_final[year][i] += (value / rate) if rate else value
+
+        def blend_to_usd(by_currency):
+            blended = defaultdict(lambda: [0.0] * 12)
+            for currency, year_months in by_currency.items():
+                rate = 1.0 if currency == "USD" else usd_rates.get(currency)
+                for year, months in year_months.items():
+                    for i, value in enumerate(months):
+                        blended[year][i] += (value / rate) if rate else value
+            return blended
+
+        sales_year_months_final = blend_to_usd(sales_year_months_by_currency)
+        ppc_spend_year_months_final = blend_to_usd(ppc_spend_year_months_by_currency)
+        ppc_sales_year_months_final = blend_to_usd(ppc_sales_year_months_by_currency)
 
     # Comparing a full prior year against a current year that's still in progress
     # skews the % low, so growth is measured only over the months already
@@ -242,9 +255,50 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         )
         return {"yearRows": year_rows, "growthPct": growth_pct}
 
+    def make_ratio_metric(numerator_year_months, denominator_year_months):
+        """A percentage metric (e.g. ACOS = ppc_spend/ppc_sales*100) - each
+        month's value is that month's own ratio, but the yearly "total" is
+        the ratio of yearly SUMS (not an average of monthly percentages,
+        which would overweight low-volume months)."""
+        year_rows = []
+        for year in years:
+            num_months = numerator_year_months.get(year, [0.0] * 12)
+            den_months = denominator_year_months.get(year, [0.0] * 12)
+            months = [
+                round(n / d * 100, 1) if d else None
+                for n, d in zip(num_months, den_months)
+            ]
+            year_total = round(sum(num_months) / sum(den_months) * 100, 1) if sum(den_months) else None
+            year_rows.append({"year": year, "months": months, "total": year_total})
+
+        num_partial_this = sum(numerator_year_months.get(years[0], [0.0] * 12)[:completed_months])
+        den_partial_this = sum(denominator_year_months.get(years[0], [0.0] * 12)[:completed_months])
+        num_partial_last = sum(numerator_year_months.get(years[1], [0.0] * 12)[:completed_months]) if len(years) > 1 else 0
+        den_partial_last = sum(denominator_year_months.get(years[1], [0.0] * 12)[:completed_months]) if len(years) > 1 else 0
+        this_ratio = (num_partial_this / den_partial_this * 100) if den_partial_this else None
+        last_ratio = (num_partial_last / den_partial_last * 100) if den_partial_last else None
+        growth_pct = (
+            round(this_ratio - last_ratio, 1)
+            if this_ratio is not None and last_ratio is not None
+            else None
+        )
+        return {"yearRows": year_rows, "growthPct": growth_pct}
+
+    net_sales_year_months = defaultdict(lambda: [0.0] * 12)
+    for year in years:
+        sales_months = sales_year_months_final.get(year, [0.0] * 12)
+        spend_months = ppc_spend_year_months_final.get(year, [0.0] * 12)
+        net_sales_year_months[year] = [s - p for s, p in zip(sales_months, spend_months)]
+
     return {
         "quantity": make_metric(quantity_year_months),
         "sales": make_metric(sales_year_months_final, round_decimals=2),
+        "netSales": make_metric(net_sales_year_months, round_decimals=2),
+        # ACOS = PPC spend as a % of PPC-attributed sales (industry-standard
+        # definition). TACoS = PPC spend as a % of TOTAL sales (organic +
+        # PPC) - a broader "how much of all revenue went to ad spend" view.
+        "acos": make_ratio_metric(ppc_spend_year_months_final, ppc_sales_year_months_final),
+        "tacos": make_ratio_metric(ppc_spend_year_months_final, sales_year_months_final),
         "salesCurrency": sales_currency,
     }
 
