@@ -354,7 +354,13 @@ def create_mcf_order(receipt, sku_map):
         # means the constraint is NOT enforced, i.e. Amazon Logistics stays
         # allowed as a carrier - matches "Block Amazon Logistics" unchecked
         # in Seller Central's manual create-order UI.
-        featureConstraints=[{"featureName": "BLOCK_AMAZON_LOGISTICS", "featureFulfillmentPolicy": "NotRequired"}],
+        # Real valid values (confirmed live via Amazon's own rejection
+        # message): BLANK_BOX, OVERBOX, BLOCK_AMZL, PRIME_ELIGIBILITY,
+        # DELIVER_TOGETHER, SIGNATURE_CONFIRMATION,
+        # ADULT_SIGNATURE_CONFIRMATION, PACKING_SLIP - "BLOCK_AMAZON_LOGISTICS"
+        # (used originally) isn't one of them and broke every order creation
+        # until caught here.
+        featureConstraints=[{"featureName": "BLOCK_AMZL", "featureFulfillmentPolicy": "NotRequired"}],
     )
     return resp.payload
 
