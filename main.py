@@ -208,6 +208,11 @@ def PatchAmazonListingAttribute(request):
     return _impl(request)
 
 
+def ProbeEuSellerId(request):
+    from AmazonListingOps import ProbeEuSellerId as _impl
+    return _impl(request)
+
+
 def CreateMcfOrderForReceipt(request):
     from EtsyMcfFulfillment import CreateMcfOrderForReceipt as _impl
     return _impl(request)
