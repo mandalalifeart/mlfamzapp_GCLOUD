@@ -241,8 +241,13 @@ def PatchAmazonListingAttribute(request):
     sku = body.get("sku")
     path = body.get("path")
     value = body.get("value")
-    if not sku or not path or value is None:
-        return json_response({"error": "sku, path, and value are all required"}, 400)
+    op = body.get("op", "replace")
+    if not sku or not path or (op != "delete" and value is None):
+        return json_response({"error": "sku and path are required (value required unless op=delete)"}, 400)
+
+    patch = {"op": op, "path": path}
+    if op != "delete":
+        patch["value"] = value
 
     try:
         from sp_api.base import Marketplaces
@@ -254,7 +259,7 @@ def PatchAmazonListingAttribute(request):
             marketplaceIds=[Marketplaces.US.marketplace_id],
             body={
                 "productType": "OTTOMAN",
-                "patches": [{"op": "replace", "path": path, "value": value}],
+                "patches": [patch],
             },
         )
         return json_response({"sku": sku, "response": resp.payload})
