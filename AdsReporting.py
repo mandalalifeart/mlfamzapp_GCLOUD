@@ -572,17 +572,29 @@ LEGACY_VIDEO_POLL_ROUNDS = 15
 LEGACY_VIDEO_POLL_DELAY_SECONDS = 8
 
 
-def request_legacy_video_report(base_url, access_token, client_id, ads_profile_id, date_str):
-    """Legacy Sponsored Brands Video campaigns (created before this account's
-    Brand Registry / SBv4 migration - no brandEntityId) never appear in the
-    modern Reporting API v3 SPONSORED_BRANDS report, confirmed empirically
+# None = default/non-video legacy campaigns (e.g. "USAC SB VIN KW", a
+# keyword-targeted legacy campaign, $10.61/month - tiny but real); "video" =
+# legacy Sponsored Brands Video. Both are invisible to the v3 Reporting API.
+LEGACY_CREATIVE_TYPES = [None, "video"]
+
+
+def request_legacy_report(base_url, access_token, client_id, ads_profile_id, date_str, creative_type):
+    """Legacy Sponsored Brands campaigns (created before this account's Brand
+    Registry / SBv4 migration - no brandEntityId) never appear in the modern
+    Reporting API v3 SPONSORED_BRANDS report, confirmed empirically
     2026-08-28 (a byte-identical fresh v3 pull still excluded them) and via
     Amazon's own docs (v3 only covers SBv4/"SB2"-format campaigns - legacy SB
-    and SBV need the old v2 reporting endpoints). The fix specifically for
-    video creatives is `"creativeType": "video"` on the v2 request - without
-    it the v2 endpoint doesn't return video campaigns either. v2 reports are
-    per single day (`reportDate`), not a date range like v3, but generate far
-    faster (~15-30s vs 15-25min for v3 SB)."""
+    and SBV need the old v2 reporting endpoints). Video creatives specifically
+    need `"creativeType": "video"` on the v2 request or they're excluded too;
+    non-video legacy campaigns need the field omitted entirely. v2 reports
+    are per single day (`reportDate`), not a date range like v3, but generate
+    far faster (~15-30s vs 15-25min for v3 SB)."""
+    body = {
+        "reportDate": date_str.replace("-", ""),
+        "metrics": "campaignId,campaignName,campaignStatus,impressions,clicks,cost,attributedSales14d,attributedConversions14d",
+    }
+    if creative_type:
+        body["creativeType"] = creative_type
     resp = requests.post(
         f"{base_url}/v2/hsa/campaigns/report",
         headers={
@@ -591,19 +603,15 @@ def request_legacy_video_report(base_url, access_token, client_id, ads_profile_i
             "Amazon-Advertising-API-Scope": str(ads_profile_id),
             "Content-Type": "application/json",
         },
-        json={
-            "reportDate": date_str.replace("-", ""),
-            "creativeType": "video",
-            "metrics": "campaignId,campaignName,campaignStatus,impressions,clicks,cost,attributedSales14d,attributedConversions14d",
-        },
+        json=body,
         timeout=30,
     )
     if resp.status_code != 202:
-        raise RuntimeError(f"Legacy video report request failed: HTTP {resp.status_code} - {resp.text}")
+        raise RuntimeError(f"Legacy report request failed (creativeType={creative_type}): HTTP {resp.status_code} - {resp.text}")
     return resp.json()["reportId"]
 
 
-def poll_legacy_video_report(base_url, headers, report_id):
+def poll_legacy_report(base_url, headers, report_id):
     for _ in range(LEGACY_VIDEO_POLL_ROUNDS):
         resp = requests.get(f"{base_url}/v2/reports/{report_id}", headers=headers, timeout=15)
         data = resp.json()
@@ -620,7 +628,7 @@ def poll_legacy_video_report(base_url, headers, report_id):
     raise RuntimeError(f"Legacy video report {report_id} timed out")
 
 
-def legacy_video_row_to_body(ads_profile, row, date_str):
+def legacy_row_to_body(ads_profile, row, date_str):
     return {
         "profile_id": str(ads_profile.get("profileId")),
         "campaign_id": str(row.get("campaignId")),
@@ -640,12 +648,13 @@ def legacy_video_row_to_body(ads_profile, row, date_str):
     }
 
 
-def pull_and_store_legacy_video_stats(pb_token, connections, start_date, end_date, errors):
-    """Supplements the modern SB pull with legacy-video-only campaigns for
-    every day in the range, per profile - skips any campaign_id already
-    written by the v3 pull for that (profile, date), since the v2 video
-    report also includes modern SBv4 video campaigns already captured
-    correctly there and summing both would double-count them."""
+def pull_and_store_legacy_sb_stats(pb_token, connections, start_date, end_date, errors):
+    """Supplements the modern SB pull with legacy-only campaigns (both video
+    and non-video, see LEGACY_CREATIVE_TYPES) for every day in the range, per
+    profile - skips any campaign_id already written by the v3 pull for that
+    (profile, date), since the v2 legacy report also includes modern SBv4
+    campaigns already captured correctly there and summing both would
+    double-count them."""
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     date_strs = []
@@ -682,24 +691,25 @@ def pull_and_store_legacy_video_stats(pb_token, connections, start_date, end_dat
             }
 
             for date_str in date_strs:
-                try:
-                    known_ids = pb_known_campaign_ids(pb_token, str(ads_profile_id), "SPONSORED_BRANDS", date_str)
-                    report_id = request_legacy_video_report(base_url, access_token, client_id, ads_profile_id, date_str)
-                    rows = poll_legacy_video_report(base_url, headers, report_id)
-                    bodies = [
-                        legacy_video_row_to_body(ads_profile, row, date_str)
-                        for row in rows
-                        if str(row.get("campaignId")) not in known_ids and (row.get("cost") or row.get("attributedSales14d"))
-                    ]
-                    ops = [
-                        {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records", "body": b}
-                        for b in bodies
-                    ]
-                    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
-                        pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
-                    rows_written += len(bodies)
-                except Exception as exc:
-                    errors.append(f"legacy-video {profile_key}/{ads_profile_id} {date_str}: {exc}")
+                for creative_type in LEGACY_CREATIVE_TYPES:
+                    try:
+                        known_ids = pb_known_campaign_ids(pb_token, str(ads_profile_id), "SPONSORED_BRANDS", date_str)
+                        report_id = request_legacy_report(base_url, access_token, client_id, ads_profile_id, date_str, creative_type)
+                        rows = poll_legacy_report(base_url, headers, report_id)
+                        bodies = [
+                            legacy_row_to_body(ads_profile, row, date_str)
+                            for row in rows
+                            if str(row.get("campaignId")) not in known_ids and (row.get("cost") or row.get("attributedSales14d"))
+                        ]
+                        ops = [
+                            {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_STATS_COLLECTION}/records", "body": b}
+                            for b in bodies
+                        ]
+                        for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                            pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+                        rows_written += len(bodies)
+                    except Exception as exc:
+                        errors.append(f"legacy({creative_type}) {profile_key}/{ads_profile_id} {date_str}: {exc}")
 
     return rows_written
 
@@ -750,14 +760,15 @@ def pull_and_store_campaign_stats(start_date, end_date):
     jobs = submit_report_jobs(connections, start_date, end_date, errors)
     rows_written = poll_and_store_jobs(pb_token, jobs, errors)
 
-    # Legacy SB Video campaigns (no brandEntityId) are invisible to the v3
-    # pull above regardless of filters - supplement with the old v2 endpoint,
-    # deduped against what v3 already wrote. See pull_and_store_legacy_video_stats.
-    legacy_video_rows_written = pull_and_store_legacy_video_stats(pb_token, connections, start_date, end_date, errors)
+    # Legacy SB campaigns (no brandEntityId - both video and non-video) are
+    # invisible to the v3 pull above regardless of filters - supplement with
+    # the old v2 endpoint, deduped against what v3 already wrote. See
+    # pull_and_store_legacy_sb_stats.
+    legacy_rows_written = pull_and_store_legacy_sb_stats(pb_token, connections, start_date, end_date, errors)
 
     return {
-        "rowsWritten": rows_written + legacy_video_rows_written,
-        "legacyVideoRowsWritten": legacy_video_rows_written,
+        "rowsWritten": rows_written + legacy_rows_written,
+        "legacyRowsWritten": legacy_rows_written,
         "profilesPulled": len(profile_ids),
         "campaignsListed": campaigns_written,
         "errors": errors,
