@@ -12,6 +12,7 @@ from AdsReporting import (
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
+    last_recorded_date,
     pb_authenticate,
     pb_batch,
     pb_list_connected,
@@ -250,9 +251,32 @@ def UpdateAdsSearchTermStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
-    default_start, default_end = default_previous_month_range()
-    start_date = request.args.get("start_date", default_start)
-    end_date = request.args.get("end_date", default_end)
+    now_la = datetime.now(LA_TZ)
+    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if request.args.get("start_date"):
+        start_date = request.args["start_date"]
+        end_date = request.args.get("end_date", yesterday)
+    else:
+        # Default to since-the-last-recorded-day (capped at Amazon's 31-day
+        # max range), falling back to the previous calendar month only if
+        # there's no prior data at all (first-ever run) - so a missed
+        # monthly run gets backfilled by the next one instead of the "new"
+        # previous-month calculation silently skipping right over the gap.
+        start_date, end_date = default_previous_month_range()
+        try:
+            token = pb_authenticate()
+            last_date = last_recorded_date(token, "ads_search_term_stats")
+            if last_date:
+                gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                start_date = max(gap_start, floor_date)
+                end_date = yesterday
+        except Exception:
+            pass
+
+    if start_date > end_date:
+        return json_response({"startDate": start_date, "endDate": end_date, "skipped": "already up to date"})
 
     try:
         result = pull_and_store_search_term_stats(start_date, end_date)

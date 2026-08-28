@@ -12,6 +12,7 @@ from AdsReporting import (
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
+    last_recorded_date,
     pb_authenticate,
     pb_batch,
     pb_list_connected,
@@ -274,12 +275,30 @@ def UpdateAdsKeywordStats(request):
         return json_response({"error": "Unauthorized"}, 401)
 
     now_la = datetime.now(LA_TZ)
-    # Default to the trailing week (Monday's weekly run pulls the 7 days
-    # since the last run) - both overridable for backfills.
-    default_start = (now_la - timedelta(days=7)).strftime("%Y-%m-%d")
-    default_end = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
-    start_date = request.args.get("start_date", default_start)
-    end_date = request.args.get("end_date", default_end)
+    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if request.args.get("start_date"):
+        start_date = request.args["start_date"]
+        end_date = request.args.get("end_date", yesterday)
+    else:
+        # Default to since-the-last-recorded-day (capped at Amazon's 31-day
+        # max range) rather than a fixed trailing 7 days, so a missed
+        # weekly run gets backfilled automatically by the next one instead
+        # of silently losing whatever fell outside the fixed window.
+        start_date = (now_la - timedelta(days=7)).strftime("%Y-%m-%d")
+        try:
+            token = pb_authenticate()
+            last_date = last_recorded_date(token, "ads_keyword_stats")
+            if last_date:
+                gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                start_date = max(gap_start, floor_date)
+        except Exception:
+            pass
+        end_date = yesterday
+
+    if start_date > end_date:
+        return json_response({"startDate": start_date, "endDate": end_date, "skipped": "already up to date"})
 
     try:
         result = pull_and_store_keyword_stats(start_date, end_date)

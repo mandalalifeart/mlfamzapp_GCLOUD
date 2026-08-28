@@ -607,14 +607,57 @@ def pull_and_store_campaign_stats(start_date, end_date):
     }
 
 
+def last_recorded_date(token, collection=None):
+    """Most recent `date` already in the given stats collection (defaults to
+    ads_campaign_stats), or None if empty. Lets a scheduled pull catch up
+    automatically after a missed run (e.g. the local cron machine was
+    asleep) instead of only ever covering a fixed lookback window."""
+    resp = requests.get(
+        f"{POCKETBASE_URL}/api/collections/{collection or POCKETBASE_ADS_STATS_COLLECTION}/records",
+        headers={"Authorization": token},
+        params={"perPage": 1, "sort": "-date", "fields": "date"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    return items[0]["date"] if items else None
+
+
 def UpdateAdsCampaignStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
     now_la = datetime.now(LA_TZ)
-    default_date = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
-    start_date = request.args.get("start_date", default_date)
-    end_date = request.args.get("end_date", start_date)
+    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if request.args.get("start_date"):
+        # Explicit range requested (e.g. a manual backfill) - unchanged behavior.
+        start_date = request.args["start_date"]
+        end_date = request.args.get("end_date", start_date)
+    else:
+        # No explicit range - default to "everything since the last
+        # recorded day, through yesterday" instead of always just
+        # yesterday, so a missed run (machine asleep, etc.) gets backfilled
+        # automatically by the next successful one.
+        start_date = yesterday
+        try:
+            token = pb_authenticate()
+            last_date = last_recorded_date(token)
+            if last_date:
+                gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+                # Amazon's Reporting API caps a single request at 31 days -
+                # if the gap is bigger than that, just take the most recent
+                # 31 days; anything older needs a manual backfill anyway.
+                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                start_date = max(gap_start, floor_date)
+        except Exception:
+            pass  # fall back to "just yesterday" if the catch-up lookup itself fails
+        end_date = yesterday
+
+    if start_date > end_date:
+        # Already caught up (e.g. this got invoked twice in one day) -
+        # nothing new to pull.
+        return json_response({"startDate": start_date, "endDate": end_date, "skipped": "already up to date"})
 
     try:
         result = pull_and_store_campaign_stats(start_date, end_date)
