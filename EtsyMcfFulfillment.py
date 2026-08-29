@@ -280,6 +280,91 @@ def RunEtsyMcfFulfillment(request):
         return json_response({"error": str(exc)}, 500)
 
 
+def RunEtsyMcfFulfillmentWet(request):
+    """WET RUN - places a real Amazon MCF fulfillment order for every
+    currently-pending, fulfillable Etsy receipt. Built 2026-08-29 at the
+    user's explicit, repeated request ("make this a wet run, really create
+    mcf orders, and run it twice a day") to turn the dry-run report
+    (RunEtsyMcfFulfillment, kept as-is/unchanged) into the real thing.
+    Deliberately a separate function/endpoint from the dry-run report rather
+    than a mode flag on it - real order placement stays its own clearly-
+    labeled path, same as CreateMcfOrderForReceipt's single-receipt version.
+    One order's failure doesn't block the rest; each outcome is reported."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
+        return json_response({"error": "Unauthorized"}, 401)
+
+    try:
+        pb_token = pb_authenticate()
+        connection = pb_get_connection(pb_token)
+        if not connection or connection.get("status") != "connected":
+            return json_response({"error": "Etsy is not connected"}, 400)
+
+        shop_id = connection["shop_id"]
+        access_token, new_refresh_token = refresh_access_token(connection["refresh_token"])
+        if new_refresh_token != connection.get("refresh_token"):
+            pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
+
+        now = datetime.now(timezone.utc)
+        min_created = int((now - timedelta(days=PENDING_WINDOW_DAYS)).timestamp())
+        max_created = int(now.timestamp())
+        fetch_errors = []
+        receipts = fetch_receipts(shop_id, access_token, min_created, max_created, fetch_errors)
+        receipts_by_id = {str(r.get("receipt_id")): r for r in receipts}
+
+        sku_map = load_sku_asin_map(pb_token)
+        mcf_status_map = load_mcf_status_map(pb_token)
+        plan = build_fulfillment_plan(receipts, sku_map, mcf_status_map)
+
+        created = []
+        failed = []
+        for order in plan:
+            if not order["fulfillable"]:
+                continue
+            receipt = receipts_by_id.get(str(order["receiptId"]))
+            if not receipt:
+                failed.append({"receiptId": order["receiptId"], "error": "receipt vanished between plan and creation"})
+                continue
+            try:
+                payload = create_mcf_order(receipt, sku_map)
+                set_order_mcf_status(pb_token, order["receiptId"], "in_progress")
+                created.append({"receiptId": order["receiptId"], "buyer": order["buyer"], "amazonOrderId": payload.get("fulfillmentOrderId", "")})
+            except Exception as exc:
+                failed.append({"receiptId": order["receiptId"], "buyer": order["buyer"], "error": str(exc)})
+
+        not_fulfillable = sum(1 for o in plan if not o["fulfillable"])
+
+        lines = [
+            f"Etsy -> Amazon MCF fulfillment (WET RUN) - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            f"{len(plan)} pending order(s): {len(created)} MCF order(s) created, {len(failed)} failed, {not_fulfillable} not fulfillable (unmapped SKU).",
+            "",
+        ]
+        for c in created:
+            lines.append(f"  CREATED: Order {c['receiptId']} — {c['buyer']}")
+        for f in failed:
+            lines.append(f"  FAILED: Order {f['receiptId']} — {f.get('buyer', '')} — {f['error']}")
+        report_text = "\n".join(lines)
+
+        from NotificationRouting import notify
+        notify(
+            "etsy-daily-mcf-fulfillment-wet", "amzbot", report_text,
+            is_error=bool(failed or fetch_errors),
+            subject=f"Etsy MCF fulfillment (WET RUN) - {len(created)} created, {len(failed)} failed",
+        )
+
+        return json_response({
+            "wetRun": True,
+            "pendingOrders": len(plan),
+            "created": created,
+            "failed": failed,
+            "notFulfillableOrders": not_fulfillable,
+            "fetchErrors": fetch_errors,
+        })
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
 def find_receipt(shop_id, access_token, receipt_id):
     """Fetches one specific receipt fresh from Etsy by scanning a wide
     window - Etsy's receipts endpoint has no get-by-id-alone route that

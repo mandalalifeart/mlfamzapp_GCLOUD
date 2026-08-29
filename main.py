@@ -188,6 +188,11 @@ def RunEtsyMcfFulfillment(request):
     return _impl(request)
 
 
+def RunEtsyMcfFulfillmentWet(request):
+    from EtsyMcfFulfillment import RunEtsyMcfFulfillmentWet as _impl
+    return _impl(request)
+
+
 def CheckMcfAccess(request):
     from EtsyMcfFulfillment import CheckMcfAccess as _impl
     return _impl(request)
@@ -269,4 +274,14 @@ def wootry1(request):
 
 def RunBidOptimizerDryRun(request):
     from AdsBidOptimizer import RunBidOptimizerDryRun as _impl
+    return _impl(request)
+
+
+def UpdateAdsAdvertisedProductStats(request):
+    from AdsAdvertisedProductReporting import UpdateAdsAdvertisedProductStats as _impl
+    return _impl(request)
+
+
+def GetAdsAdvertisedProductStats(request):
+    from AdsAdvertisedProductReporting import GetAdsAdvertisedProductStats as _impl
     return _impl(request)
