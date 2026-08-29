@@ -15,6 +15,8 @@ POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_ADS_KEYWORD_COLLECTION = os.environ.get("POCKETBASE_ADS_KEYWORD_COLLECTION", "ads_keyword_stats")
+POCKETBASE_ADS_CAMPAIGNS_COLLECTION = os.environ.get("POCKETBASE_ADS_CAMPAIGNS_COLLECTION", "ads_campaigns")
+POCKETBASE_ADS_PORTFOLIOS_COLLECTION = os.environ.get("POCKETBASE_ADS_PORTFOLIOS_COLLECTION", "ads_portfolios")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 LA_TZ = ZoneInfo("America/Los_Angeles")
@@ -124,6 +126,48 @@ def fetch_keyword_aggregates(token, start_date, end_date, country_code=None):
     return list(targets.values())
 
 
+def fetch_campaign_to_portfolio_name(token):
+    """campaign_id -> portfolio name (e.g. "Pareo"/"POUF"), joined from the
+    ads_campaigns snapshot's portfolio_id through ads_portfolios' id->name -
+    added 2026-08-29 for the bid optimizer's portfolio filter."""
+    portfolio_names = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "portfolio_id,name"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            portfolio_names[item.get("portfolio_id")] = item.get("name", "")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+
+    campaign_to_portfolio = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "campaign_id,portfolio_id"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            portfolio_id = item.get("portfolio_id")
+            if portfolio_id:
+                campaign_to_portfolio[item.get("campaign_id")] = portfolio_names.get(portfolio_id, "")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return campaign_to_portfolio
+
+
 def propose_bid_change(row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid, max_bid):
     """Returns a proposal dict if this target's bid should change, else None."""
     current_bid = row.get("bid")
@@ -210,6 +254,7 @@ def RunBidOptimizerDryRun(request):
     min_bid = get_float("min_bid", DEFAULT_MIN_BID)
     max_bid = get_float("max_bid", DEFAULT_MAX_BID)
     country_code = args.get("country_code") if hasattr(args, "get") else None
+    portfolio = args.get("portfolio") if hasattr(args, "get") else None
 
     now_la = datetime.now(LA_TZ)
     end_date = (now_la - timedelta(days=attribution_lag_days)).strftime("%Y-%m-%d")
@@ -218,6 +263,11 @@ def RunBidOptimizerDryRun(request):
     try:
         token = pb_authenticate()
         rows = fetch_keyword_aggregates(token, start_date, end_date, country_code)
+        campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        for row in rows:
+            row["portfolioName"] = campaign_to_portfolio.get(row.get("campaignId"), "")
+        if portfolio:
+            rows = [r for r in rows if r["portfolioName"] == portfolio]
 
         proposals = []
         for row in rows:
@@ -243,7 +293,9 @@ def RunBidOptimizerDryRun(request):
                 "maxChangePct": max_change_pct,
                 "minBid": min_bid,
                 "maxBid": max_bid,
+                "portfolio": portfolio or "",
             },
+            "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
             "targetsEvaluated": len(rows),
             "proposalsCount": len(proposals),
             "proposals": proposals,

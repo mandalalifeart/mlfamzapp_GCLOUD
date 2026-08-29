@@ -268,6 +268,7 @@ def fetch_sp_campaigns(base_url, access_token, client_id, ads_profile_id):
             "targeting_type": c.get("targetingType", ""),
             "budget": budget.get("budget", 0),
             "budget_type": budget.get("budgetType", ""),
+            "portfolio_id": str(c.get("portfolioId") or ""),
         })
     return campaigns
 
@@ -298,6 +299,7 @@ def fetch_sb_campaigns(base_url, access_token, client_id, ads_profile_id):
             "targeting_type": "",
             "budget": c.get("budget", 0),
             "budget_type": c.get("budgetType", ""),
+            "portfolio_id": str(c.get("portfolioId") or ""),
         })
     return campaigns
 
@@ -328,11 +330,61 @@ def fetch_sd_campaigns(base_url, access_token, client_id, ads_profile_id):
             "targeting_type": "",
             "budget": c.get("budget", 0),
             "budget_type": c.get("budgetType", ""),
+            "portfolio_id": str(c.get("portfolioId") or ""),
         })
     return campaigns
 
 
 CAMPAIGN_LIST_FETCHERS = {"SP": fetch_sp_campaigns, "SB": fetch_sb_campaigns, "SD": fetch_sd_campaigns}
+
+POCKETBASE_ADS_PORTFOLIOS_COLLECTION = os.environ.get("POCKETBASE_ADS_PORTFOLIOS_COLLECTION", "ads_portfolios")
+
+
+def fetch_portfolios(base_url, access_token, client_id, ads_profile_id):
+    """Confirmed live: POST /portfolios/list with the v3 portfolio content
+    type (GET /portfolios and /portfolios/extended both 404 - portfolios is
+    a POST-list-style endpoint like the SP/SB campaign lists, not a plain
+    GET)."""
+    response = requests.post(
+        f"{base_url}/portfolios/list",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/vnd.portfolio.v3+json",
+            "Accept": "application/vnd.portfolio.v3+json",
+        },
+        json={},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return [
+        {
+            "portfolio_id": str(p.get("portfolioId")),
+            "name": p.get("name", ""),
+            "state": (p.get("state") or "").upper(),
+        }
+        for p in response.json().get("portfolios", [])
+    ]
+
+
+def pb_list_portfolio_ids(token, profile_id):
+    ids = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"filter": f'profile_id = "{profile_id}"', "fields": "id", "perPage": 200, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        ids.extend(item["id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return ids
 
 
 def pull_and_store_campaign_lists(pb_token, connections, errors):
@@ -400,6 +452,31 @@ def pull_and_store_campaign_lists(pb_token, connections, errors):
                 total_written += len(profile_campaigns)
             except Exception as exc:
                 errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): campaign list write failed: {exc}")
+
+            # Portfolios (id -> name, e.g. "Pareo"/"POUF") - same
+            # snapshot-refresh pattern as the campaign list, added 2026-08-29
+            # per the user's request for a portfolio filter on the bid
+            # optimizer page.
+            try:
+                portfolios = fetch_portfolios(base_url, access_token, client_id, ads_profile_id)
+                portfolio_rows = [
+                    {**p, "profile_id": str(ads_profile_id), "country_code": ads_profile.get("countryCode", "")}
+                    for p in portfolios
+                ]
+                existing_portfolio_ids = pb_list_portfolio_ids(pb_token, str(ads_profile_id))
+                ops = [
+                    {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records/{rid}"}
+                    for rid in existing_portfolio_ids
+                ]
+                ops.extend(
+                    {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records", "body": p}
+                    for p in portfolio_rows
+                )
+                for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                    pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+            except Exception as exc:
+                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): portfolio list failed: {exc}")
+            time.sleep(1)
 
     return total_written
 
