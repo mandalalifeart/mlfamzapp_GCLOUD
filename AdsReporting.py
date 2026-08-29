@@ -365,6 +365,13 @@ def fetch_portfolios(base_url, access_token, client_id, ads_profile_id):
             "state": (p.get("state") or "").upper(),
         }
         for p in response.json().get("portfolios", [])
+        # A portfolio named "IGNORE*" is a deliberate placeholder, not a real
+        # product-line grouping - same convention as the "IGNORE" SKU group
+        # in asin_group_mapping (see GetSalesDepartmentReport.load_mapping).
+        # Dropped here at the source so every reader (GetAdsPortfolios,
+        # GetAdsCampaignStats, RunBidOptimizerDryRun, fetch_campaign_to_portfolio_name)
+        # never sees it, rather than re-checking the prefix in each of them.
+        if not (p.get("name") or "").upper().startswith("IGNORE")
     ]
 
 
