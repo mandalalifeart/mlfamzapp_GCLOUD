@@ -265,3 +265,8 @@ def wootry1(request):
         return ("Orders module not available", 500)
     result = orders_mlf(1)
     return result, 200
+
+
+def RunBidOptimizerDryRun(request):
+    from AdsBidOptimizer import RunBidOptimizerDryRun as _impl
+    return _impl(request)
