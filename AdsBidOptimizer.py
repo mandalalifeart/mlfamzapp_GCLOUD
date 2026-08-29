@@ -78,17 +78,20 @@ def pb_authenticate():
     return response.json()["token"]
 
 
-def fetch_keyword_aggregates(token, start_date, end_date, country_code=None):
-    """Same aggregation shape as GetAdsKeywordStats (sum impressions/clicks/
-    spend/sales/orders per target_id, keep the most recent bid) - kept as its
-    own copy here rather than importing across files, since the two call
-    sites' filtering needs (date range vs live "current" bid) are subtly
-    different and likely to diverge further as bid-write logic gets added."""
+def fetch_keyword_raw_rows(token, start_date, end_date, country_code=None):
+    """Fetches un-aggregated per-day rows (kept as their own copy rather
+    than importing across files - see aggregate_keyword_rows below).
+    Split out from the aggregation step 2026-08-29: the multi-period
+    algorithm needs the same underlying rows sliced into 3 different
+    sub-windows (7d/30d/60d) - fetching once over the widest window and
+    aggregating in-memory 3 ways avoids 3 separate paginated network round
+    trips, which is what caused RunBidOptimizerDryRun to start timing out
+    (HTTP 504) the moment multi-period evaluation shipped."""
     filter_str = f'(date >= "{start_date}" && date <= "{end_date}")'
     if country_code:
         filter_str += f' && country_code = "{country_code}"'
 
-    targets = {}
+    rows = []
     page = 1
     while True:
         response = requests.get(
@@ -102,42 +105,55 @@ def fetch_keyword_aggregates(token, start_date, end_date, country_code=None):
                           "target_text,target_type,match_type,ad_product,country_code,"
                           "impressions,clicks,spend,sales,orders,bid,date",
             },
-            timeout=60,
+            timeout=90,
         )
         response.raise_for_status()
         data = response.json()
-        for item in data.get("items", []):
-            key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("target_id"))
-            bucket = targets.setdefault(key, {
-                "profileId": item.get("profile_id"),
-                "campaignId": item.get("campaign_id"),
-                "campaignName": item.get("campaign_name", ""),
-                "adGroupId": item.get("ad_group_id", ""),
-                "targetId": item.get("target_id"),
-                "targetText": item.get("target_text", ""),
-                "targetType": item.get("target_type", ""),
-                "matchType": item.get("match_type", ""),
-                "adProduct": item.get("ad_product", ""),
-                "countryCode": item.get("country_code", ""),
-                "impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0,
-                "bid": None, "_bidDate": "", "_nameDate": "",
-            })
-            bucket["impressions"] += item.get("impressions", 0)
-            bucket["clicks"] += item.get("clicks", 0)
-            bucket["spend"] += item.get("spend", 0) or 0
-            bucket["sales"] += item.get("sales", 0) or 0
-            bucket["orders"] += item.get("orders", 0)
-            if item.get("bid") is not None and item.get("date", "") >= bucket["_bidDate"]:
-                bucket["bid"] = item.get("bid")
-                bucket["_bidDate"] = item.get("date", "")
-            # campaignName can change mid-window if the campaign gets
-            # renamed - show the name from the most recent day in range.
-            if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
-                bucket["campaignName"] = item.get("campaign_name")
-                bucket["_nameDate"] = item.get("date", "")
+        rows.extend(data.get("items", []))
         if page >= data.get("totalPages", 1):
             break
         page += 1
+    return rows
+
+
+def aggregate_keyword_rows(raw_rows, start_date, end_date):
+    """Same aggregation shape as GetAdsKeywordStats (sum impressions/clicks/
+    spend/sales/orders per target_id, keep the most recent bid) - pure
+    in-memory, filters raw_rows (already fetched) down to [start_date,
+    end_date] first so the same fetch can back several different windows."""
+    targets = {}
+    for item in raw_rows:
+        item_date = item.get("date", "")
+        if item_date < start_date or item_date > end_date:
+            continue
+        key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("target_id"))
+        bucket = targets.setdefault(key, {
+            "profileId": item.get("profile_id"),
+            "campaignId": item.get("campaign_id"),
+            "campaignName": item.get("campaign_name", ""),
+            "adGroupId": item.get("ad_group_id", ""),
+            "targetId": item.get("target_id"),
+            "targetText": item.get("target_text", ""),
+            "targetType": item.get("target_type", ""),
+            "matchType": item.get("match_type", ""),
+            "adProduct": item.get("ad_product", ""),
+            "countryCode": item.get("country_code", ""),
+            "impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0,
+            "bid": None, "_bidDate": "", "_nameDate": "",
+        })
+        bucket["impressions"] += item.get("impressions", 0)
+        bucket["clicks"] += item.get("clicks", 0)
+        bucket["spend"] += item.get("spend", 0) or 0
+        bucket["sales"] += item.get("sales", 0) or 0
+        bucket["orders"] += item.get("orders", 0)
+        if item.get("bid") is not None and item_date >= bucket["_bidDate"]:
+            bucket["bid"] = item.get("bid")
+            bucket["_bidDate"] = item_date
+        # campaignName can change mid-window if the campaign gets renamed -
+        # show the name from the most recent day in range.
+        if item.get("campaign_name") and item_date >= bucket["_nameDate"]:
+            bucket["campaignName"] = item.get("campaign_name")
+            bucket["_nameDate"] = item_date
 
     for bucket in targets.values():
         bucket.pop("_bidDate", None)
@@ -414,9 +430,13 @@ def RunBidOptimizerDryRun(request):
             recent_start = (now_la - timedelta(days=attribution_lag_days + recent_days)).strftime("%Y-%m-%d")
             baseline_start = (now_la - timedelta(days=attribution_lag_days + baseline_days)).strftime("%Y-%m-%d")
 
-            rows30 = with_portfolio(fetch_keyword_aggregates(token, start_date, end_date, country_code))
-            rows7 = {r["targetId"]: r for r in fetch_keyword_aggregates(token, recent_start, end_date, country_code)}
-            rows60 = {r["targetId"]: r for r in fetch_keyword_aggregates(token, baseline_start, end_date, country_code)}
+            # One fetch over the widest (baseline) window, then aggregate it
+            # 3 different ways in-memory - not 3 separate network round
+            # trips (see fetch_keyword_raw_rows for why this matters).
+            raw_rows = fetch_keyword_raw_rows(token, baseline_start, end_date, country_code)
+            rows30 = with_portfolio(aggregate_keyword_rows(raw_rows, start_date, end_date))
+            rows7 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, recent_start, end_date)}
+            rows60 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, baseline_start, end_date)}
 
             targets_evaluated = len(rows60) if rows60 else len(rows30)
             for row30 in rows30:
@@ -436,7 +456,8 @@ def RunBidOptimizerDryRun(request):
                     continue
                 proposals.append(proposal)
         else:
-            rows30 = with_portfolio(fetch_keyword_aggregates(token, start_date, end_date, country_code))
+            raw_rows = fetch_keyword_raw_rows(token, start_date, end_date, country_code)
+            rows30 = with_portfolio(aggregate_keyword_rows(raw_rows, start_date, end_date))
             targets_evaluated = len(rows30)
             for row in rows30:
                 proposal = propose_bid_change(
