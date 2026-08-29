@@ -367,7 +367,7 @@ def GetAdsKeywordStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
-                    "bid": None, "_bidDate": "",
+                    "bid": None, "_bidDate": "", "_nameDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
@@ -379,6 +379,13 @@ def GetAdsKeywordStats(request):
                 if item.get("bid") is not None and item.get("date", "") >= bucket["_bidDate"]:
                     bucket["bid"] = item.get("bid")
                     bucket["_bidDate"] = item.get("date", "")
+                # campaignName can change mid-window if the campaign gets
+                # renamed - show the name from the most recent day in range,
+                # not whichever row happened to arrive first (campaign_id,
+                # not name, is always the real grouping key here).
+                if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
+                    bucket["campaignName"] = item.get("campaign_name")
+                    bucket["_nameDate"] = item.get("date", "")
             if page >= data.get("totalPages", 1):
                 break
             page += 1
@@ -387,6 +394,7 @@ def GetAdsKeywordStats(request):
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_bidDate", None)
+            row.pop("_nameDate", None)
 
         return json_response({"startDate": start_date, "endDate": end_date, "keywords": rows})
     except Exception as exc:

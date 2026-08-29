@@ -324,7 +324,7 @@ def GetAdsAdvertisedProductStats(request):
                     "perPage": 500,
                     "page": page,
                     "fields": "profile_id,campaign_id,campaign_name,ad_group_id,ad_group_name,asin,sku,"
-                              "ad_product,country_code,currency_code,impressions,clicks,spend,sales,orders",
+                              "ad_product,country_code,currency_code,impressions,clicks,spend,sales,orders,date",
                 },
                 timeout=60,
             )
@@ -343,12 +343,18 @@ def GetAdsAdvertisedProductStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
+                    "_nameDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
                 bucket["spend"] += item.get("spend", 0)
                 bucket["sales"] += item.get("sales", 0)
                 bucket["orders"] += item.get("orders", 0)
+                # campaignName can change mid-window if the campaign gets
+                # renamed - show the name from the most recent day in range.
+                if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
+                    bucket["campaignName"] = item.get("campaign_name")
+                    bucket["_nameDate"] = item.get("date", "")
             if page >= data.get("totalPages", 1):
                 break
             page += 1
@@ -356,6 +362,7 @@ def GetAdsAdvertisedProductStats(request):
         rows = sorted(products.values(), key=lambda p: -p["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
+            row.pop("_nameDate", None)
 
         return json_response({"startDate": start_date, "endDate": end_date, "products": rows})
     except Exception as exc:

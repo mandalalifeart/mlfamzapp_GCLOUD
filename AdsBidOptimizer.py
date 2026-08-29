@@ -99,7 +99,7 @@ def fetch_keyword_aggregates(token, start_date, end_date, country_code=None):
                 "adProduct": item.get("ad_product", ""),
                 "countryCode": item.get("country_code", ""),
                 "impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0,
-                "bid": None, "_bidDate": "",
+                "bid": None, "_bidDate": "", "_nameDate": "",
             })
             bucket["impressions"] += item.get("impressions", 0)
             bucket["clicks"] += item.get("clicks", 0)
@@ -109,12 +109,18 @@ def fetch_keyword_aggregates(token, start_date, end_date, country_code=None):
             if item.get("bid") is not None and item.get("date", "") >= bucket["_bidDate"]:
                 bucket["bid"] = item.get("bid")
                 bucket["_bidDate"] = item.get("date", "")
+            # campaignName can change mid-window if the campaign gets
+            # renamed - show the name from the most recent day in range.
+            if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
+                bucket["campaignName"] = item.get("campaign_name")
+                bucket["_nameDate"] = item.get("date", "")
         if page >= data.get("totalPages", 1):
             break
         page += 1
 
     for bucket in targets.values():
         bucket.pop("_bidDate", None)
+        bucket.pop("_nameDate", None)
     return list(targets.values())
 
 

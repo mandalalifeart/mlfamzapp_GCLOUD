@@ -317,7 +317,7 @@ def GetAdsSearchTermStats(request):
                     "page": page,
                     "fields": "profile_id,campaign_id,campaign_name,ad_group_id,ad_group_name,target_text,"
                               "match_type,search_term,ad_product,country_code,currency_code,impressions,"
-                              "clicks,spend,sales,orders",
+                              "clicks,spend,sales,orders,date",
                 },
                 timeout=60,
             )
@@ -337,12 +337,19 @@ def GetAdsSearchTermStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
+                    "_nameDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
                 bucket["spend"] += item.get("spend", 0)
                 bucket["sales"] += item.get("sales", 0)
                 bucket["orders"] += item.get("orders", 0)
+                # campaignName can change mid-window if the campaign gets
+                # renamed - show the name from the most recent day in range,
+                # not whichever row happened to arrive first.
+                if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
+                    bucket["campaignName"] = item.get("campaign_name")
+                    bucket["_nameDate"] = item.get("date", "")
             if page >= data.get("totalPages", 1):
                 break
             page += 1
@@ -350,6 +357,7 @@ def GetAdsSearchTermStats(request):
         rows = sorted(terms.values(), key=lambda t: -t["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
+            row.pop("_nameDate", None)
 
         return json_response({"startDate": start_date, "endDate": end_date, "searchTerms": rows})
     except Exception as exc:
