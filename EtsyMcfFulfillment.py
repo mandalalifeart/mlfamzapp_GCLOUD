@@ -328,10 +328,20 @@ def RunEtsyMcfFulfillmentWet(request):
                 continue
             try:
                 payload = create_mcf_order(receipt, sku_map)
-                set_order_mcf_status(pb_token, order["receiptId"], "in_progress")
-                created.append({"receiptId": order["receiptId"], "buyer": order["buyer"], "amazonOrderId": payload.get("fulfillmentOrderId", "")})
             except Exception as exc:
                 failed.append({"receiptId": order["receiptId"], "buyer": order["buyer"], "error": str(exc)})
+                continue
+            # The real Amazon order is placed at this point - any failure past
+            # here must NOT land in `failed` (build_fulfillment_plan only
+            # skips a receipt on the next run if mcf_status is already
+            # "in_progress", so reporting this as failed would leave it
+            # eligible to be re-submitted and double-fulfilled for real).
+            entry = {"receiptId": order["receiptId"], "buyer": order["buyer"], "amazonOrderId": payload.get("fulfillmentOrderId", "")}
+            try:
+                set_order_mcf_status(pb_token, order["receiptId"], "in_progress")
+            except Exception as exc:
+                entry["statusUpdateFailed"] = str(exc)
+            created.append(entry)
 
         not_fulfillable = sum(1 for o in plan if not o["fulfillable"])
 
@@ -487,7 +497,14 @@ def CreateMcfOrderForReceipt(request):
 
         sku_map = load_sku_asin_map(pb_token)
         payload = create_mcf_order(receipt, sku_map)
-        set_order_mcf_status(pb_token, receipt_id, "in_progress")
+        # The real Amazon order is placed at this point - a failure updating
+        # our own mcf_status must not be reported as "created: False", or a
+        # real order could look like it never happened and get re-submitted.
+        try:
+            set_order_mcf_status(pb_token, receipt_id, "in_progress")
+        except Exception as status_exc:
+            return json_response({"created": True, "receiptId": receipt_id, "amazonResponse": payload,
+                                   "statusUpdateFailed": str(status_exc)})
         return json_response({"created": True, "receiptId": receipt_id, "amazonResponse": payload})
     except Exception as exc:
         return json_response({"created": False, "error": str(exc), "type": exc.__class__.__name__}, 500)
