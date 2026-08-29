@@ -232,6 +232,36 @@ def fetch_recently_changed_target_ids(token, since_date):
     return ids
 
 
+def fetch_last_change_per_target(token):
+    """Most recent applied bid change per target_id, regardless of how long
+    ago - a single bulk query (paginated, sorted oldest-first so later pages
+    overwrite earlier ones and each key ends up holding its true most-recent
+    row), not one per proposal. Added 2026-08-29 for the "consider bid
+    change history" feature: unlike fetch_recently_changed_target_ids (which
+    only looks inside the current lookback window and fully excludes a
+    match), this looks at ALL history so a change from outside the window
+    that already tried the same direction and didn't fix the ACOS can still
+    inform (dampen) a new proposal rather than being invisible to it."""
+    last_change = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_BID_LOG_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"filter": 'status = "applied"', "sort": "changed_at",
+                    "fields": "target_id,old_bid,new_bid,changed_at", "perPage": 500, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            last_change[item["target_id"]] = item
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return last_change
+
+
 def compute_change_pct(row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct):
     """Pure decision math for one period's aggregated row - shared by the
     single- and multi-period paths. Returns (change_pct, kind, actual_acos)
@@ -296,7 +326,7 @@ def propose_bid_change(row, target_acos, min_spend, zero_sales_spend, tolerance_
 
 
 def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, zero_sales_spend,
-                                     tolerance_pct, max_change_pct, min_bid, max_bid):
+                                     tolerance_pct, max_change_pct, min_bid, max_bid, last_change=None):
     """3-window version, added 2026-08-29 at the user's request ("suggest a
     more complex bid recommendation mechanism... 3-4 periods, not only
     one"). row30/row7/row60 are the same target's aggregates over three
@@ -314,7 +344,20 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
         calculated change applies. If it disagrees (already trending the
         other way), the change is damped to TREND_DAMPEN_PCT of its
         calculated size - don't overcorrect on top of a shift that may have
-        already resolved itself."""
+        already resolved itself.
+    `last_change` (optional) is this target's most recent applied bid
+    change, from anywhere in its history - added 2026-08-29 at the user's
+    request to factor a keyword's own change history into new proposals
+    (option "b": if a same-direction change already happened and ACOS still
+    hasn't recovered, that's evidence the problem may not be bid-driven at
+    all, so the new move is dampened with a note rather than just repeating
+    the same lever at full size). Only a change already inside the current
+    decision window matters here as "already tried and failing" in a
+    meaningful sense - a change from within the window is instead fully
+    excluded from getting any new proposal at all by the caller's separate
+    recently-changed skip, so by the time a `last_change` reaches this
+    function it can be trusted to be old enough for the ACOS data here to
+    reflect its outcome."""
     current_bid = row30.get("bid") or row60.get("bid")
     if current_bid is None:
         return None
@@ -348,6 +391,20 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
             baseline_acos = row60["spend"] / row60["sales"] * 100
             if abs(actual_acos - baseline_acos) >= TRENDING_GAP_PCT:
                 notes.append(f"vs 60d baseline {baseline_acos:.1f}% - recent shift")
+
+        # Bid change history - a same-direction change already tried before
+        # (and old enough that this window's ACOS reflects its outcome)
+        # that still hasn't fixed the ACOS is evidence bid alone isn't the
+        # lever that will fix this, so dampen rather than repeat it blindly.
+        if last_change:
+            prev_direction = "raised" if last_change["new_bid"] > last_change["old_bid"] else "lowered"
+            new_direction = "raised" if change_pct > 0 else "lowered"
+            if prev_direction == new_direction:
+                change_pct = change_pct * TREND_DAMPEN_PCT / 100
+                notes.append(
+                    f"already {prev_direction} on {last_change['changed_at']} "
+                    f"(${last_change['old_bid']:.2f}→${last_change['new_bid']:.2f}) - ACOS still off, dampened"
+                )
 
     new_bid = round(current_bid * (1 + change_pct / 100), 2)
     new_bid = max(min_bid, min(max_bid, new_bid))
@@ -432,6 +489,11 @@ def RunBidOptimizerDryRun(request):
         # the current lookback window - not enough fresh data has
         # accumulated yet to fairly judge the change that was just made.
         recently_changed_ids = fetch_recently_changed_target_ids(token, start_date)
+        # Full change history (any age) - lets a same-direction change from
+        # before this window, that still hasn't fixed the ACOS, dampen a
+        # new proposal instead of being invisible to it (see
+        # propose_bid_change_multi_period's `last_change` docstring).
+        last_change_by_target = fetch_last_change_per_target(token)
 
         proposals = []
         skipped_recently_changed = 0
@@ -457,7 +519,8 @@ def RunBidOptimizerDryRun(request):
                 row7 = rows7.get(target_id, {**row30, "clicks": 0, "spend": 0.0, "sales": 0.0})
                 proposal = propose_bid_change_multi_period(
                     row30, row7, row60, target_acos, min_spend, zero_sales_spend,
-                    tolerance_pct, max_change_pct, min_bid, max_bid
+                    tolerance_pct, max_change_pct, min_bid, max_bid,
+                    last_change=last_change_by_target.get(target_id)
                 )
                 if not proposal:
                     continue
