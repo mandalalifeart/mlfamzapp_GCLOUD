@@ -282,6 +282,11 @@ def RunBidOptimizerDryRun(request):
     return _impl(request)
 
 
+def ApplyBidChange(request):
+    from AdsBidWriter import ApplyBidChange as _impl
+    return _impl(request)
+
+
 def UpdateAdsAdvertisedProductStats(request):
     from AdsAdvertisedProductReporting import UpdateAdsAdvertisedProductStats as _impl
     return _impl(request)

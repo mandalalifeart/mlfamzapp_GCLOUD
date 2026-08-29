@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from AdsBidWriter import POCKETBASE_BID_LOG_COLLECTION
+
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
@@ -168,6 +170,29 @@ def fetch_campaign_to_portfolio_name(token):
     return campaign_to_portfolio
 
 
+def fetch_recently_changed_target_ids(token, since_date):
+    """target_ids with an applied bid change on/after since_date - a single
+    bulk query, not one per proposal, so the recently-changed check stays
+    cheap regardless of how many proposals come out of a run."""
+    ids = set()
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_BID_LOG_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"filter": f'status = "applied" && changed_at >= "{since_date}"',
+                    "fields": "target_id", "perPage": 500, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        ids.update(item["target_id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return ids
+
+
 def propose_bid_change(row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid, max_bid):
     """Returns a proposal dict if this target's bid should change, else None."""
     current_bid = row.get("bid")
@@ -269,13 +294,23 @@ def RunBidOptimizerDryRun(request):
         if portfolio:
             rows = [r for r in rows if r["portfolioName"] == portfolio]
 
+        # Don't re-recommend a target whose bid was already changed inside
+        # the current lookback window - not enough fresh data has
+        # accumulated yet to fairly judge the change that was just made.
+        recently_changed_ids = fetch_recently_changed_target_ids(token, start_date)
+
         proposals = []
+        skipped_recently_changed = 0
         for row in rows:
             proposal = propose_bid_change(
                 row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid, max_bid
             )
-            if proposal:
-                proposals.append(proposal)
+            if not proposal:
+                continue
+            if row["targetId"] in recently_changed_ids:
+                skipped_recently_changed += 1
+                continue
+            proposals.append(proposal)
 
         proposals.sort(key=lambda p: -p["spend"])
 
@@ -298,6 +333,7 @@ def RunBidOptimizerDryRun(request):
             "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
             "targetsEvaluated": len(rows),
             "proposalsCount": len(proposals),
+            "skippedRecentlyChanged": skipped_recently_changed,
             "proposals": proposals,
         })
     except Exception as exc:

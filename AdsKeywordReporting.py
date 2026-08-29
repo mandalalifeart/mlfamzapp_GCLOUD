@@ -355,6 +355,7 @@ def GetAdsKeywordStats(request):
             for item in data.get("items", []):
                 key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("target_id"))
                 bucket = keywords.setdefault(key, {
+                    "profileId": item.get("profile_id"),
                     "campaignId": item.get("campaign_id"),
                     "campaignName": item.get("campaign_name", ""),
                     "adGroupId": item.get("ad_group_id", ""),
