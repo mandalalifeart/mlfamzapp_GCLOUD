@@ -35,6 +35,74 @@ POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 PROFILE_ID = "1649312585287580"  # USA seller ads profile, confirmed elsewhere in this project
 COUNTRY_CODE = "US"
 
+# EU-country resolution (added 2026-08-29, same day, for the user's EU report
+# batch) - these exports are account-wide too (same lesson as
+# EXCLUDED_CAMPAIGN_IDS below), spanning multiple EU countries in one file
+# with no per-row country column. Real per-country ads profile ids, from the
+# live ads_connections/ads_campaigns snapshot (only the 5 with a known
+# profile - PL/SE/NL have no separate connected profile in this account, so
+# their rows get an empty profile_id, harmless for a manual import).
+COUNTRY_PROFILE_MAP = {
+    "IT": "354019660638122",
+    "ES": "2634563825055008",
+    "UK": "2174225945475804",
+    "DE": "3114642024836000",
+    "FR": "1236377695130488",
+    # No separately-connected ads profile known for these 3 in this account -
+    # profile_id is a required field on every stats collection, so a
+    # placeholder is used rather than leaving it blank (which would fail
+    # every insert - see the session note on this exact failure).
+    "PL": "unknown-PL",
+    "SE": "unknown-SE",
+    "NL": "unknown-NL",
+}
+CURRENCY_TO_COUNTRY = {"GBP": "UK", "PLN": "PL", "SEK": "SE"}
+COUNTRY_NAME_TO_CODE = {
+    "Italy": "IT", "Spain": "ES", "United Kingdom": "UK", "Germany": "DE",
+    "France": "FR", "Poland": "PL", "Sweden": "SE", "Netherlands": "NL",
+}
+NAME_PREFIX_TO_COUNTRY = {"IT": "IT", "PL": "PL", "ES": "ES", "DE": "DE", "NL": "NL", "FR": "FR", "SE": "SE", "UK": "UK"}
+
+
+def load_country_mapping(path):
+    """Parses a Seller-Central-exported "Campaign per country" report (real
+    Country column, no campaign ID - only Campaign name + Portfolio name) -
+    used to resolve the EU account-wide exports' ambiguous same-EUR-currency
+    campaigns (e.g. "PAREO SP BROAD" exists as two separate campaigns, one in
+    Germany and one in France) that a currency/name-prefix guess alone can't
+    disambiguate. Confirmed 100% coverage across all 6 EU Campaign-report
+    months before this was trusted for a real import - see the session
+    verification, not just assumed to be complete."""
+    by_name_portfolio, by_name = {}, {}
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+        for row in csv.DictReader(fh):
+            country = COUNTRY_NAME_TO_CODE.get(row.get("Country", ""), "")
+            if not country:
+                continue
+            by_name_portfolio[(row.get("Campaign name", ""), row.get("Portfolio name", ""))] = country
+            by_name.setdefault(row.get("Campaign name", ""), set()).add(country)
+    return by_name_portfolio, by_name
+
+
+def resolve_country(raw_row, by_name_portfolio, by_name):
+    """Returns a country code, or None if this row should be excluded
+    (USD/MXN - already covered by the USA import) or genuinely can't be
+    resolved (should not happen given the verified 100% mapping coverage,
+    but never silently guess if it does)."""
+    currency = (raw_row.get("Budget currency") or "").strip()
+    if currency in ("USD", "MXN"):
+        return None
+    if currency in CURRENCY_TO_COUNTRY:
+        return CURRENCY_TO_COUNTRY[currency]
+    name = raw_row.get("Campaign name", "")
+    portfolio = raw_row.get("Portfolio name", "")
+    if (name, portfolio) in by_name_portfolio:
+        return by_name_portfolio[(name, portfolio)]
+    if name in by_name and len(by_name[name]) == 1:
+        return next(iter(by_name[name]))
+    first_token = name.split()[0].upper() if name.split() else ""
+    return NAME_PREFIX_TO_COUNTRY.get(first_token)
+
 # These two campaign IDs showed up inside every "USA" console export (all 4
 # report types, all months) despite being genuinely non-US campaigns - "MX
 # PAREO" (currency MXN, campaign_id 82317817918693) and "Golden Naggets"
@@ -103,13 +171,13 @@ def pb_batch(token, batch_requests):
             raise RuntimeError(f"PocketBase batch item failed ({entry['method']} {entry['url']}): {result.get('body')}")
 
 
-def pb_delete_month(token, collection, month, year):
+def pb_delete_month(token, collection, month, year, country_code=COUNTRY_CODE):
     deleted = 0
     while True:
         response = requests.get(
             f"{POCKETBASE_URL}/api/collections/{collection}/records",
             headers={"Authorization": token},
-            params={"filter": f'country_code = "{COUNTRY_CODE}" && month = {month} && year = {year}',
+            params={"filter": f'country_code = "{country_code}" && month = {month} && year = {year}',
                     "fields": "id", "perPage": 200},
             timeout=30,
         )
@@ -159,10 +227,10 @@ def build_campaign_ad_product_map(token, campaign_csv_files):
     return mapping
 
 
-def parse_search_term(row, ad_product_map):
+def parse_search_term(row, ad_product_map, country_code, profile_id):
     campaign_id = strip_id(row.get("Campaign ID"))
     return {
-        "profile_id": PROFILE_ID,
+        "profile_id": profile_id,
         "campaign_id": campaign_id,
         "campaign_name": row.get("Campaign name", ""),
         "ad_group_id": strip_id(row.get("Ad group ID")),
@@ -171,7 +239,7 @@ def parse_search_term(row, ad_product_map):
         "target_text": "",
         "match_type": "",
         "search_term": row.get("Search term") or "(no search term - product/audience targeted)",
-        "country_code": COUNTRY_CODE,
+        "country_code": country_code,
         "currency_code": row.get("Budget currency", "USD"),
         "ad_product": ad_product_map.get(campaign_id, ""),
         "impressions": to_int(row.get("Impressions")),
@@ -182,13 +250,13 @@ def parse_search_term(row, ad_product_map):
     }
 
 
-def parse_campaign(row, ad_product_map):
+def parse_campaign(row, ad_product_map, country_code, profile_id):
     return {
-        "profile_id": PROFILE_ID,
+        "profile_id": profile_id,
         "campaign_id": strip_id(row.get("Campaign ID")),
         "campaign_name": row.get("Campaign name", ""),
         "campaign_status": "",
-        "country_code": COUNTRY_CODE,
+        "country_code": country_code,
         "currency_code": row.get("Budget currency", "USD"),
         "ad_product": AD_PRODUCT_MAP.get((row.get("Ad product") or "").strip(), row.get("Ad product") or ""),
         "impressions": to_int(row.get("Impressions")),
@@ -199,10 +267,10 @@ def parse_campaign(row, ad_product_map):
     }
 
 
-def parse_targeting(row, ad_product_map):
+def parse_targeting(row, ad_product_map, country_code, profile_id):
     campaign_id = strip_id(row.get("Campaign ID"))
     return {
-        "profile_id": PROFILE_ID,
+        "profile_id": profile_id,
         "campaign_id": campaign_id,
         "campaign_name": row.get("Campaign name", ""),
         "campaign_status": "",
@@ -212,7 +280,7 @@ def parse_targeting(row, ad_product_map):
         "target_text": row.get("Targeting", ""),
         "target_type": row.get("Target type", ""),
         "match_type": row.get("Targeting match type", ""),
-        "country_code": COUNTRY_CODE,
+        "country_code": country_code,
         "currency_code": row.get("Budget currency", "USD"),
         "ad_product": ad_product_map.get(campaign_id, ""),
         "impressions": to_int(row.get("Impressions")),
@@ -224,17 +292,17 @@ def parse_targeting(row, ad_product_map):
     }
 
 
-def parse_advertised_product(row, ad_product_map):
+def parse_advertised_product(row, ad_product_map, country_code, profile_id):
     campaign_id = strip_id(row.get("Campaign ID"))
     return {
-        "profile_id": PROFILE_ID,
+        "profile_id": profile_id,
         "campaign_id": campaign_id,
         "campaign_name": row.get("Campaign name", ""),
         "ad_group_id": strip_id(row.get("Ad group ID")),
         "ad_group_name": row.get("Ad group name", ""),
         "asin": row.get("Advertised product ID", ""),
         "sku": row.get("Advertised product SKU", ""),
-        "country_code": COUNTRY_CODE,
+        "country_code": country_code,
         "currency_code": row.get("Budget currency", "USD"),
         "ad_product": ad_product_map.get(campaign_id, ""),
         "impressions": to_int(row.get("Impressions")),
@@ -263,6 +331,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--campaign-csv", action="append", default=[],
                      help="Campaign-report CSV(s) to build the campaign_id->ad_product map from (repeatable)")
+    ap.add_argument("--country-map", default=None,
+                     help="Seller-Central 'campaign per country' export - switches to multi-country EU mode: "
+                          "resolves each row's own country (excluding USD/MXN rows, already covered by the USA "
+                          "import) instead of writing everything under the fixed USA profile/country.")
     args = ap.parse_args()
 
     collection = COLLECTIONS[args.type]
@@ -272,8 +344,30 @@ def main():
     ad_product_map = build_campaign_ad_product_map(token, args.campaign_csv)
     parser = PARSERS[args.type]
 
-    with open(args.file, newline="", encoding="utf-8-sig", errors="replace") as fh:
-        rows = [parser(row, ad_product_map) for row in csv.DictReader(fh)]
+    if args.country_map:
+        by_name_portfolio, by_name = load_country_mapping(args.country_map)
+        with open(args.file, newline="", encoding="utf-8-sig", errors="replace") as fh:
+            raw_rows = list(csv.DictReader(fh))
+        rows = []
+        unresolved = []
+        for raw in raw_rows:
+            country_code = resolve_country(raw, by_name_portfolio, by_name)
+            currency = (raw.get("Budget currency") or "").strip()
+            if country_code is None:
+                if currency not in ("USD", "MXN"):
+                    unresolved.append((raw.get("Campaign name", ""), raw.get("Portfolio name", ""), currency))
+                continue  # USD/MXN (already covered by USA import) or genuinely unresolved
+            profile_id = COUNTRY_PROFILE_MAP.get(country_code, "")
+            rows.append(parser(raw, ad_product_map, country_code, profile_id))
+        if unresolved:
+            print(f"  WARNING: {len(unresolved)} row(s) could not be resolved to a country and were SKIPPED "
+                  f"(not excluded intentionally - review these):")
+            for u in unresolved:
+                print("   ", u)
+    else:
+        with open(args.file, newline="", encoding="utf-8-sig", errors="replace") as fh:
+            rows = [parser(row, ad_product_map, COUNTRY_CODE, PROFILE_ID) for row in csv.DictReader(fh)]
+
     rows = [r for r in rows if r.get("campaign_id") not in EXCLUDED_CAMPAIGN_IDS]
 
     for r in rows:
@@ -283,15 +377,17 @@ def main():
 
     total_spend = sum(r["spend"] for r in rows)
     total_sales = sum(r["sales"] for r in rows)
-    print(f"{args.file}: {len(rows)} rows parsed | spend={total_spend:.2f} sales={total_sales:.2f}")
+    countries_present = sorted({r["country_code"] for r in rows})
+    print(f"{args.file}: {len(rows)} rows parsed | spend={total_spend:.2f} sales={total_sales:.2f} | countries: {countries_present}")
 
     if args.dry_run:
         print("(dry run - not writing)")
         return
 
     if args.replace:
-        deleted = pb_delete_month(token, collection, args.month, args.year)
-        print(f"  deleted {deleted} existing rows for {collection} {args.year}-{args.month:02d}")
+        for country_code in countries_present:
+            deleted = pb_delete_month(token, collection, args.month, args.year, country_code)
+            print(f"  deleted {deleted} existing {country_code} rows for {collection} {args.year}-{args.month:02d}")
 
     batch = []
     written = 0

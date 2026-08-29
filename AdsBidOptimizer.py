@@ -29,8 +29,14 @@ DEFAULT_LOOKBACK_DAYS = 30          # how much history to evaluate per keyword
 DEFAULT_ATTRIBUTION_LAG_DAYS = 7    # exclude the most recent N days - Amazon's own
                                      # attribution window means very recent clicks
                                      # may not have converted yet
-DEFAULT_MIN_CLICKS = 15             # below this, there's not enough signal to adjust
-DEFAULT_ZERO_SALES_CLICKS = 20      # this many clicks with $0 sales = cut hard
+DEFAULT_MIN_SPEND = 5.00            # $ spent, below this there's not enough signal to
+                                     # adjust - a money threshold, not a click count, same
+                                     # reasoning as DEFAULT_ZERO_SALES_SPEND above
+DEFAULT_ZERO_SALES_SPEND = 3.00     # $ spent with $0 sales = cut hard - a money threshold,
+                                     # not a click count, since 20 clicks at $0.10 ($2) is a
+                                     # very different risk than 20 clicks at $1 ($20) - the
+                                     # user's own point, corrected 2026-08-29 from the
+                                     # original click-count version of this rule
 DEFAULT_TOLERANCE_PCT = 10          # within this % of target ACOS, leave bid alone
 DEFAULT_MAX_CHANGE_PCT = 20         # cap on how much a single adjustment can move a bid
 DEFAULT_MIN_BID = 0.10
@@ -226,22 +232,26 @@ def fetch_recently_changed_target_ids(token, since_date):
     return ids
 
 
-def compute_change_pct(row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct):
+def compute_change_pct(row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct):
     """Pure decision math for one period's aggregated row - shared by the
     single- and multi-period paths. Returns (change_pct, kind, actual_acos)
     or None if there's not enough signal / no change warranted. `kind` is
     "zero_sales" or "acos", used to build the reason text. `actual_acos` is
-    None for the zero_sales case (there's no meaningful ACOS to report)."""
-    clicks = row["clicks"]
+    None for the zero_sales case (there's no meaningful ACOS to report).
+    Both signal-sufficiency and zero-sales-cut gates are $ spend, not click
+    count - the user's own point (2026-08-29): 20 clicks at $0.10 is $2 of
+    real risk, 20 clicks at $1 is $20 - a click count alone conflates very
+    different amounts of money at stake."""
     sales = row["sales"]
-    if clicks < min_clicks:
+    spend = row["spend"]
+    if spend < min_spend:
         return None
-    if sales == 0 and clicks >= zero_sales_clicks:
+    if sales == 0 and spend >= zero_sales_spend:
         return (-ZERO_SALES_CUT_PCT, "zero_sales", None)
     if sales == 0:
-        return None  # some clicks but below the zero-sales-cut threshold - leave alone
+        return None  # some spend but below the zero-sales-cut threshold - leave alone
 
-    actual_acos = row["spend"] / sales * 100
+    actual_acos = spend / sales * 100
     deviation_pct = (actual_acos - target_acos) / target_acos * 100
     if abs(deviation_pct) <= tolerance_pct:
         return None  # within tolerance band - no change
@@ -253,14 +263,14 @@ def compute_change_pct(row, target_acos, min_clicks, zero_sales_clicks, toleranc
     return (change_pct, "acos", actual_acos)
 
 
-def propose_bid_change(row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid, max_bid):
+def propose_bid_change(row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct, min_bid, max_bid):
     """Single-period version - still used when multi-period data isn't
     available. See propose_bid_change_multi_period for the 3-window version."""
     current_bid = row.get("bid")
     if current_bid is None:
         return None  # no known current bid to adjust from - skip (SD has no per-target bid at all, see CLAUDE.md)
 
-    decision = compute_change_pct(row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct)
+    decision = compute_change_pct(row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct)
     if not decision:
         return None
     change_pct, kind, actual_acos = decision
@@ -271,7 +281,7 @@ def propose_bid_change(row, target_acos, min_clicks, zero_sales_clicks, toleranc
         return None
 
     if kind == "zero_sales":
-        reason = f"{row['clicks']} clicks, $0 sales - cutting bid {abs(change_pct):.0f}%"
+        reason = f"${row['spend']:.2f} spent ({row['clicks']} clicks), $0 sales - cutting bid {abs(change_pct):.0f}%"
     else:
         direction = "raising" if new_bid > current_bid else "lowering"
         reason = f"ACOS {actual_acos:.1f}% vs target {target_acos:.1f}% - {direction} bid {abs(change_pct):.0f}%"
@@ -285,18 +295,18 @@ def propose_bid_change(row, target_acos, min_clicks, zero_sales_clicks, toleranc
     }
 
 
-def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_clicks, zero_sales_clicks,
+def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, zero_sales_spend,
                                      tolerance_pct, max_change_pct, min_bid, max_bid):
     """3-window version, added 2026-08-29 at the user's request ("suggest a
     more complex bid recommendation mechanism... 3-4 periods, not only
     one"). row30/row7/row60 are the same target's aggregates over three
     trailing windows all ending at the same attribution-lag-adjusted date:
       - row60 (~60d, BASELINE): a data-sufficiency gate - if even 60 days of
-        history doesn't reach min_clicks, there's simply not enough signal.
+        history doesn't reach min_spend, there's simply not enough signal.
         Also used as a "is this new or long-standing" comparison point.
       - row30 (~30d, the existing lookback_days default, DECISION): drives
         the actual bid math via the same target-ACOS logic as
-        propose_bid_change - unless row30 itself is below min_clicks, in
+        propose_bid_change - unless row30 itself is below min_spend, in
         which case row60 is used as the decision row instead (noted in the
         reason text).
       - row7 (~7d, RECENT): a trend signal only, never a decision driver on
@@ -309,11 +319,11 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_clicks,
     if current_bid is None:
         return None
 
-    if row60["clicks"] < min_clicks:
+    if row60["spend"] < min_spend:
         return None  # not enough signal even at the longest window
 
-    decision_row, decision_label = (row30, "30d") if row30["clicks"] >= min_clicks else (row60, "60d")
-    decision = compute_change_pct(decision_row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct)
+    decision_row, decision_label = (row30, "30d") if row30["spend"] >= min_spend else (row60, "60d")
+    decision = compute_change_pct(decision_row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct)
     if not decision:
         return None
     change_pct, kind, actual_acos = decision
@@ -321,9 +331,9 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_clicks,
     notes = []
     if kind == "acos":
         # Trend check against the recent window - only meaningful once it
-        # has enough of its own signal.
-        recent_min_clicks = max(3, min_clicks // 3)
-        if row7["clicks"] >= recent_min_clicks and row7["sales"] > 0:
+        # has enough of its own signal (spend, same money-based reasoning).
+        recent_min_spend = max(0.50, min_spend / 3)
+        if row7["spend"] >= recent_min_spend and row7["sales"] > 0:
             recent_acos = row7["spend"] / row7["sales"] * 100
             recent_deviation = recent_acos - target_acos
             decision_deviation = actual_acos - target_acos
@@ -334,7 +344,7 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_clicks,
                 notes.append(f"7d trend {shift} ({recent_acos:.1f}%) - dampened")
 
         # "New problem or long-standing" signal vs the baseline window.
-        if decision_label == "30d" and row60["clicks"] >= min_clicks and row60["sales"] > 0:
+        if decision_label == "30d" and row60["spend"] >= min_spend and row60["sales"] > 0:
             baseline_acos = row60["spend"] / row60["sales"] * 100
             if abs(actual_acos - baseline_acos) >= TRENDING_GAP_PCT:
                 notes.append(f"vs 60d baseline {baseline_acos:.1f}% - recent shift")
@@ -346,7 +356,7 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_clicks,
 
     note_suffix = f" ({'; '.join(notes)})" if notes else ""
     if kind == "zero_sales":
-        reason = f"{decision_row['clicks']} clicks ({decision_label}), $0 sales - cutting bid {abs(change_pct):.0f}%{note_suffix}"
+        reason = f"${decision_row['spend']:.2f} spent ({decision_row['clicks']} clicks, {decision_label}), $0 sales - cutting bid {abs(change_pct):.0f}%{note_suffix}"
     else:
         direction = "raising" if new_bid > current_bid else "lowering"
         label_note = "" if decision_label == "30d" else " (30d had too few clicks, used 60d)"
@@ -366,7 +376,7 @@ def RunBidOptimizerDryRun(request):
     """Read-only: computes proposed bid changes from historical
     ads_keyword_stats and returns them - does NOT write anything to Amazon.
     Query params (all optional): target_acos, lookback_days, attribution_lag_days,
-    min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid,
+    min_spend, zero_sales_spend, tolerance_pct, max_change_pct, min_bid,
     max_bid, country_code, portfolio, recent_days, baseline_days,
     multi_period (default true; pass "false" to fall back to the original
     single-window evaluation - see propose_bid_change_multi_period for the
@@ -391,8 +401,8 @@ def RunBidOptimizerDryRun(request):
     target_acos = get_float("target_acos", DEFAULT_TARGET_ACOS)
     lookback_days = get_int("lookback_days", DEFAULT_LOOKBACK_DAYS)
     attribution_lag_days = get_int("attribution_lag_days", DEFAULT_ATTRIBUTION_LAG_DAYS)
-    min_clicks = get_int("min_clicks", DEFAULT_MIN_CLICKS)
-    zero_sales_clicks = get_int("zero_sales_clicks", DEFAULT_ZERO_SALES_CLICKS)
+    min_spend = get_float("min_spend", DEFAULT_MIN_SPEND)
+    zero_sales_spend = get_float("zero_sales_spend", DEFAULT_ZERO_SALES_SPEND)
     tolerance_pct = get_float("tolerance_pct", DEFAULT_TOLERANCE_PCT)
     max_change_pct = get_float("max_change_pct", DEFAULT_MAX_CHANGE_PCT)
     min_bid = get_float("min_bid", DEFAULT_MIN_BID)
@@ -446,7 +456,7 @@ def RunBidOptimizerDryRun(request):
                     continue  # not present at all in the baseline window - no signal
                 row7 = rows7.get(target_id, {**row30, "clicks": 0, "spend": 0.0, "sales": 0.0})
                 proposal = propose_bid_change_multi_period(
-                    row30, row7, row60, target_acos, min_clicks, zero_sales_clicks,
+                    row30, row7, row60, target_acos, min_spend, zero_sales_spend,
                     tolerance_pct, max_change_pct, min_bid, max_bid
                 )
                 if not proposal:
@@ -461,7 +471,7 @@ def RunBidOptimizerDryRun(request):
             targets_evaluated = len(rows30)
             for row in rows30:
                 proposal = propose_bid_change(
-                    row, target_acos, min_clicks, zero_sales_clicks, tolerance_pct, max_change_pct, min_bid, max_bid
+                    row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct, min_bid, max_bid
                 )
                 if not proposal:
                     continue
@@ -483,8 +493,8 @@ def RunBidOptimizerDryRun(request):
                 "attributionLagDays": attribution_lag_days,
                 "recentDays": recent_days,
                 "baselineDays": baseline_days,
-                "minClicks": min_clicks,
-                "zeroSalesClicks": zero_sales_clicks,
+                "minSpend": min_spend,
+                "zeroSalesSpend": zero_sales_spend,
                 "tolerancePct": tolerance_pct,
                 "maxChangePct": max_change_pct,
                 "minBid": min_bid,
