@@ -287,6 +287,21 @@ def ApplyBidChange(request):
     return _impl(request)
 
 
+def GetBidRuleProfiles(request):
+    from AdsBidRuleProfiles import GetBidRuleProfiles as _impl
+    return _impl(request)
+
+
+def SaveBidRuleProfile(request):
+    from AdsBidRuleProfiles import SaveBidRuleProfile as _impl
+    return _impl(request)
+
+
+def DeleteBidRuleProfile(request):
+    from AdsBidRuleProfiles import DeleteBidRuleProfile as _impl
+    return _impl(request)
+
+
 def UpdateAdsAdvertisedProductStats(request):
     from AdsAdvertisedProductReporting import UpdateAdsAdvertisedProductStats as _impl
     return _impl(request)
