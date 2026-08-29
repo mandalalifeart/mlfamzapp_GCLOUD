@@ -78,6 +78,11 @@ def GetAdsCampaignStats(request):
     return _impl(request)
 
 
+def GetAdsPortfolios(request):
+    from AdsReporting import GetAdsPortfolios as _impl
+    return _impl(request)
+
+
 def UpdateAdsKeywordStats(request):
     from AdsKeywordReporting import UpdateAdsKeywordStats as _impl
     return _impl(request)

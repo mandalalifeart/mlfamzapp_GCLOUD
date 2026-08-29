@@ -368,6 +368,84 @@ def fetch_portfolios(base_url, access_token, client_id, ads_profile_id):
     ]
 
 
+def fetch_campaign_to_portfolio_name(token):
+    """campaign_id -> portfolio name (e.g. "Pareo"/"POUF"), joined from the
+    ads_campaigns snapshot's portfolio_id through ads_portfolios' id->name -
+    own copy mirroring AdsBidOptimizer.py's helper of the same name, added
+    2026-08-29 so GetAdsCampaignStats/the /ads-campaigns page can show and
+    filter by portfolio too."""
+    portfolio_names = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "portfolio_id,name"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            portfolio_names[item.get("portfolio_id")] = item.get("name", "")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+
+    campaign_to_portfolio = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "campaign_id,portfolio_id"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            portfolio_id = item.get("portfolio_id")
+            if portfolio_id:
+                campaign_to_portfolio[item.get("campaign_id")] = portfolio_names.get(portfolio_id, "")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+
+    return campaign_to_portfolio
+
+
+def GetAdsPortfolios(request):
+    """Lightweight standalone list of {portfolioId, name} - lets a frontend
+    page populate a portfolio dropdown up front, without first having to run
+    a heavier endpoint (like RunBidOptimizerDryRun) just to discover what
+    portfolios exist."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    try:
+        token = pb_authenticate()
+        portfolios = []
+        page = 1
+        while True:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PORTFOLIOS_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={"perPage": 500, "page": page, "fields": "portfolio_id,name"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            for item in data.get("items", []):
+                if item.get("name"):
+                    portfolios.append({"portfolioId": item.get("portfolio_id"), "name": item.get("name")})
+            if page >= data.get("totalPages", 1):
+                break
+            page += 1
+        portfolios.sort(key=lambda p: p["name"])
+        return json_response({"portfolios": portfolios})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
+
+
 def pb_list_portfolio_ids(token, profile_id):
     ids = []
     page = 1
@@ -966,6 +1044,7 @@ def GetAdsCampaignStats(request):
     start_date = request.args.get("start_date") if hasattr(request, "args") else None
     end_date = request.args.get("end_date") if hasattr(request, "args") else None
     country_code = request.args.get("country_code") if hasattr(request, "args") else None
+    portfolio = request.args.get("portfolio") if hasattr(request, "args") else None
 
     if not start_date or not end_date:
         # Back-compat: no explicit range means "this month" - same default
@@ -1050,10 +1129,22 @@ def GetAdsCampaignStats(request):
                 break
             page += 1
 
-        rows = sorted(campaigns.values(), key=lambda c: -c["spend"])
+        campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        rows = list(campaigns.values())
+        for row in rows:
+            row["portfolioName"] = campaign_to_portfolio.get(row["campaignId"], "")
+        if portfolio:
+            rows = [r for r in rows if r["portfolioName"] == portfolio]
+
+        rows.sort(key=lambda c: -c["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
 
-        return json_response({"startDate": start_date, "endDate": end_date, "campaigns": rows})
+        return json_response({
+            "startDate": start_date,
+            "endDate": end_date,
+            "campaigns": rows,
+            "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
+        })
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
