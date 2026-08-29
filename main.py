@@ -302,6 +302,11 @@ def DeleteBidRuleProfile(request):
     return _impl(request)
 
 
+def GetBidChangePerformance(request):
+    from AdsBidWriter import GetBidChangePerformance as _impl
+    return _impl(request)
+
+
 def UpdateAdsAdvertisedProductStats(request):
     from AdsAdvertisedProductReporting import UpdateAdsAdvertisedProductStats as _impl
     return _impl(request)

@@ -34,6 +34,7 @@ from AdsAuth import (
 
 POCKETBASE_ADS_COLLECTION = os.environ.get("POCKETBASE_ADS_COLLECTION", "ads_connections")
 POCKETBASE_BID_LOG_COLLECTION = os.environ.get("POCKETBASE_BID_LOG_COLLECTION", "ads_bid_change_log")
+POCKETBASE_ADS_KEYWORD_COLLECTION = os.environ.get("POCKETBASE_ADS_KEYWORD_COLLECTION", "ads_keyword_stats")
 # Deliberately its own narrow secret, not the shared ADMIN_KEY (which also
 # gates MCF order placement, listing deletes, etc.) - this is the one write
 # endpoint in the project meant to be called directly from the public
@@ -273,3 +274,91 @@ def ApplyBidChange(request):
         except Exception:
             pass
         return json_response({"applied": False, "error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def _aggregate_window(token, target_id, start_date, end_date):
+    """Sum spend/sales/clicks/orders for one target across [start_date,
+    end_date] from ads_keyword_stats - used to build before/after windows
+    around a bid change's changed_at date."""
+    totals = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_KEYWORD_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"filter": f'target_id = "{target_id}" && date >= "{start_date}" && date <= "{end_date}"',
+                    "fields": "spend,sales,clicks,orders", "perPage": 200, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            totals["spend"] += item.get("spend", 0) or 0
+            totals["sales"] += item.get("sales", 0) or 0
+            totals["clicks"] += item.get("clicks", 0) or 0
+            totals["orders"] += item.get("orders", 0) or 0
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    totals["acos"] = (totals["spend"] / totals["sales"] * 100) if totals["sales"] else None
+    return totals
+
+
+def GetBidChangePerformance(request):
+    """Read-only: for every applied bid change, shows how that keyword
+    performed in an equal-length window before vs. after the change - added
+    2026-08-29 at the user's request to track outcomes of every bid change
+    made through the Apply button, not just log that it happened."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    window_days = int(request.args.get("window_days", 14)) if hasattr(request, "args") else 14
+
+    try:
+        token = pb_authenticate()
+        changes = []
+        page = 1
+        while True:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_BID_LOG_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={"filter": 'status = "applied"', "sort": "-changed_at", "perPage": 200, "page": page},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            changes.extend(data.get("items", []))
+            if page >= data.get("totalPages", 1):
+                break
+            page += 1
+
+        today = datetime.now(LA_TZ).strftime("%Y-%m-%d")
+        results = []
+        for change in changes:
+            changed_at = change["changed_at"]
+            changed_dt = datetime.strptime(changed_at, "%Y-%m-%d")
+            pre_start = (changed_dt - timedelta(days=window_days)).strftime("%Y-%m-%d")
+            pre_end = (changed_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+            post_start = changed_at
+            post_end = min(today, (changed_dt + timedelta(days=window_days)).strftime("%Y-%m-%d"))
+
+            before = _aggregate_window(token, change["target_id"], pre_start, pre_end)
+            after = _aggregate_window(token, change["target_id"], post_start, post_end)
+
+            results.append({
+                "targetId": change["target_id"],
+                "targetText": change.get("target_text", ""),
+                "campaignName": change.get("campaign_name", ""),
+                "countryCode": change.get("country_code", ""),
+                "oldBid": change.get("old_bid"),
+                "newBid": change.get("new_bid"),
+                "changedAt": changed_at,
+                "reason": change.get("reason", ""),
+                "daysSinceChange": (datetime.strptime(today, "%Y-%m-%d") - changed_dt).days,
+                "before": before,
+                "after": after,
+            })
+
+        return json_response({"windowDays": window_days, "changes": results})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
