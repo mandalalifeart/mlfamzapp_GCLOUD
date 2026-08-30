@@ -638,18 +638,24 @@ def push_tracking_to_etsy(access_token, shop_id, receipt_id, tracking_code, carr
     return response.json()
 
 
-def format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors):
+def format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, errors):
     lines = [
         f"Etsy tracking sync (from Amazon MCF) - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"{len(shipped)} order(s) marked shipped on Etsy with tracking, "
         f"{still_processing} still processing on Amazon, "
         f"{len(skipped_no_carrier_match)} shipped but skipped (no carrier match), "
+        f"{len(cancelled)} cancelled on Amazon, "
         f"{len(errors)} error(s).",
         "",
     ]
     for entry in shipped:
         lines.append(f"  Receipt {entry['receiptId']}: {entry['carrier']} {entry['tracking']}")
+    if cancelled:
+        lines.append("")
+        lines.append("Cancelled on Amazon (mcf_status set to 'cancelled', needs manual review/refund on Etsy):")
+        for entry in cancelled:
+            lines.append(f"  Receipt {entry['receiptId']}: {entry['status']}")
     if skipped_no_carrier_match:
         lines.append("")
         lines.append("Skipped (Amazon carrier code didn't match any Etsy carrier - needs a manual update):")
@@ -721,13 +727,27 @@ def UpdateEtsyTrackingFromAmazon(request):
 
         shipped = []
         skipped_no_carrier_match = []
+        cancelled = []
         still_processing = 0
         errors = []
 
         for receipt_id in receipt_ids:
             try:
                 resp = client.get_fulfillment_order(sellerFulfillmentOrderId=f"ETSY-{receipt_id}")
-                packages = extract_shipped_packages(resp.payload or {})
+                payload = resp.payload or {}
+                # A Cancelled/Invalid MCF order will never produce a shipment -
+                # counting it as "still processing" forever (the original
+                # behavior here) hides a real cancellation indefinitely
+                # instead of surfacing it. Found live 2026-08-30 via receipt
+                # 4158189487, whose Amazon fulfillment order had already been
+                # Cancelled but mcf_status stayed stuck at "in_progress".
+                order_status = (payload.get("fulfillmentOrder") or {}).get("fulfillmentOrderStatus")
+                if order_status in ("Cancelled", "Invalid"):
+                    set_order_mcf_status(pb_token, receipt_id, "cancelled")
+                    cancelled.append({"receiptId": receipt_id, "status": order_status})
+                    continue
+
+                packages = extract_shipped_packages(payload)
                 if not packages:
                     still_processing += 1
                     continue
@@ -751,11 +771,11 @@ def UpdateEtsyTrackingFromAmazon(request):
             except Exception as exc:
                 errors.append(f"Receipt {receipt_id}: {exc}")
 
-        report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, errors)
+        report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, errors)
         from NotificationRouting import notify
         notify(
             "etsy-daily-tracking-update", "amzbot", report_text,
-            is_error=bool(skipped_no_carrier_match or errors),
+            is_error=bool(skipped_no_carrier_match or cancelled or errors),
             subject=f"Etsy tracking sync - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         )
 
@@ -764,6 +784,7 @@ def UpdateEtsyTrackingFromAmazon(request):
             "shipped": len(shipped),
             "stillProcessing": still_processing,
             "skippedNoCarrierMatch": skipped_no_carrier_match,
+            "cancelled": cancelled,
             "errors": errors,
         })
     except Exception as exc:

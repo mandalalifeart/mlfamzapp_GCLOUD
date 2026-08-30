@@ -63,6 +63,8 @@ def load_mapping(token):
     for row in fetch_mapping_records(token):
         sku = (row.get("sku") or "").strip()
         asin = (row.get("asin") or "").strip()
+        upc = (row.get("ean") or "").strip()
+        supplier_sku = (row.get("supplier_sku") or "").strip()
         group = (row.get("group") or "").strip() or "UNGROUPED"
         if not sku:
             continue
@@ -70,7 +72,7 @@ def load_mapping(token):
             sku_to_asin[sku] = asin
         if group == "IGNORE":
             continue
-        rows.append({"sku": sku, "asin": asin, "group": group})
+        rows.append({"sku": sku, "asin": asin, "upc": upc, "supplier_sku": supplier_sku, "group": group})
     return rows, sku_to_asin
 
 
@@ -132,7 +134,7 @@ def GetNextOrderData(request):
         groups = defaultdict(list)
         for row in mapping_rows:
             stats = stats_by_sku.get(row["sku"]) or stats_by_asin.get(row["asin"]) or {}
-            item = {"sku": row["sku"], "asin": row["asin"]}
+            item = {"sku": row["sku"], "asin": row["asin"], "upc": row["upc"], "supplier_sku": row["supplier_sku"]}
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
             groups[row["group"]].append(item)
