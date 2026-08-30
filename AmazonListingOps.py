@@ -351,7 +351,14 @@ def AuditAmazonListings(request):
 
     # Issue codes to suppress from the audit entirely, per user request
     # (2026-08-28) - "can't access your media at <url>" (300060/300403).
-    IGNORED_ISSUE_CODES = {"300060", "300403"}
+    # Also per user request (2026-08-30), 2 more confirmed-not-API-fixable
+    # categories from the full DE catalog sweep that day: 8541 (EAN/barcode
+    # collides with an ASIN owned by a different seller/brand - needs new
+    # barcodes or a Seller Support catalog appeal, not a listing edit) and
+    # 90244 ("Is Used Where/By Who" - Amazon's Listings API silently ignores
+    # any value submitted for this attribute now, confirmed by testing;
+    # cosmetic only, doesn't affect BUYABLE/DISCOVERABLE status).
+    IGNORED_ISSUE_CODES = {"300060", "300403", "8541", "90244"}
 
     try:
         from sp_api.base import Marketplaces
