@@ -121,11 +121,14 @@ def GetAmazonListingItem(request):
 
 
 def DeleteAmazonListingItem(request):
-    """Deletes one live SKU's listing on amazon.com via SP-API Listings
+    """Deletes one live SKU's listing on one marketplace via SP-API Listings
     Items API. Real, customer-facing, largely irreversible (the ASIN's
     existing reviews/sales history/organic ranking are gone once deleted) -
     double-gated (ADMIN_KEY + confirm=yes) same as the MCF order-creation
-    function, no bulk path."""
+    function, no bulk path. Takes an optional `marketplace` param (one of
+    MARKETPLACE_CONFIG's keys, default US) - added 2026-08-30 since this
+    was hardcoded to US only and a real delete+relist request came in for
+    FR/DE/IT/ES SKUs."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
@@ -133,25 +136,29 @@ def DeleteAmazonListingItem(request):
 
     sku = request.args.get("sku") if hasattr(request, "args") else None
     confirm = request.args.get("confirm") if hasattr(request, "args") else None
+    marketplace = (request.args.get("marketplace") if hasattr(request, "args") else None) or "US"
     if not sku:
         return json_response({"error": "sku is required"}, 400)
     if confirm != "yes":
         return json_response({"error": "Pass confirm=yes to actually delete this live listing"}, 400)
-    if not SELLER_ID:
-        return json_response({"error": "AMAZON_SELLER_ID env var is not set"}, 500)
+    if marketplace not in MARKETPLACE_CONFIG:
+        return json_response({"error": f"unknown marketplace {marketplace}"}, 400)
+    _, mp_attr, seller_id = MARKETPLACE_CONFIG[marketplace]
+    if not seller_id:
+        return json_response({"error": "seller id env var is not set for this marketplace"}, 500)
 
     try:
         from sp_api.base import Marketplaces
 
-        client = listings_client()
+        client = listings_client(marketplace)
         resp = client.delete_listings_item(
-            sellerId=SELLER_ID,
+            sellerId=seller_id,
             sku=sku,
-            marketplaceIds=[Marketplaces.US.marketplace_id],
+            marketplaceIds=[getattr(Marketplaces, mp_attr).marketplace_id],
         )
-        return json_response({"deleted": True, "sku": sku, "response": resp.payload})
+        return json_response({"deleted": True, "sku": sku, "marketplace": marketplace, "response": resp.payload})
     except Exception as exc:
-        return json_response({"deleted": False, "sku": sku, "error": str(exc), "type": exc.__class__.__name__}, 500)
+        return json_response({"deleted": False, "sku": sku, "marketplace": marketplace, "error": str(exc), "type": exc.__class__.__name__}, 500)
 
 
 def ProcessAmazonRelistQueue(request):
@@ -184,12 +191,16 @@ def ProcessAmazonRelistQueue(request):
         processed = []
         for item in due:
             sku = item["sku"]
+            marketplace = item.get("marketplace") or "US"
             try:
-                client = listings_client()
+                if marketplace not in MARKETPLACE_CONFIG:
+                    raise ValueError(f"unknown marketplace {marketplace}")
+                _, mp_attr, seller_id = MARKETPLACE_CONFIG[marketplace]
+                client = listings_client(marketplace)
                 resp = client.put_listings_item(
-                    sellerId=SELLER_ID,
+                    sellerId=seller_id,
                     sku=sku,
-                    marketplaceIds=[Marketplaces.US.marketplace_id],
+                    marketplaceIds=[getattr(Marketplaces, mp_attr).marketplace_id],
                     body={
                         "productType": item.get("product_type"),
                         "attributes": item.get("attributes"),
@@ -210,8 +221,8 @@ def ProcessAmazonRelistQueue(request):
                     json={"status": "done"},
                     timeout=15,
                 )
-                processed.append({"sku": sku, "ok": True, "response": resp.payload})
-                text = f"Amazon relist complete: SKU {sku} is live again as a standalone listing (no longer part of its old variation family)."
+                processed.append({"sku": sku, "marketplace": marketplace, "ok": True, "response": resp.payload})
+                text = f"Amazon relist complete: SKU {sku} ({marketplace}) is live again as a standalone listing (no longer part of its old variation family)."
                 succeeded = True
             except Exception as exc:
                 requests.patch(
@@ -220,14 +231,14 @@ def ProcessAmazonRelistQueue(request):
                     json={"status": "error", "last_error": str(exc)},
                     timeout=15,
                 )
-                processed.append({"sku": sku, "ok": False, "error": str(exc)})
-                text = f"Amazon relist FAILED for SKU {sku}: {exc}"
+                processed.append({"sku": sku, "marketplace": marketplace, "ok": False, "error": str(exc)})
+                text = f"Amazon relist FAILED for SKU {sku} ({marketplace}): {exc}"
                 succeeded = False
 
             from NotificationRouting import notify
             notify(
                 "amazon-relist-queue-processor", "amzbot", text,
-                is_error=not succeeded, subject=f"Amazon relist - {sku}",
+                is_error=not succeeded, subject=f"Amazon relist - {sku} ({marketplace})",
             )
 
         return json_response({"checked": len(due), "processed": processed})
