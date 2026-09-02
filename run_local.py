@@ -12,13 +12,28 @@ import os
 import sys
 
 
+class FakeArgs(dict):
+    """dict.get() doesn't accept Flask MultiDict's type= kwarg, which some
+    functions (e.g. EtsyOrders.UpdateEtsyOrders) rely on - override get() to
+    support it so those functions behave the same locally as on GCP."""
+
+    def get(self, key, default=None, type=None):
+        value = super().get(key, default)
+        if type is not None and value is not None:
+            try:
+                value = type(value)
+            except (TypeError, ValueError):
+                return default
+        return value
+
+
 class FakeRequest:
     """Minimal stand-in for the Flask Request object these functions
     already expect - only .method and .args are ever touched."""
 
     def __init__(self, args):
         self.method = "GET"
-        self.args = args
+        self.args = FakeArgs(args)
 
     def get_json(self, silent=True):
         return None

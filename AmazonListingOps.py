@@ -268,7 +268,12 @@ def PatchAmazonListingAttribute(request):
         return json_response({"error": "sku and path are required (value required unless op=delete)"}, 400)
 
     patch = {"op": op, "path": path}
-    if op != "delete":
+    if op != "delete" or value is not None:
+        # A "delete" op can still carry a value - Amazon's JSON-Patch dialect
+        # uses that to mean "delete just the array entry matching these
+        # selector fields" (e.g. one content_type/content_language slot of a
+        # multi-value attribute), not "delete the whole attribute path".
+        # Only omit value when the caller genuinely didn't supply one.
         patch["value"] = value
 
     marketplace = body.get("marketplace") or "US"

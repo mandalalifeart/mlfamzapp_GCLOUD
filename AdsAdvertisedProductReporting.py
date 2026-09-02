@@ -20,7 +20,7 @@ from AdsReporting import (
     request_campaign_report,
 )
 
-LA_TZ = ZoneInfo("America/Los_Angeles")
+SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")  # matches this machine's local cron timezone, not Amazon's
 POCKETBASE_ADS_ADVERTISED_PRODUCT_COLLECTION = os.environ.get(
     "POCKETBASE_ADS_ADVERTISED_PRODUCT_COLLECTION", "ads_advertised_product_stats"
 )
@@ -219,6 +219,127 @@ def pb_list_advertised_product_stats_ids(token, profile_id, start_date, end_date
     return ids
 
 
+POCKETBASE_ADS_PRODUCT_ADS_COLLECTION = os.environ.get("POCKETBASE_ADS_PRODUCT_ADS_COLLECTION", "ads_product_ads")
+
+
+def fetch_sp_product_ads(base_url, access_token, client_id, ads_profile_id):
+    """Lists every SP product ad for one profile (no filter - the full
+    catalog, refreshed alongside the daily advertised-product stats pull) -
+    added 2026-09-01 after a real per-ad status mismatch was found: a
+    campaign can stay ENABLED overall while one specific product ad inside
+    it is individually paused, which campaign-level status alone can't show
+    (confirmed live: Amazon's own console showed PAREO_ACA_1A as "Paused"
+    while its campaign, PAREO SP BROAD, was still enabled). Pagination
+    field names (nextToken/maxResults) follow the same v3 convention as
+    every other SP list endpoint in this project - not directly confirmed
+    for this specific endpoint from Amazon's official Postman collection,
+    whose saved example has only one result and doesn't exercise paging."""
+    ads = []
+    next_token = None
+    while True:
+        body = {"maxResults": 100}
+        if next_token:
+            body["nextToken"] = next_token
+        response = requests.post(
+            f"{base_url}/sp/productAds/list",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Amazon-Advertising-API-ClientId": client_id,
+                "Amazon-Advertising-API-Scope": str(ads_profile_id),
+                "Content-Type": "application/vnd.spProductAd.v3+json",
+                "Accept": "application/vnd.spProductAd.v3+json",
+            },
+            json=body,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        ads.extend(payload.get("productAds", []))
+        next_token = payload.get("nextToken")
+        if not next_token:
+            break
+    return ads
+
+
+def sync_product_ads_catalog(pb_token, connections, errors):
+    """Delete-and-recreate snapshot of every SP product ad's real state,
+    same pattern as ads_campaigns - refreshed every time
+    UpdateAdsAdvertisedProductStats runs (now daily) so the Advertised
+    Products page's status column and pause-checkbox lockout reflect the
+    real per-ad state, not just the parent campaign's."""
+    for connection in connections:
+        profile_key = connection.get("region")
+        refresh_token = connection.get("refresh_token")
+        if profile_key not in AD_PROFILES or not refresh_token:
+            continue
+        try:
+            access_token = refresh_access_token(profile_key, refresh_token)
+        except Exception as exc:
+            errors.append(f"{profile_key}: token refresh failed (product ads catalog): {exc}")
+            continue
+        client_id = AD_PROFILES[profile_key]["client_id"]
+
+        for ads_profile in connection.get("profiles", []) or []:
+            if ads_profile.get("accountType") == "agency":
+                continue
+            region = ads_profile.get("region")
+            base_url = ADS_REGION_ENDPOINTS.get(region)
+            ads_profile_id = ads_profile.get("profileId")
+            if not base_url or not ads_profile_id:
+                continue
+
+            try:
+                ads = fetch_sp_product_ads(base_url, access_token, client_id, str(ads_profile_id))
+            except Exception as exc:
+                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}) product ads list: {exc}")
+                continue
+
+            rows = [
+                {
+                    "profile_id": str(ads_profile_id),
+                    "campaign_id": str(a.get("campaignId", "")),
+                    "ad_group_id": str(a.get("adGroupId", "")),
+                    "ad_id": str(a.get("adId", "")),
+                    "asin": a.get("asin", ""),
+                    "sku": a.get("sku", ""),
+                    "state": a.get("state", ""),
+                    "country_code": ads_profile.get("countryCode", ""),
+                }
+                for a in ads
+            ]
+
+            try:
+                existing_ids = []
+                page = 1
+                while True:
+                    resp = requests.get(
+                        f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PRODUCT_ADS_COLLECTION}/records",
+                        headers={"Authorization": pb_token},
+                        params={"perPage": 500, "page": page, "filter": f'profile_id = "{ads_profile_id}"', "fields": "id"},
+                        timeout=30,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    existing_ids.extend(it["id"] for it in data.get("items", []))
+                    if page >= data.get("totalPages", 1):
+                        break
+                    page += 1
+
+                ops = [
+                    {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ADS_PRODUCT_ADS_COLLECTION}/records/{rid}"}
+                    for rid in existing_ids
+                ]
+                ops.extend(
+                    {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_PRODUCT_ADS_COLLECTION}/records", "body": row}
+                    for row in rows
+                )
+                for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                    pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+            except Exception as exc:
+                errors.append(f"{profile_key}/{ads_profile_id} ({ads_profile.get('countryCode')}): product ads catalog write failed: {exc}")
+            time.sleep(1)
+
+
 def pull_and_store_advertised_product_stats(start_date, end_date):
     pb_token = pb_authenticate()
     connections = pb_list_connected(pb_token)
@@ -242,12 +363,14 @@ def pull_and_store_advertised_product_stats(start_date, end_date):
     jobs = submit_advertised_product_report_jobs(connections, start_date, end_date, errors)
     rows_written = poll_and_store_advertised_product_jobs(pb_token, jobs, errors)
 
+    sync_product_ads_catalog(pb_token, connections, errors)
+
     return {"rowsWritten": rows_written, "profilesPulled": len(profile_ids), "errors": errors}
 
 
 def default_previous_month_range():
-    now_la = datetime.now(LA_TZ)
-    first_of_this_month = now_la.replace(day=1)
+    now_local = datetime.now(SYSTEM_TZ)
+    first_of_this_month = now_local.replace(day=1)
     last_month_end = first_of_this_month - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
     return last_month_start.strftime("%Y-%m-%d"), last_month_end.strftime("%Y-%m-%d")
@@ -264,8 +387,8 @@ def UpdateAdsAdvertisedProductStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
-    now_la = datetime.now(LA_TZ)
-    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_local = datetime.now(SYSTEM_TZ)
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
 
     if request.args.get("start_date"):
         start_date = request.args["start_date"]
@@ -277,7 +400,7 @@ def UpdateAdsAdvertisedProductStats(request):
             last_date = last_recorded_date(token, "ads_advertised_product_stats")
             if last_date:
                 gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                floor_date = (now_local - timedelta(days=31)).strftime("%Y-%m-%d")
                 start_date = max(gap_start, floor_date)
                 end_date = yesterday
         except Exception:
@@ -333,6 +456,7 @@ def GetAdsAdvertisedProductStats(request):
             for item in data.get("items", []):
                 key = (item.get("profile_id"), item.get("campaign_id"), item.get("asin"))
                 bucket = products.setdefault(key, {
+                    "profileId": item.get("profile_id"),
                     "campaignId": item.get("campaign_id"),
                     "campaignName": item.get("campaign_name", ""),
                     "adGroupId": item.get("ad_group_id", ""),
@@ -359,10 +483,56 @@ def GetAdsAdvertisedProductStats(request):
                 break
             page += 1
 
+        # Real per-ad status (not just campaign status) - added 2026-09-01
+        # after finding a live mismatch: a campaign can stay ENABLED while
+        # one specific product ad inside it is individually paused
+        # (confirmed against Amazon's own console). ads_product_ads is the
+        # real per-ad snapshot synced daily by UpdateAdsAdvertisedProductStats;
+        # campaign_status is kept as a fallback for a product ad this
+        # snapshot hasn't captured yet (e.g. right after a new campaign
+        # launches, before the next daily sync).
+        campaign_status = {}
+        cs_page = 1
+        while True:
+            cs_resp = requests.get(
+                f"{POCKETBASE_URL}/api/collections/ads_campaigns/records",
+                headers={"Authorization": token},
+                params={"perPage": 500, "page": cs_page, "fields": "campaign_id,campaign_status"},
+                timeout=30,
+            )
+            cs_resp.raise_for_status()
+            cs_data = cs_resp.json()
+            for row in cs_data.get("items", []):
+                if row.get("campaign_id"):
+                    campaign_status[row["campaign_id"]] = row.get("campaign_status", "")
+            if cs_page >= cs_data.get("totalPages", 1):
+                break
+            cs_page += 1
+
+        ad_status = {}
+        pa_page = 1
+        while True:
+            pa_resp = requests.get(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_PRODUCT_ADS_COLLECTION}/records",
+                headers={"Authorization": token},
+                params={"perPage": 500, "page": pa_page, "fields": "campaign_id,ad_group_id,asin,state"},
+                timeout=30,
+            )
+            pa_resp.raise_for_status()
+            pa_data = pa_resp.json()
+            for row in pa_data.get("items", []):
+                key = (row.get("campaign_id"), row.get("ad_group_id"), row.get("asin"))
+                ad_status[key] = row.get("state", "")
+            if pa_page >= pa_data.get("totalPages", 1):
+                break
+            pa_page += 1
+
         rows = sorted(products.values(), key=lambda p: -p["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_nameDate", None)
+            ad_key = (row["campaignId"], row["adGroupId"], row["asin"])
+            row["adStatus"] = ad_status.get(ad_key) or campaign_status.get(row["campaignId"], "")
 
         return json_response({"startDate": start_date, "endDate": end_date, "products": rows})
     except Exception as exc:

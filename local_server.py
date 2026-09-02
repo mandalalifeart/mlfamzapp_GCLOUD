@@ -18,9 +18,13 @@ import main as functions_module
 
 PORT = int(os.environ.get("LOCAL_SERVER_PORT", "8092"))
 
-# Only the functions this migration covers - pure PocketBase (+ SP-API for
-# the report request/update trio) reads/writes triggered by the /sales,
-# /next-order, /update, /batch-update, and /product frontend pages.
+# Originally just the pure-PocketBase (+ SP-API report request/update trio)
+# functions for /sales, /next-order, /update, /batch-update, /product.
+# Extended 2026-08-31 to cover everything except the 3 OAuth
+# start/callback endpoints (AdsOAuthCallback, EtsyOAuthStart,
+# EtsyOAuthCallback), which stay on GCP because their URLs are registered
+# as fixed redirect URIs in Amazon's/Etsy's own app dashboards - moving
+# them needs a manual dashboard update, not just a routing change here.
 ROUTED_FUNCTIONS = [
     "AssignSkuGroup",
     "GetMarketplaceSalesSummary",
@@ -31,6 +35,62 @@ ROUTED_FUNCTIONS = [
     "MlfReportReq",
     "UpdateNextOrderField",
     "UpdateSkuSalesMonth",
+    "GetUkInventory",
+    "GetDeInventory",
+    "GetAwdInventory",
+    "UpdateUsaInventory",
+    "GetAdsConnectionStatus",
+    "UpdateAdsCampaignStats",
+    "GetAdsAccountSummary",
+    "GetAdsCampaignStats",
+    "GetAdsPortfolios",
+    "UpdateAdsKeywordStats",
+    "GetAdsKeywordStats",
+    "UpdateAdsSearchTermStats",
+    "GetAdsSearchTermStats",
+    "GetEtsyConnectionStatus",
+    "UpdateEtsyListings",
+    "GetEtsyListings",
+    "GetEtsyListingDetail",
+    "UpdateEtsyListingContent",
+    "MonitorEtsyExperiments",
+    "StartEtsyExperiment",
+    "GetAmazonListingItem",
+    "DeleteAmazonListingItem",
+    "ProcessAmazonRelistQueue",
+    "ProbeAdsReportColumns",
+    "MarkEtsyOrderInProgress",
+    "DiagnoseEtsyOrders",
+    "UpdateEtsyOrders",
+    "GetEtsyOrders",
+    "RunEtsyMcfFulfillment",
+    "RunEtsyMcfFulfillmentWet",
+    "CheckMcfAccess",
+    "GetMcfFulfillmentPreview",
+    "GetMcfOrderById",
+    "PatchAmazonListingAttribute",
+    "ProbeEuSellerId",
+    "AuditAmazonListings",
+    "GetScheduledJobs",
+    "UpdateScheduledJob",
+    "GetJobRunsLog",
+    "GetPocketBaseCollections",
+    "CreateMcfOrderForReceipt",
+    "UpdateEtsyTrackingFromAmazon",
+    "RunBidOptimizerDryRun",
+    "ApplyBidChange",
+    "DisableBidTarget",
+    "PauseProductAd",
+    "EnableProductAd",
+    "GetBidRuleProfiles",
+    "SaveBidRuleProfile",
+    "DeleteBidRuleProfile",
+    "GetBidChangePerformance",
+    "UpdateAdsAdvertisedProductStats",
+    "GetAdsAdvertisedProductStats",
+    "UpdateCountryPpcDaily",
+    "GetCountryPpcDaily",
+    "SendDailyAdsDigest",
 ]
 
 app = Flask(__name__)

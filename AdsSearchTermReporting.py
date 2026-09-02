@@ -12,6 +12,7 @@ from AdsReporting import (
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
+    fetch_campaign_to_portfolio_name,
     last_recorded_date,
     pb_authenticate,
     pb_batch,
@@ -20,7 +21,7 @@ from AdsReporting import (
     request_campaign_report,
 )
 
-LA_TZ = ZoneInfo("America/Los_Angeles")
+SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")  # matches this machine's local cron timezone, not Amazon's
 POCKETBASE_ADS_SEARCH_TERM_COLLECTION = os.environ.get("POCKETBASE_ADS_SEARCH_TERM_COLLECTION", "ads_search_term_stats")
 
 REPORT_POLL_ROUNDS = 165
@@ -37,7 +38,7 @@ AD_SEARCH_TERM_PRODUCTS = [
         "ad_product": "SPONSORED_PRODUCTS",
         "report_type_id": "spSearchTerm",
         "columns": [
-            "date", "campaignId", "campaignName", "adGroupId",
+            "date", "campaignId", "campaignName", "adGroupId", "adGroupName",
             "keywordId", "keyword", "matchType", "searchTerm",
             "impressions", "clicks", "cost", "purchases7d", "sales7d",
         ],
@@ -240,8 +241,8 @@ def pull_and_store_search_term_stats(start_date, end_date):
 
 
 def default_previous_month_range():
-    now_la = datetime.now(LA_TZ)
-    first_of_this_month = now_la.replace(day=1)
+    now_local = datetime.now(SYSTEM_TZ)
+    first_of_this_month = now_local.replace(day=1)
     last_month_end = first_of_this_month - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
     return last_month_start.strftime("%Y-%m-%d"), last_month_end.strftime("%Y-%m-%d")
@@ -251,8 +252,8 @@ def UpdateAdsSearchTermStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
-    now_la = datetime.now(LA_TZ)
-    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_local = datetime.now(SYSTEM_TZ)
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
 
     if request.args.get("start_date"):
         start_date = request.args["start_date"]
@@ -269,7 +270,7 @@ def UpdateAdsSearchTermStats(request):
             last_date = last_recorded_date(token, "ads_search_term_stats")
             if last_date:
                 gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                floor_date = (now_local - timedelta(days=31)).strftime("%Y-%m-%d")
                 start_date = max(gap_start, floor_date)
                 end_date = yesterday
         except Exception:
@@ -293,6 +294,7 @@ def GetAdsSearchTermStats(request):
     end_date = request.args.get("end_date") if hasattr(request, "args") else None
     country_code = request.args.get("country_code") if hasattr(request, "args") else None
     campaign_id = request.args.get("campaign_id") if hasattr(request, "args") else None
+    portfolio = request.args.get("portfolio") if hasattr(request, "args") else None
 
     if not start_date or not end_date:
         start_date, end_date = default_previous_month_range()
@@ -304,6 +306,28 @@ def GetAdsSearchTermStats(request):
             filter_str += f' && country_code = "{country_code}"'
         if campaign_id:
             filter_str += f' && campaign_id = "{campaign_id}"'
+
+        # The manual search-term CSV import never captured ad_group_name
+        # (unlike the live-pulled keyword/advertised-product pipelines,
+        # which do) - backfill it from ads_advertised_product_stats, which
+        # shares the same ad_group_id values and does have real names.
+        ad_group_names = {}
+        ag_page = 1
+        while True:
+            ag_resp = requests.get(
+                f"{POCKETBASE_URL}/api/collections/ads_advertised_product_stats/records",
+                headers={"Authorization": token},
+                params={"perPage": 500, "page": ag_page, "fields": "ad_group_id,ad_group_name"},
+                timeout=60,
+            )
+            ag_resp.raise_for_status()
+            ag_data = ag_resp.json()
+            for row in ag_data.get("items", []):
+                if row.get("ad_group_id") and row.get("ad_group_name"):
+                    ad_group_names[row["ad_group_id"]] = row["ad_group_name"]
+            if ag_page >= ag_data.get("totalPages", 1):
+                break
+            ag_page += 1
 
         terms = {}
         page = 1
@@ -329,7 +353,7 @@ def GetAdsSearchTermStats(request):
                     "campaignId": item.get("campaign_id"),
                     "campaignName": item.get("campaign_name", ""),
                     "adGroupId": item.get("ad_group_id", ""),
-                    "adGroupName": item.get("ad_group_name", ""),
+                    "adGroupName": item.get("ad_group_name") or ad_group_names.get(item.get("ad_group_id"), ""),
                     "targetText": item.get("target_text", ""),
                     "matchType": item.get("match_type", ""),
                     "searchTerm": item.get("search_term", ""),
@@ -354,11 +378,23 @@ def GetAdsSearchTermStats(request):
                 break
             page += 1
 
-        rows = sorted(terms.values(), key=lambda t: -t["spend"])
+        campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        rows = list(terms.values())
+        for row in rows:
+            row["portfolioName"] = campaign_to_portfolio.get(row["campaignId"], "")
+        if portfolio:
+            rows = [r for r in rows if r["portfolioName"] == portfolio]
+
+        rows.sort(key=lambda t: -t["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_nameDate", None)
 
-        return json_response({"startDate": start_date, "endDate": end_date, "searchTerms": rows})
+        return json_response({
+            "startDate": start_date,
+            "endDate": end_date,
+            "searchTerms": rows,
+            "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
+        })
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)

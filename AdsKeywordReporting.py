@@ -12,6 +12,7 @@ from AdsReporting import (
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
+    fetch_campaign_to_portfolio_name,
     last_recorded_date,
     pb_authenticate,
     pb_batch,
@@ -20,7 +21,7 @@ from AdsReporting import (
     request_campaign_report,
 )
 
-LA_TZ = ZoneInfo("America/Los_Angeles")
+SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")  # matches this machine's local cron timezone, not Amazon's
 POCKETBASE_ADS_KEYWORD_COLLECTION = os.environ.get("POCKETBASE_ADS_KEYWORD_COLLECTION", "ads_keyword_stats")
 
 REPORT_POLL_ROUNDS = 165
@@ -274,8 +275,8 @@ def UpdateAdsKeywordStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
-    now_la = datetime.now(LA_TZ)
-    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_local = datetime.now(SYSTEM_TZ)
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
 
     if request.args.get("start_date"):
         start_date = request.args["start_date"]
@@ -285,13 +286,13 @@ def UpdateAdsKeywordStats(request):
         # max range) rather than a fixed trailing 7 days, so a missed
         # weekly run gets backfilled automatically by the next one instead
         # of silently losing whatever fell outside the fixed window.
-        start_date = (now_la - timedelta(days=7)).strftime("%Y-%m-%d")
+        start_date = (now_local - timedelta(days=7)).strftime("%Y-%m-%d")
         try:
             token = pb_authenticate()
             last_date = last_recorded_date(token, "ads_keyword_stats")
             if last_date:
                 gap_start = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                floor_date = (now_local - timedelta(days=31)).strftime("%Y-%m-%d")
                 start_date = max(gap_start, floor_date)
         except Exception:
             pass
@@ -315,13 +316,14 @@ def GetAdsKeywordStats(request):
     end_date = request.args.get("end_date") if hasattr(request, "args") else None
     country_code = request.args.get("country_code") if hasattr(request, "args") else None
     campaign_id = request.args.get("campaign_id") if hasattr(request, "args") else None
+    portfolio = request.args.get("portfolio") if hasattr(request, "args") else None
 
     if not start_date or not end_date:
         # Back-compat: no explicit range means "this month".
         month = request.args.get("month", type=int) if hasattr(request, "args") else None
         year = request.args.get("year", type=int) if hasattr(request, "args") else None
-        now_la = datetime.now(LA_TZ)
-        month, year = month or now_la.month, year or now_la.year
+        now_local = datetime.now(SYSTEM_TZ)
+        month, year = month or now_local.month, year or now_local.year
         start_date = f"{year:04d}-{month:02d}-01"
         next_month_first = datetime(year + (month == 12), (month % 12) + 1, 1)
         end_date = (next_month_first - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -391,12 +393,24 @@ def GetAdsKeywordStats(request):
                 break
             page += 1
 
-        rows = sorted(keywords.values(), key=lambda k: -k["spend"])
+        campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        rows = list(keywords.values())
+        for row in rows:
+            row["portfolioName"] = campaign_to_portfolio.get(row["campaignId"], "")
+        if portfolio:
+            rows = [r for r in rows if r["portfolioName"] == portfolio]
+
+        rows.sort(key=lambda k: -k["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_bidDate", None)
             row.pop("_nameDate", None)
 
-        return json_response({"startDate": start_date, "endDate": end_date, "keywords": rows})
+        return json_response({
+            "startDate": start_date,
+            "endDate": end_date,
+            "keywords": rows,
+            "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
+        })
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)

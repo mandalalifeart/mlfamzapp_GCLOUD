@@ -370,6 +370,20 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
     if not decision:
         return None
     change_pct, kind, actual_acos = decision
+    capped_decision_change_pct = change_pct  # before any trend/last-change dampening below
+
+    calc_steps = []
+    if kind == "acos":
+        deviation_pct = (actual_acos - target_acos) / target_acos * 100
+        raw_change_pct = -deviation_pct
+        cap_note = f", capped at ±{max_change_pct:.0f}%" if abs(raw_change_pct) > max_change_pct else ""
+        calc_steps.append(
+            f"{decision_label} ACOS {actual_acos:.1f}% is {abs(deviation_pct):.0f}% "
+            f"{'above' if deviation_pct > 0 else 'below'} the {target_acos:.0f}% target -> "
+            f"raw change {raw_change_pct:+.1f}%{cap_note} -> {capped_decision_change_pct:+.1f}%"
+        )
+    else:
+        calc_steps.append(f"{decision_label}: $0 sales on real spend -> flat {-change_pct:.0f}% cut, no ACOS math involved")
 
     notes = []
     if kind == "acos":
@@ -385,6 +399,10 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
                 change_pct = change_pct * TREND_DAMPEN_PCT / 100
                 shift = "improving" if abs(recent_deviation) < abs(decision_deviation) else "reversing"
                 notes.append(f"7d trend {shift} ({recent_acos:.1f}%) - dampened")
+                calc_steps.append(
+                    f"7d ACOS {recent_acos:.1f}% disagrees with {decision_label}'s direction ({shift}) -> "
+                    f"dampened to {TREND_DAMPEN_PCT:.0f}% of that = {change_pct:+.1f}%"
+                )
 
         # "New problem or long-standing" signal vs the baseline window.
         if decision_label == "30d" and row60["spend"] >= min_spend and row60["sales"] > 0:
@@ -405,11 +423,22 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
                     f"already {prev_direction} on {last_change['changed_at']} "
                     f"(${last_change['old_bid']:.2f}→${last_change['new_bid']:.2f}) - ACOS still off, dampened"
                 )
+                calc_steps.append(
+                    f"already {prev_direction} on {last_change['changed_at']}, same direction again -> "
+                    f"dampened to {TREND_DAMPEN_PCT:.0f}% of that = {change_pct:+.1f}%"
+                )
 
     new_bid = round(current_bid * (1 + change_pct / 100), 2)
     new_bid = max(min_bid, min(max_bid, new_bid))
     if new_bid == current_bid:
         return None
+
+    clamp_note = ""
+    if round(current_bid * (1 + change_pct / 100), 2) != new_bid:
+        clamp_note = f", clamped to bid range [${min_bid:.2f}, ${max_bid:.2f}]"
+    calc_steps.append(
+        f"final change {change_pct:+.1f}% -> ${current_bid:.2f} -> ${new_bid:.2f}{clamp_note}"
+    )
 
     note_suffix = f" ({'; '.join(notes)})" if notes else ""
     if kind == "zero_sales":
@@ -420,12 +449,40 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
         reason = (f"ACOS {actual_acos:.1f}% vs target {target_acos:.1f}% ({decision_label}){label_note} - "
                   f"{direction} bid {abs(change_pct):.0f}%{note_suffix}")
 
+    def period_summary(row):
+        """Each period's own raw contribution is purely informational (what
+        THAT window alone would suggest, capped the same way the real
+        decision is) - never a decision input itself except for whichever
+        window was actually picked as decision_row above."""
+        acos = round(row["spend"] / row["sales"] * 100, 1) if row["sales"] else None
+        contribution = None
+        if acos is not None:
+            deviation = (acos - target_acos) / target_acos * 100
+            suggested = max(-max_change_pct, min(max_change_pct, -deviation))
+            contribution = {"deviationPct": round(deviation, 1), "suggestedChangePct": round(suggested, 1)}
+        return {
+            "spend": round(row["spend"], 2),
+            "sales": round(row["sales"], 2),
+            "clicks": row["clicks"],
+            "cpc": round(row["spend"] / row["clicks"], 2) if row["clicks"] else None,
+            "acos": acos,
+            "contribution": contribution,
+        }
+
+    last_change_note = next((n for n in notes if n.startswith("already")), None)
+    trend_note = next((n for n in notes if not n.startswith("already")), None)
+
     return {
         **decision_row,
         "actualAcos": round(actual_acos, 1) if actual_acos is not None else None,
         "reason": reason,
         "currentBid": current_bid,
         "proposedBid": new_bid,
+        "periods": {"7d": period_summary(row7), "30d": period_summary(row30), "60d": period_summary(row60)},
+        "decisionWindow": decision_label,
+        "trendNote": trend_note,
+        "lastChangeNote": last_change_note,
+        "calculation": calc_steps,
     }
 
 
@@ -501,14 +558,65 @@ def RunBidOptimizerDryRun(request):
         if multi_period:
             recent_start = (now_la - timedelta(days=attribution_lag_days + recent_days)).strftime("%Y-%m-%d")
             baseline_start = (now_la - timedelta(days=attribution_lag_days + baseline_days)).strftime("%Y-%m-%d")
+            year_start = f"{now_la.year:04d}-01-01"
 
-            # One fetch over the widest (baseline) window, then aggregate it
-            # 3 different ways in-memory - not 3 separate network round
-            # trips (see fetch_keyword_raw_rows for why this matters).
-            raw_rows = fetch_keyword_raw_rows(token, baseline_start, end_date, country_code)
+            # One fetch over the widest window this year needs (YTD, which
+            # is always >= the baseline window) covers the 60d/30d/7d/YTD
+            # aggregates below without 4 separate network round trips - same
+            # reasoning as the original single-baseline-fetch fix.
+            raw_rows = fetch_keyword_raw_rows(token, min(year_start, baseline_start), end_date, country_code)
             rows30 = with_portfolio(aggregate_keyword_rows(raw_rows, start_date, end_date))
             rows7 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, recent_start, end_date)}
             rows60 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, baseline_start, end_date)}
+            rows_year_this = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, year_start, end_date)}
+
+            # Same-day-of-year comparison a year back, added 2026-08-31 at
+            # the user's request - one separate fetch (this range has no
+            # overlap with the one above) covering last year's YTD-
+            # equivalent, from which the 60d/30d/7d/year sub-windows are
+            # aggregated the same in-memory way. As of this build,
+            # ads_keyword_stats has no rows before 2026-01-01 at all, so
+            # every lastYear cell below will legitimately come back empty
+            # until real prior-year history accumulates - that's a real
+            # data gap, not a bug, and the frontend shows it as "no data"
+            # rather than a misleading 0.
+            a_year_ago = now_la - timedelta(days=365)  # plain 365-day shift, not .replace(year=) - sidesteps Feb 29 edge cases
+            last_year = a_year_ago.year
+            last_year_end = (a_year_ago - timedelta(days=attribution_lag_days)).strftime("%Y-%m-%d")
+            last_year_60_start = (a_year_ago - timedelta(days=attribution_lag_days + baseline_days)).strftime("%Y-%m-%d")
+            last_year_30_start = (a_year_ago - timedelta(days=attribution_lag_days + lookback_days)).strftime("%Y-%m-%d")
+            last_year_7_start = (a_year_ago - timedelta(days=attribution_lag_days + recent_days)).strftime("%Y-%m-%d")
+            last_year_start = f"{last_year:04d}-01-01"
+            raw_rows_last_year = fetch_keyword_raw_rows(token, last_year_start, last_year_end, country_code)
+            rows_year_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_start, last_year_end)}
+            rows60_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_60_start, last_year_end)}
+            rows30_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_30_start, last_year_end)}
+            rows7_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_7_start, last_year_end)}
+
+            def yoy_cell(row):
+                """Same shape (and same contribution math) as period_summary
+                above, reused here for This Year/Last Year x Year/60d/30d/7d
+                so the frontend's comparison table can show the same level
+                of detail (spend/clicks/sales/ACOS/contribution) that used
+                to live in a separate set of period-summary lines, before
+                those were folded into this table per the user's request."""
+                if not row or not row.get("spend"):
+                    return None
+                acos = round(row["spend"] / row["sales"] * 100, 1) if row.get("sales") else None
+                contribution = None
+                if acos is not None:
+                    deviation = (acos - target_acos) / target_acos * 100
+                    suggested = max(-max_change_pct, min(max_change_pct, -deviation))
+                    contribution = {"deviationPct": round(deviation, 1), "suggestedChangePct": round(suggested, 1)}
+                clicks = row.get("clicks", 0)
+                return {
+                    "spend": round(row["spend"], 2),
+                    "sales": round(row.get("sales", 0), 2),
+                    "clicks": clicks,
+                    "cpc": round(row["spend"] / clicks, 2) if clicks else None,
+                    "acos": acos,
+                    "contribution": contribution,
+                }
 
             targets_evaluated = len(rows60) if rows60 else len(rows30)
             for row30 in rows30:
@@ -527,6 +635,12 @@ def RunBidOptimizerDryRun(request):
                 if target_id in recently_changed_ids:
                     skipped_recently_changed += 1
                     continue
+                proposal["yearOverYear"] = {
+                    "year": {"thisYear": yoy_cell(rows_year_this.get(target_id)), "lastYear": yoy_cell(rows_year_last.get(target_id))},
+                    "60d": {"thisYear": yoy_cell(row60), "lastYear": yoy_cell(rows60_last.get(target_id))},
+                    "30d": {"thisYear": yoy_cell(row30), "lastYear": yoy_cell(rows30_last.get(target_id))},
+                    "7d": {"thisYear": yoy_cell(row7), "lastYear": yoy_cell(rows7_last.get(target_id))},
+                }
                 proposals.append(proposal)
         else:
             raw_rows = fetch_keyword_raw_rows(token, start_date, end_date, country_code)

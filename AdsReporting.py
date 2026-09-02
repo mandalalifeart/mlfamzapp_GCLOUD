@@ -26,7 +26,7 @@ POCKETBASE_ADS_CAMPAIGNS_COLLECTION = os.environ.get("POCKETBASE_ADS_CAMPAIGNS_C
 POCKETBASE_BATCH_SIZE = int(os.environ.get("POCKETBASE_BATCH_SIZE", "50"))
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
-LA_TZ = ZoneInfo("America/Los_Angeles")
+SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")  # matches this machine's local cron timezone, not Amazon's
 
 # Sponsored Products' reporting columns use a "7d" attribution-window suffix
 # (purchases7d/sales7d); Sponsored Brands and Sponsored Display don't - both
@@ -337,6 +337,16 @@ def fetch_sd_campaigns(base_url, access_token, client_id, ads_profile_id):
 
 CAMPAIGN_LIST_FETCHERS = {"SP": fetch_sp_campaigns, "SB": fetch_sb_campaigns, "SD": fetch_sd_campaigns}
 
+# The connected EU Ads profiles point at the wrong/outdated Advertiser
+# Account (see the "connected EU Ads profiles are the WRONG/outdated ones"
+# finding elsewhere in this project) - this account can only see a handful
+# of dormant 2017-2018 campaigns, none of which match anything real. Until
+# the user reconnects the correct EU account, the daily live sync would
+# otherwise keep re-adding these 3 stale DE campaigns (deleted by hand
+# 2026-09-01, along with their all-zero ads_campaign_stats rows) on top of
+# the real EU data that comes in via manual CSV import instead.
+DORMANT_EU_CAMPAIGN_IDS = {"44989766810586", "232322994909679", "228633766650288"}
+
 POCKETBASE_ADS_PORTFOLIOS_COLLECTION = os.environ.get("POCKETBASE_ADS_PORTFOLIOS_COLLECTION", "ads_portfolios")
 
 
@@ -513,6 +523,8 @@ def pull_and_store_campaign_lists(pb_token, connections, errors):
                     time.sleep(1)
                     continue
                 for c in campaigns:
+                    if str(c.get("campaign_id")) in DORMANT_EU_CAMPAIGN_IDS:
+                        continue
                     profile_campaigns.append({
                         **c,
                         "profile_id": str(ads_profile_id),
@@ -957,8 +969,8 @@ def UpdateAdsCampaignStats(request):
     if ADMIN_KEY and request.args.get("key") != ADMIN_KEY:
         return json_response({"error": "Unauthorized"}, 401)
 
-    now_la = datetime.now(LA_TZ)
-    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_local = datetime.now(SYSTEM_TZ)
+    yesterday = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
 
     if request.args.get("start_date"):
         # Explicit range requested (e.g. a manual backfill) - unchanged behavior.
@@ -978,7 +990,7 @@ def UpdateAdsCampaignStats(request):
                 # Amazon's Reporting API caps a single request at 31 days -
                 # if the gap is bigger than that, just take the most recent
                 # 31 days; anything older needs a manual backfill anyway.
-                floor_date = (now_la - timedelta(days=31)).strftime("%Y-%m-%d")
+                floor_date = (now_local - timedelta(days=31)).strftime("%Y-%m-%d")
                 start_date = max(gap_start, floor_date)
         except Exception:
             pass  # fall back to "just yesterday" if the catch-up lookup itself fails
@@ -1003,8 +1015,8 @@ def GetAdsAccountSummary(request):
     month = request.args.get("month", type=int) if hasattr(request, "args") else None
     year = request.args.get("year", type=int) if hasattr(request, "args") else None
     if not month or not year:
-        now_la = datetime.now(LA_TZ)
-        month, year = month or now_la.month, year or now_la.year
+        now_local = datetime.now(SYSTEM_TZ)
+        month, year = month or now_local.month, year or now_local.year
 
     try:
         token = pb_authenticate()
@@ -1058,8 +1070,8 @@ def GetAdsCampaignStats(request):
         # the frontend used before the date-range picker was added.
         month = request.args.get("month", type=int) if hasattr(request, "args") else None
         year = request.args.get("year", type=int) if hasattr(request, "args") else None
-        now_la = datetime.now(LA_TZ)
-        month, year = month or now_la.month, year or now_la.year
+        now_local = datetime.now(SYSTEM_TZ)
+        month, year = month or now_local.month, year or now_local.year
         start_date = f"{year:04d}-{month:02d}-01"
         next_month_first = datetime(year + (month == 12), (month % 12) + 1, 1)
         end_date = (next_month_first - timedelta(days=1)).strftime("%Y-%m-%d")

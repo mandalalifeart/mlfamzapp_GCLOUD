@@ -29,13 +29,22 @@ run_deploy() {
 
   gcloud config set project "$PROJECT_ID" >/dev/null
 
-  # sync secrets to Secret Manager (creates on first run, adds a new version every deploy)
+  # sync secrets to Secret Manager (creates on first run, adds a new version
+  # only if the value actually changed - Secret Manager bills per active
+  # version/month, and adding one unconditionally on every deploy caused a
+  # real cost problem: 27 secrets accumulated ~1,769 versions across this
+  # project's deploy history since nothing ever cleaned up the old ones).
   secrets_flag=""
   for var in "${required_vars[@]}"; do
     if ! gcloud secrets describe "$var" >/dev/null 2>&1; then
       gcloud secrets create "$var" --replication-policy=automatic >/dev/null
+      printf '%s' "${!var}" | gcloud secrets versions add "$var" --data-file=- >/dev/null
+    else
+      current_value=$(gcloud secrets versions access latest --secret="$var" 2>/dev/null || echo "")
+      if [[ "$current_value" != "${!var}" ]]; then
+        printf '%s' "${!var}" | gcloud secrets versions add "$var" --data-file=- >/dev/null
+      fi
     fi
-    printf '%s' "${!var}" | gcloud secrets versions add "$var" --data-file=- >/dev/null
     secrets_flag+="${var}=${var}:latest,"
   done
   secrets_flag="${secrets_flag%,}"

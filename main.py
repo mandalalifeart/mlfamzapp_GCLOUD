@@ -53,6 +53,11 @@ def GetAwdInventory(request):
     return _impl(request)
 
 
+def UpdateUsaInventory(request):
+    from UpdateUsaInventory import UpdateUsaInventory as _impl
+    return _impl(request)
+
+
 def AdsOAuthCallback(request):
     from AdsAuth import AdsOAuthCallback as _impl
     return _impl(request)
@@ -287,6 +292,21 @@ def ApplyBidChange(request):
     return _impl(request)
 
 
+def DisableBidTarget(request):
+    from AdsBidWriter import DisableBidTarget as _impl
+    return _impl(request)
+
+
+def PauseProductAd(request):
+    from AdsBidWriter import PauseProductAd as _impl
+    return _impl(request)
+
+
+def EnableProductAd(request):
+    from AdsBidWriter import EnableProductAd as _impl
+    return _impl(request)
+
+
 def GetBidRuleProfiles(request):
     from AdsBidRuleProfiles import GetBidRuleProfiles as _impl
     return _impl(request)
@@ -314,4 +334,19 @@ def UpdateAdsAdvertisedProductStats(request):
 
 def GetAdsAdvertisedProductStats(request):
     from AdsAdvertisedProductReporting import GetAdsAdvertisedProductStats as _impl
+    return _impl(request)
+
+
+def UpdateCountryPpcDaily(request):
+    from UpdateCountryPpcDaily import UpdateCountryPpcDaily as _impl
+    return _impl(request)
+
+
+def SendDailyAdsDigest(request):
+    from DailyAdsPerformanceDigest import SendDailyAdsDigest as _impl
+    return _impl(request)
+
+
+def GetCountryPpcDaily(request):
+    from UpdateCountryPpcDaily import GetCountryPpcDaily as _impl
     return _impl(request)

@@ -35,6 +35,11 @@ UI_MARKETPLACE_TO_ATOMIC = {
     "ie": {"ie"},
     "pl": {"pl"},
     "eu": {"eu"},
+    # ca/mex exist in country_sales from the historical bulk import (see
+    # CLAUDE.md) but were never exposed via any UI dropdown - added here
+    # specifically so USA can expand into USA/CA/MEX sub-rows.
+    "ca": {"ca"},
+    "mex": {"mex"},
     # Etsy (added 2026-08-26) - deliberately NOT in ALL_UI_MARKETPLACES below,
     # so "All marketplaces" stays Amazon-only; each is only reachable by an
     # explicit selection, same as how ca/mex are present in country_sales but
@@ -67,6 +72,8 @@ MARKETPLACE_CURRENCY = {
     "jp": "JPY",
     "au": "AUD",
     "eu": "EUR",
+    "ca": "CAD",
+    "mex": "MXN",
     # Etsy receipts are always in the shop's own currency regardless of the
     # buyer's country/marketplace bucket (USD for this shop) - unlike Amazon,
     # there's no per-marketplace local currency to track here.
@@ -294,6 +301,11 @@ def build_summary(records, atomic_marketplaces, years, current_month):
         "quantity": make_metric(quantity_year_months),
         "sales": make_metric(sales_year_months_final, round_decimals=2),
         "netSales": make_metric(net_sales_year_months, round_decimals=2),
+        # Raw PPC spend/sales as their own metrics (previously only used
+        # internally for acos/tacos/netSales) - added for the collapsible
+        # per-country breakdown, which shows these as their own line items.
+        "ppcSpend": make_metric(ppc_spend_year_months_final, round_decimals=2),
+        "ppcSales": make_metric(ppc_sales_year_months_final, round_decimals=2),
         # ACOS = PPC spend as a % of PPC-attributed sales (industry-standard
         # definition). TACoS = PPC spend as a % of TOTAL sales (organic +
         # PPC) - a broader "how much of all revenue went to ad spend" view.
@@ -335,6 +347,8 @@ def GetMarketplaceSalesSummary(request):
             "quantity": summary["quantity"],
             "sales": summary["sales"],
             "netSales": summary["netSales"],
+            "ppcSpend": summary["ppcSpend"],
+            "ppcSales": summary["ppcSales"],
             "acos": summary["acos"],
             "tacos": summary["tacos"],
             "salesCurrency": summary["salesCurrency"],

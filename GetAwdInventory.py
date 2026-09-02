@@ -26,9 +26,6 @@ def GetAwdInventory(request):
     if request.method != "POST":
         return json_response({"error": "Method not allowed"}, 405)
 
-    # Diagnostic first pass: confirm the installed python-amazon-sp-api build
-    # actually exposes an AWD client before wiring up the real call - the
-    # class/module name isn't confirmed yet.
     try:
         from sp_api.api import AmazonWarehousingAndDistribution
         from sp_api.base import Marketplaces
@@ -40,14 +37,24 @@ def GetAwdInventory(request):
         }
         client = AmazonWarehousingAndDistribution(credentials=credentials, marketplace=Marketplaces.US)
 
+        # maxResults must be passed explicitly - Amazon silently defaults to
+        # 25 with no nextToken at all when omitted (confirmed 2026-08-31:
+        # this account has 91 real AWD SKUs, matching Seller Central's own
+        # AWD inventory list, but omitting maxResults returned exactly 25
+        # with the response's "inventory" key as the only top-level key -
+        # no pagination signal that more existed). nextToken (top-level on
+        # the response, not nested under "pagination") is still honored
+        # below for any future page beyond one maxResults=200 batch.
         inventory = []
         next_token = None
         while True:
-            kwargs = {"nextToken": next_token} if next_token else {}
+            kwargs = {"maxResults": 200}
+            if next_token:
+                kwargs["nextToken"] = next_token
             response = client.list_inventory(**kwargs)
             payload = response.payload or {}
             inventory.extend(payload.get("inventory", []))
-            next_token = payload.get("pagination", {}).get("nextToken")
+            next_token = payload.get("nextToken")
             if not next_token:
                 break
 
