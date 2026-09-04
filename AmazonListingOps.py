@@ -60,6 +60,11 @@ MARKETPLACE_CONFIG = {
     "FR": ("EU", "FR", EU_SELLER_ID),
     "IT": ("EU", "IT", EU_SELLER_ID),
     "ES": ("EU", "ES", EU_SELLER_ID),
+    "NL": ("EU", "NL", EU_SELLER_ID),
+    "BE": ("EU", "BE", EU_SELLER_ID),
+    "PL": ("EU", "PL", EU_SELLER_ID),
+    "SE": ("EU", "SE", EU_SELLER_ID),
+    "IE": ("EU", "IE", EU_SELLER_ID),
 }
 
 

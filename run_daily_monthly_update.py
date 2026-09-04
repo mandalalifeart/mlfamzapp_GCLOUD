@@ -6,6 +6,17 @@ the UI. On the 1st of the month, targets *last* month instead of this one,
 since day 1 of a new month has no data of its own yet and this is the first
 automated chance to close last month out with its truly final numbers.
 
+Only 2 reports are ever needed, not one per marketplace - Amazon bundles all
+of North America into the "usa" report and the whole EU region (including
+the UK) into the "de" report, and every order is tagged by its own embedded
+SalesChannel (see UpdateSkuSalesMonth.build_db_rows/DB_MARKETPLACE_MAP), so
+ca/mex/uk/every individual EU country each already get their own
+correctly-tagged rows for free. Confirmed live 2026-09-04 (228 real
+amazon.co.uk orders already present in a single "de" report pull) - a UK
+report was briefly, mistakenly requested as its own 3rd report alongside
+usa/de; that would have double-counted every UK order (once from "de",
+once from the redundant "uk" report) and was reverted before ever running.
+
 Mirrors BatchUpdatePage.jsx's request -> poll -> update sequence exactly
 (same endpoints, same 12-attempt/30s poll), just called from Python via the
 already-running local API server instead of the browser - see CLAUDE.md's

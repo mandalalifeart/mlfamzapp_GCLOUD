@@ -21,7 +21,11 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 # too rather than re-summed from the individual countries (which would
 # double-count going forward, since the two are written independently).
 UI_MARKETPLACE_TO_ATOMIC = {
-    "usa": {"usa"},
+    # Canada/Mexico (historical-bulk-import-only, never their own UI
+    # marketplace - see CLAUDE.md) are folded into "usa" per the user's
+    # explicit request (2026-09-04). sku_sales has no money field
+    # (quantity-only), so this is a plain quantity merge, no currency risk.
+    "usa": {"usa", "ca", "mex"},
     "uk": {"uk"},
     "jp": {"jp"},
     "au": {"au"},

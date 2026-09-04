@@ -21,7 +21,12 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 # too rather than re-summed from the individual countries (which would
 # double-count going forward, since the two are written independently).
 UI_MARKETPLACE_TO_ATOMIC = {
-    "usa": {"usa"},
+    # Canada/Mexico are folded into "usa" per the user's explicit request
+    # (2026-09-04) rather than left invisible - build_summary already
+    # buckets sales by currency and blends to USD when more than one
+    # currency is present, so mixing USD/CAD/MXN rows into "usa" here is
+    # handled correctly, not a raw-sum currency-mixing bug.
+    "usa": {"usa", "ca", "mex"},
     "uk": {"uk"},
     "jp": {"jp"},
     "au": {"au"},

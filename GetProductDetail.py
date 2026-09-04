@@ -21,6 +21,17 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 # per-country "de" stock figure used below for the stock-level row.
 DETAIL_MARKETPLACES = ["usa", "eu", "uk"]
 
+# Canada/Mexico sku_sales rows (from the historical bulk import, never their
+# own UI marketplace - see CLAUDE.md) are folded into "usa" per the user's
+# explicit request (2026-09-04), rather than shown as their own bucket or
+# left invisible. sku_sales has no money field (quantity-only), so this is a
+# plain quantity merge with no currency-mixing concern.
+DETAIL_MARKETPLACE_ATOMIC = {
+    "usa": {"usa", "ca", "mex"},
+    "eu": {"eu"},
+    "uk": {"uk"},
+}
+
 
 def cors_headers():
     return {
@@ -143,7 +154,8 @@ def GetProductDetail(request):
 
         marketplaces = {}
         for mp in DETAIL_MARKETPLACES:
-            mp_records = [r for r in sales_records if r.get("marketplace") == mp]
+            atomic = DETAIL_MARKETPLACE_ATOMIC[mp]
+            mp_records = [r for r in sales_records if r.get("marketplace") in atomic]
             year_rows, growth_pct = build_year_rows(mp_records, years, current_month)
             marketplaces[mp] = {"yearRows": year_rows, "growthPct": growth_pct}
 

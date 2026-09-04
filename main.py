@@ -143,6 +143,11 @@ def UpdateEtsyListingContent(request):
     return _impl(request)
 
 
+def CreateEtsyListing(request):
+    from EtsyListingCreate import CreateEtsyListing as _impl
+    return _impl(request)
+
+
 def MonitorEtsyExperiments(request):
     from EtsyListingExperiments import MonitorEtsyExperiments as _impl
     return _impl(request)

@@ -23,6 +23,12 @@ REGION_CONFIGS = {
         "refresh_token_env": "REFRESH_TOKEN_EU",
         "marketplace": Marketplaces.DE,
     },
+    # No "uk" entry - confirmed live 2026-09-04 that Amazon already bundles
+    # UK orders into the "de" report via SalesChannel="amazon.co.uk" (228
+    # real orders seen in a single de-report pull), so a dedicated UK region
+    # would only duplicate/double-count data already present in "de". See
+    # ReportViewPage.jsx's ukSummary (derived from deResponse) and the
+    # "AmzBot: report-view UK region" CLAUDE.md note.
 }
 
 
