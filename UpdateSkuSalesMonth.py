@@ -20,12 +20,18 @@ EU_MARKETPLACE_CURRENCY = {
 
 # ads_campaign_stats.country_code (from Amazon's own Ads reports) -> the
 # lowercase marketplace codes country_sales already uses everywhere else.
+# NL/SE/PL/BE/IE added 2026-09-04 - were silently missing (any ads spend/
+# sales for these 5 EU countries was dropped by the `if not marketplace_code:
+# continue` branch in fetch_ppc_totals_by_country, never reaching
+# country_sales at all) - caught once the EU ads_connections profile-list
+# fix (see CLAUDE.md) started surfacing real data for these countries too.
 ADS_COUNTRY_TO_MARKETPLACE = {
     "US": "usa", "UK": "uk", "DE": "de", "FR": "fr", "IT": "it", "ES": "es",
     "CA": "ca", "MX": "mex", "JP": "jp",
+    "NL": "nl", "SE": "se", "PL": "pl", "BE": "be", "IE": "ie",
 }
 
-FX_API_URL = "https://api.frankfurter.app"
+FX_API_URL = "https://api.frankfurter.dev/v1"
 # Only used if the historical FX API call fails, so a month can still be
 # processed instead of erroring out - approximate rates, not kept precise.
 FALLBACK_EUR_RATES = {"SEK": 0.088, "PLN": 0.23}

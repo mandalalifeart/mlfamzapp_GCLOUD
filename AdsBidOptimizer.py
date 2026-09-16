@@ -84,7 +84,7 @@ def pb_authenticate():
     return response.json()["token"]
 
 
-def fetch_keyword_raw_rows(token, start_date, end_date, country_code=None):
+def fetch_keyword_raw_rows(token, start_date, end_date, country_code=None, profile_id=None):
     """Fetches un-aggregated per-day rows (kept as their own copy rather
     than importing across files - see aggregate_keyword_rows below).
     Split out from the aggregation step 2026-08-29: the multi-period
@@ -96,6 +96,8 @@ def fetch_keyword_raw_rows(token, start_date, end_date, country_code=None):
     filter_str = f'(date >= "{start_date}" && date <= "{end_date}")'
     if country_code:
         filter_str += f' && country_code = "{country_code}"'
+    if profile_id:
+        filter_str += f' && profile_id = "{profile_id}"'
 
     rows = []
     page = 1
@@ -126,7 +128,17 @@ def aggregate_keyword_rows(raw_rows, start_date, end_date):
     """Same aggregation shape as GetAdsKeywordStats (sum impressions/clicks/
     spend/sales/orders per target_id, keep the most recent bid) - pure
     in-memory, filters raw_rows (already fetched) down to [start_date,
-    end_date] first so the same fetch can back several different windows."""
+    end_date] first so the same fetch can back several different windows.
+
+    Keyed WITH profile_id (de-duped in a second pass below) - per the
+    user's correction (2026-09-06): the same real campaign/ad group/target
+    can be reported under more than one Amazon Ads profile for this
+    account, and it's the SAME underlying campaign in both, not two
+    independent ones - so their numbers must not be summed together (a
+    real risk here specifically, since this feeds the proposed bid a real
+    Apply call acts on). Exactly one profile's own numbers are kept,
+    whichever has the most recent activity - the other is discarded
+    entirely, not blended in."""
     targets = {}
     for item in raw_rows:
         item_date = item.get("date", "")
@@ -145,14 +157,16 @@ def aggregate_keyword_rows(raw_rows, start_date, end_date):
             "adProduct": item.get("ad_product", ""),
             "countryCode": item.get("country_code", ""),
             "impressions": 0, "clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0,
-            "bid": None, "_bidDate": "", "_nameDate": "",
+            "bid": None, "bidUnverified": False, "_bidDate": "", "_nameDate": "", "_lastDate": "",
         })
         bucket["impressions"] += item.get("impressions", 0)
         bucket["clicks"] += item.get("clicks", 0)
         bucket["spend"] += item.get("spend", 0) or 0
         bucket["sales"] += item.get("sales", 0) or 0
         bucket["orders"] += item.get("orders", 0)
-        if item.get("bid") is not None and item_date >= bucket["_bidDate"]:
+        # A stored 0 means "unknown" (see propose_bid_change's comment),
+        # never a real bid - never let it overwrite an actually-known one.
+        if item.get("bid") and item_date >= bucket["_bidDate"]:
             bucket["bid"] = item.get("bid")
             bucket["_bidDate"] = item_date
         # campaignName can change mid-window if the campaign gets renamed -
@@ -160,11 +174,43 @@ def aggregate_keyword_rows(raw_rows, start_date, end_date):
         if item.get("campaign_name") and item_date >= bucket["_nameDate"]:
             bucket["campaignName"] = item.get("campaign_name")
             bucket["_nameDate"] = item_date
+        bucket["_lastDate"] = max(bucket["_lastDate"], item_date)
 
+    # When the same real campaign/ad group/target came back under more
+    # than one profile_id, keep only whichever profile has the most
+    # recent activity - not a sum of both.
+    winners = {}
+    candidates_by_outer = {}
     for bucket in targets.values():
+        outer_key = (bucket["campaignId"], bucket["adGroupId"], bucket["targetId"])
+        candidates_by_outer.setdefault(outer_key, []).append(bucket)
+        current = winners.get(outer_key)
+        if current is None or bucket["_lastDate"] > current["_lastDate"]:
+            winners[outer_key] = bucket
+    # The winning profile can be the legacy-SB-sourced one (see
+    # AdsKeywordReporting.pull_and_store_legacy_sb_keyword_stats), which has
+    # no real bid at all - found live 2026-09-06. Backfill it from a losing
+    # candidate that actually has one, without touching the winner's own
+    # real (and more current) metrics - matters here specifically since bid
+    # feeds a real Apply call. bidUnverified marks that this bid is
+    # whatever a possibly-old historical row last reported, not confirmed
+    # current - per the user (2026-09-06), Apply is blocked entirely in
+    # that case (see the check below), since the % change would be
+    # calculated from a baseline that might not be real anymore.
+    for outer_key, winner in winners.items():
+        if winner["bid"]:
+            continue
+        for candidate in candidates_by_outer[outer_key]:
+            if candidate is not winner and candidate["bid"]:
+                winner["bid"] = candidate["bid"]
+                winner["bidUnverified"] = True
+                break
+
+    for bucket in winners.values():
         bucket.pop("_bidDate", None)
         bucket.pop("_nameDate", None)
-    return list(targets.values())
+        bucket.pop("_lastDate", None)
+    return list(winners.values())
 
 
 def fetch_campaign_to_portfolio_name(token):
@@ -207,6 +253,37 @@ def fetch_campaign_to_portfolio_name(token):
             break
         page += 1
     return campaign_to_portfolio
+
+
+def fetch_campaign_to_profile_id(token):
+    """campaign_id -> the profile_id that currently, live owns it, per the
+    daily-synced ads_campaigns snapshot - more trustworthy than whatever
+    profile_id a stats row (especially an older manually-imported one)
+    happens to carry, since this account has more than one real Ads
+    profile per country and a manual import can tag the wrong one (found
+    live 2026-09-06: a real Apply call failed with Amazon's own
+    KEYWORD_CANNOT_FIND_AD_GROUP because the keyword-stats row's stored
+    profile_id wasn't the one that actually owns that ad group today).
+    Used to correct the profileId a proposal is applied against - critical
+    here since this is what a real Apply call acts on."""
+    campaign_to_profile = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "campaign_id,profile_id"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            if item.get("profile_id"):
+                campaign_to_profile[item.get("campaign_id")] = item.get("profile_id")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return campaign_to_profile
 
 
 def fetch_recently_changed_target_ids(token, since_date):
@@ -297,8 +374,22 @@ def propose_bid_change(row, target_acos, min_spend, zero_sales_spend, tolerance_
     """Single-period version - still used when multi-period data isn't
     available. See propose_bid_change_multi_period for the 3-window version."""
     current_bid = row.get("bid")
-    if current_bid is None:
+    if not current_bid:
+        # Treats a stored 0 the same as a genuinely missing bid - no real
+        # Amazon bid is ever $0, so 0 here only ever means "unknown" (a
+        # PocketBase number field stores a written null as 0, and a legacy-
+        # sourced row with no real bid data writes exactly that - found
+        # live 2026-09-06). Proposing a change from an unknown baseline
+        # would just clamp to min_bid regardless of the real bid, which is
+        # meaningless and unsafe to Apply.
         return None  # no known current bid to adjust from - skip (SD has no per-target bid at all, see CLAUDE.md)
+    if row.get("bidUnverified"):
+        # This bid came from a losing profile's historical/manually-
+        # imported data, not the winning (more current) source - no way to
+        # confirm it's still the real bid on Amazon today. Per the user
+        # (2026-09-06): block Apply entirely rather than calculate a %
+        # change from an unverified baseline.
+        return None
 
     decision = compute_change_pct(row, target_acos, min_spend, zero_sales_spend, tolerance_pct, max_change_pct)
     if not decision:
@@ -358,8 +449,18 @@ def propose_bid_change_multi_period(row30, row7, row60, target_acos, min_spend, 
     recently-changed skip, so by the time a `last_change` reaches this
     function it can be trusted to be old enough for the ACOS data here to
     reflect its outcome."""
-    current_bid = row30.get("bid") or row60.get("bid")
-    if current_bid is None:
+    if row30.get("bid"):
+        current_bid, bid_unverified = row30["bid"], row30.get("bidUnverified", False)
+    else:
+        current_bid, bid_unverified = row60.get("bid"), row60.get("bidUnverified", False)
+    if not current_bid:
+        # See propose_bid_change's comment - a stored 0 means "unknown",
+        # never a real $0 Amazon bid.
+        return None
+    if bid_unverified:
+        # See propose_bid_change's comment - blocks Apply on a bid that
+        # came from a losing profile's historical/manually-imported data
+        # rather than the winning (more current) source.
         return None
 
     if row60["spend"] < min_spend:
@@ -491,7 +592,7 @@ def RunBidOptimizerDryRun(request):
     ads_keyword_stats and returns them - does NOT write anything to Amazon.
     Query params (all optional): target_acos, lookback_days, attribution_lag_days,
     min_spend, zero_sales_spend, tolerance_pct, max_change_pct, min_bid,
-    max_bid, country_code, portfolio, recent_days, baseline_days,
+    max_bid, country_code, portfolio, profile_id, recent_days, baseline_days,
     multi_period (default true; pass "false" to fall back to the original
     single-window evaluation - see propose_bid_change_multi_period for the
     3-window algorithm)."""
@@ -526,6 +627,11 @@ def RunBidOptimizerDryRun(request):
     multi_period = (args.get("multi_period") if hasattr(args, "get") else None) != "false"
     country_code = args.get("country_code") if hasattr(args, "get") else None
     portfolio = args.get("portfolio") if hasattr(args, "get") else None
+    # A single country_code can span multiple real Amazon Ads profiles (this
+    # account runs two separate seller brands, each with its own profile per
+    # country - see the EU-import section in CLAUDE.md) - profile_id narrows
+    # to one specific one when country_code alone would mix them together.
+    profile_id = args.get("profile_id") if hasattr(args, "get") else None
 
     now_la = datetime.now(LA_TZ)
     end_date = (now_la - timedelta(days=attribution_lag_days)).strftime("%Y-%m-%d")
@@ -534,10 +640,16 @@ def RunBidOptimizerDryRun(request):
     try:
         token = pb_authenticate()
         campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        campaign_to_profile = fetch_campaign_to_profile_id(token)
 
         def with_portfolio(rows):
             for row in rows:
                 row["portfolioName"] = campaign_to_portfolio.get(row.get("campaignId"), "")
+                # The live snapshot's profile_id is more trustworthy than
+                # whatever a stats row carries - critical here since this
+                # is what a real Apply call acts on (see
+                # fetch_campaign_to_profile_id's docstring).
+                row["profileId"] = campaign_to_profile.get(row.get("campaignId"), row.get("profileId"))
             if portfolio:
                 rows = [r for r in rows if r["portfolioName"] == portfolio]
             return rows
@@ -564,7 +676,7 @@ def RunBidOptimizerDryRun(request):
             # is always >= the baseline window) covers the 60d/30d/7d/YTD
             # aggregates below without 4 separate network round trips - same
             # reasoning as the original single-baseline-fetch fix.
-            raw_rows = fetch_keyword_raw_rows(token, min(year_start, baseline_start), end_date, country_code)
+            raw_rows = fetch_keyword_raw_rows(token, min(year_start, baseline_start), end_date, country_code, profile_id)
             rows30 = with_portfolio(aggregate_keyword_rows(raw_rows, start_date, end_date))
             rows7 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, recent_start, end_date)}
             rows60 = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows, baseline_start, end_date)}
@@ -587,7 +699,7 @@ def RunBidOptimizerDryRun(request):
             last_year_30_start = (a_year_ago - timedelta(days=attribution_lag_days + lookback_days)).strftime("%Y-%m-%d")
             last_year_7_start = (a_year_ago - timedelta(days=attribution_lag_days + recent_days)).strftime("%Y-%m-%d")
             last_year_start = f"{last_year:04d}-01-01"
-            raw_rows_last_year = fetch_keyword_raw_rows(token, last_year_start, last_year_end, country_code)
+            raw_rows_last_year = fetch_keyword_raw_rows(token, last_year_start, last_year_end, country_code, profile_id)
             rows_year_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_start, last_year_end)}
             rows60_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_60_start, last_year_end)}
             rows30_last = {r["targetId"]: r for r in aggregate_keyword_rows(raw_rows_last_year, last_year_30_start, last_year_end)}
@@ -643,7 +755,7 @@ def RunBidOptimizerDryRun(request):
                 }
                 proposals.append(proposal)
         else:
-            raw_rows = fetch_keyword_raw_rows(token, start_date, end_date, country_code)
+            raw_rows = fetch_keyword_raw_rows(token, start_date, end_date, country_code, profile_id)
             rows30 = with_portfolio(aggregate_keyword_rows(raw_rows, start_date, end_date))
             targets_evaluated = len(rows30)
             for row in rows30:
@@ -677,6 +789,7 @@ def RunBidOptimizerDryRun(request):
                 "minBid": min_bid,
                 "maxBid": max_bid,
                 "portfolio": portfolio or "",
+                "profileId": profile_id or "",
             },
             "portfolios": sorted({p for p in campaign_to_portfolio.values() if p}),
             "targetsEvaluated": targets_evaluated,

@@ -87,7 +87,7 @@ MARKETPLACE_CURRENCY = {
     "etsy_uk": "USD",
 }
 
-FX_API_URL = "https://api.frankfurter.app/latest"
+FX_API_URL = "https://api.frankfurter.dev/v1/latest"
 # Only used if the live FX API call fails, so the summary still renders
 # (roughly) instead of erroring out - approximate rates, not kept precise.
 FALLBACK_USD_RATES = {

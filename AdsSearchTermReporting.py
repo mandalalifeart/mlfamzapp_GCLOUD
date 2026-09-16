@@ -348,6 +348,14 @@ def GetAdsSearchTermStats(request):
             response.raise_for_status()
             data = response.json()
             for item in data.get("items", []):
+                # Keyed WITH profile_id (de-duped in a second pass below) -
+                # per the user's correction (2026-09-06): the same real
+                # campaign/ad group can be reported under more than one
+                # Amazon Ads profile for this account, and it's the SAME
+                # underlying campaign in both, not two independent ones -
+                # so their numbers must not be summed together (see
+                # AdsKeywordReporting.GetAdsKeywordStats for the full
+                # explanation).
                 key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("search_term"))
                 bucket = terms.setdefault(key, {
                     "campaignId": item.get("campaign_id"),
@@ -361,7 +369,7 @@ def GetAdsSearchTermStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
-                    "_nameDate": "",
+                    "_nameDate": "", "_lastDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
@@ -374,12 +382,23 @@ def GetAdsSearchTermStats(request):
                 if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
                     bucket["campaignName"] = item.get("campaign_name")
                     bucket["_nameDate"] = item.get("date", "")
+                bucket["_lastDate"] = max(bucket["_lastDate"], item.get("date", ""))
             if page >= data.get("totalPages", 1):
                 break
             page += 1
 
+        # When the same real campaign/ad group/search term came back under
+        # more than one profile_id, keep only whichever profile has the
+        # most recent activity - not a sum of both.
+        winners = {}
+        for bucket in terms.values():
+            outer_key = (bucket["campaignId"], bucket["adGroupId"], bucket["searchTerm"])
+            current = winners.get(outer_key)
+            if current is None or bucket["_lastDate"] > current["_lastDate"]:
+                winners[outer_key] = bucket
+
         campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
-        rows = list(terms.values())
+        rows = list(winners.values())
         for row in rows:
             row["portfolioName"] = campaign_to_portfolio.get(row["campaignId"], "")
         if portfolio:
@@ -389,6 +408,7 @@ def GetAdsSearchTermStats(request):
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_nameDate", None)
+            row.pop("_lastDate", None)
 
         return json_response({
             "startDate": start_date,

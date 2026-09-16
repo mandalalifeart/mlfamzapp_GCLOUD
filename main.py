@@ -88,6 +88,16 @@ def GetAdsPortfolios(request):
     return _impl(request)
 
 
+def UpdateAdsChangeHistory(request):
+    from AdsChangeHistory import UpdateAdsChangeHistory as _impl
+    return _impl(request)
+
+
+def GetAdsChangeHistory(request):
+    from AdsChangeHistory import GetAdsChangeHistory as _impl
+    return _impl(request)
+
+
 def UpdateAdsKeywordStats(request):
     from AdsKeywordReporting import UpdateAdsKeywordStats as _impl
     return _impl(request)
@@ -267,6 +277,46 @@ def UpdateEtsyTrackingFromAmazon(request):
     from EtsyMcfFulfillment import UpdateEtsyTrackingFromAmazon as _impl
     return _impl(request)
 
+
+def UpdateAmazonFinances(request):
+    from AmazonFinances import UpdateAmazonFinances as _impl
+    return _impl(request)
+
+
+def GetPaymentsExpensesSummary(request):
+    from AmazonFinances import GetPaymentsExpensesSummary as _impl
+    return _impl(request)
+
+
+def UpdateAmazonReturns(request):
+    from AmazonReturns import UpdateAmazonReturns as _impl
+    return _impl(request)
+
+
+def GetReturnStats(request):
+    from AmazonReturns import GetReturnStats as _impl
+    return _impl(request)
+
+
+def GetReturnStatsByMonth(request):
+    from AmazonReturns import GetReturnStatsByMonth as _impl
+    return _impl(request)
+
+
+def GetReturnStatsByAsin(request):
+    from AmazonReturns import GetReturnStatsByAsin as _impl
+    return _impl(request)
+
+
+def UpdateWiseFinances(request):
+    from WiseFinances import UpdateWiseFinances as _impl
+    return _impl(request)
+
+
+def GetWiseFinancesSummary(request):
+    from WiseFinances import GetWiseFinancesSummary as _impl
+    return _impl(request)
+
 try:
     from Orders import orders_mlf
 except Exception:  # pragma: no cover
@@ -329,6 +379,11 @@ def DeleteBidRuleProfile(request):
 
 def GetBidChangePerformance(request):
     from AdsBidWriter import GetBidChangePerformance as _impl
+    return _impl(request)
+
+
+def GetBidChangeLog(request):
+    from AdsBidWriter import GetBidChangeLog as _impl
     return _impl(request)
 
 

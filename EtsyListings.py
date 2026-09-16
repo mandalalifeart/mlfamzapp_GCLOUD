@@ -350,12 +350,12 @@ def GetEtsyListingDetail(request):
 
 
 def UpdateEtsyListingContent(request):
-    """Writes description and/or tags to a LIVE public Etsy listing.
-    Deliberately narrow: only touches the two fields explicitly passed in
-    the request body, never title/price/quantity/images, and only for one
-    listing_id at a time - there is no bulk-edit path. This is a real,
-    customer-facing write (affects search ranking/buyer-facing copy) but is
-    fully reversible (no money/inventory moved), unlike MCF order creation."""
+    """Writes title/description/tags to a LIVE public Etsy listing. Deliberately
+    narrow: only touches the fields explicitly passed in the request body, never
+    price/quantity/images, and only for one listing_id at a time - there is no
+    bulk-edit path. This is a real, customer-facing write (affects search
+    ranking/buyer-facing copy) but is fully reversible (no money/inventory
+    moved), unlike MCF order creation."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
@@ -363,14 +363,19 @@ def UpdateEtsyListingContent(request):
 
     body = request.get_json(silent=True) or {}
     listing_id = body.get("listing_id")
+    title = body.get("title")
     description = body.get("description")
     tags = body.get("tags")
     if not listing_id:
         return json_response({"error": "listing_id is required"}, 400)
-    if description is None and tags is None:
-        return json_response({"error": "Provide at least one of description/tags to update"}, 400)
+    if title is None and description is None and tags is None:
+        return json_response({"error": "Provide at least one of title/description/tags to update"}, 400)
+    if title is not None and len(title) > 140:
+        return json_response({"error": f"Etsy allows at most 140 characters in a title, got {len(title)}"}, 400)
     if tags is not None and len(tags) > 13:
         return json_response({"error": f"Etsy allows at most 13 tags, got {len(tags)}"}, 400)
+    if tags is not None and any(len(t) > 20 for t in tags):
+        return json_response({"error": "Etsy allows at most 20 characters per tag"}, 400)
 
     try:
         pb_token = pb_authenticate()
@@ -384,6 +389,8 @@ def UpdateEtsyListingContent(request):
             pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
 
         update_body = {}
+        if title is not None:
+            update_body["title"] = title
         if description is not None:
             update_body["description"] = description
         if tags is not None:

@@ -12,6 +12,7 @@ from AdsReporting import (
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
+    fetch_campaign_to_profile_id,
     last_recorded_date,
     pb_authenticate,
     pb_batch,
@@ -454,7 +455,17 @@ def GetAdsAdvertisedProductStats(request):
             response.raise_for_status()
             data = response.json()
             for item in data.get("items", []):
-                key = (item.get("profile_id"), item.get("campaign_id"), item.get("asin"))
+                # Keyed WITH profile_id (de-duped in a second pass below) -
+                # per the user's correction (2026-09-06): the same real
+                # campaign/ad group can be reported under more than one
+                # Amazon Ads profile for this account, and it's the SAME
+                # underlying campaign in both, not two independent ones -
+                # so their numbers must not be summed together (see
+                # AdsKeywordReporting.GetAdsKeywordStats for the full
+                # explanation). Also keyed on ad_group_id, not just
+                # campaign_id+asin, for the same "match campaign and ad
+                # group" precision.
+                key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("asin"))
                 bucket = products.setdefault(key, {
                     "profileId": item.get("profile_id"),
                     "campaignId": item.get("campaign_id"),
@@ -467,7 +478,7 @@ def GetAdsAdvertisedProductStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
-                    "_nameDate": "",
+                    "_nameDate": "", "_lastDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
@@ -479,9 +490,21 @@ def GetAdsAdvertisedProductStats(request):
                 if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
                     bucket["campaignName"] = item.get("campaign_name")
                     bucket["_nameDate"] = item.get("date", "")
+                bucket["_lastDate"] = max(bucket["_lastDate"], item.get("date", ""))
             if page >= data.get("totalPages", 1):
                 break
             page += 1
+
+        # When the same real campaign/ad group/ASIN came back under more
+        # than one profile_id, keep only whichever profile has the most
+        # recent activity - not a sum of both.
+        winners = {}
+        for bucket in products.values():
+            outer_key = (bucket["campaignId"], bucket["adGroupId"], bucket["asin"])
+            current = winners.get(outer_key)
+            if current is None or bucket["_lastDate"] > current["_lastDate"]:
+                winners[outer_key] = bucket
+        products = winners
 
         # Real per-ad status (not just campaign status) - added 2026-09-01
         # after finding a live mismatch: a campaign can stay ENABLED while
@@ -527,12 +550,19 @@ def GetAdsAdvertisedProductStats(request):
                 break
             pa_page += 1
 
+        campaign_to_profile = fetch_campaign_to_profile_id(token)
         rows = sorted(products.values(), key=lambda p: -p["spend"])
         for row in rows:
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_nameDate", None)
+            row.pop("_lastDate", None)
             ad_key = (row["campaignId"], row["adGroupId"], row["asin"])
             row["adStatus"] = ad_status.get(ad_key) or campaign_status.get(row["campaignId"], "")
+            # The live ads_campaigns snapshot is more trustworthy than
+            # whatever profile_id a stats row happens to carry (see
+            # AdsKeywordReporting.GetAdsKeywordStats for the full
+            # explanation).
+            row["profileId"] = campaign_to_profile.get(row["campaignId"], row["profileId"])
 
         return json_response({"startDate": start_date, "endDate": end_date, "products": rows})
     except Exception as exc:

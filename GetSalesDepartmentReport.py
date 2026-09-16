@@ -39,6 +39,16 @@ UI_MARKETPLACE_TO_ATOMIC = {
     "ie": {"ie"},
     "pl": {"pl"},
     "eu": {"eu"},
+    # Etsy's own 3-marketplace scheme (see EtsyOrders.py) - the frontend's
+    # dropdown already offered these, but this map never had entries for
+    # them, so expand_marketplaces silently produced an empty atomic set
+    # and the report showed all zeros regardless of real data existing in
+    # sku_sales (found live 2026-09-06). Deliberately not added to
+    # ALL_UI_MARKETPLACES - Etsy stays its own selection, not folded into
+    # an "all marketplaces" Amazon total.
+    "etsy_usa": {"etsy_usa"},
+    "etsy_eu": {"etsy_eu"},
+    "etsy_uk": {"etsy_uk"},
 }
 ALL_UI_MARKETPLACES = ["usa", "eu", "uk", "de", "fr", "es", "it", "se", "nl", "be", "ie", "pl", "jp", "au"]
 
@@ -191,6 +201,7 @@ def fetch_sku_sales(token, min_year, atomic_marketplaces):
 
 
 def build_report(records, mapping, atomic_marketplaces, years, current_month):
+    sku_to_asin = mapping["sku_to_asin"]
     asin_to_main_sku = mapping["asin_to_main_sku"]
     asin_to_group = mapping["asin_to_group"]
     ignored_skus = mapping["ignored_skus"]
@@ -217,11 +228,19 @@ def build_report(records, mapping, atomic_marketplaces, years, current_month):
         # they never land in "unmapped" even if their ASIN doesn't match.
         if sku in ignored_skus:
             continue
-        # Group by the sale's own ASIN field (set from the order data), not by
-        # matching its SKU string against the mapping CSV - a product can be sold
-        # under multiple SKU spellings (e.g. Pareo5Blue / Pareo5Blue502) that all
-        # share one ASIN, and the CSV won't list every variant.
+        # Prefer the sale's own recorded ASIN (set from the order data) over
+        # matching its SKU string against the mapping table - a product can be
+        # sold under multiple Amazon SKU spellings (e.g. Pareo5Blue /
+        # Pareo5Blue502) that all share one ASIN, and the mapping table won't
+        # list every variant. But a source that never records an ASIN on the
+        # sale itself (Etsy - UpdateEtsyOrders always writes ASIN="", since
+        # Etsy has no concept of an Amazon ASIN) needs the mapping table as
+        # its only path to a group - fall back to sku_to_asin (same
+        # asin_group_mapping.sku values Etsy's own SKUs already match, per
+        # CLAUDE.md) whenever the row carries no usable ASIN of its own.
         asin = (rec.get("ASIN") or "").strip()
+        if (not asin or asin not in asin_to_group) and sku in sku_to_asin:
+            asin = sku_to_asin[sku]
         if not asin or asin not in asin_to_group:
             unmapped_totals[sku] += qty
             if asin and sku not in unmapped_asin_by_sku:

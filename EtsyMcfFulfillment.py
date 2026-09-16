@@ -1,5 +1,6 @@
 import os
 import smtplib
+import time
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
@@ -16,7 +17,7 @@ from EtsyAuth import (
     pb_save_connection,
     refresh_access_token,
 )
-from EtsyOrders import fetch_receipts
+from EtsyOrders import EU_COUNTRY_CODES, fetch_receipts
 
 POCKETBASE_MAPPING_COLLECTION = os.environ.get("POCKETBASE_MAPPING_COLLECTION", "asin_group_mapping")
 POCKETBASE_ORDERS_COLLECTION = os.environ.get("POCKETBASE_ETSY_ORDERS_COLLECTION", "etsy_orders")
@@ -86,7 +87,13 @@ def load_mcf_status_map(pb_token):
     return status
 
 
-def set_order_mcf_status(pb_token, receipt_id, mcf_status):
+def set_order_mcf_status(pb_token, receipt_id, mcf_status, mcf_order_id=None):
+    """mcf_order_id is optional - only pass it when the real Amazon
+    sellerFulfillmentOrderId differs from the default f"ETSY-{receipt_id}"
+    pattern (e.g. a manually created replacement order after the original
+    went Cancelled/Unfulfillable, given a different id to avoid colliding
+    with the dead original). Once set, the tracking-sync job looks this
+    order up under that id instead of guessing the default pattern."""
     response = requests.get(
         f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
         headers={"Authorization": pb_token},
@@ -97,10 +104,63 @@ def set_order_mcf_status(pb_token, receipt_id, mcf_status):
     items = response.json().get("items", [])
     if not items:
         raise RuntimeError(f"No stored etsy_orders row for receipt {receipt_id} to update mcf_status on")
+    patch_body = {"mcf_status": mcf_status}
+    if mcf_order_id:
+        patch_body["mcf_order_id"] = mcf_order_id
     patch_resp = requests.patch(
         f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{items[0]['id']}",
         headers={"Authorization": pb_token},
-        json={"mcf_status": mcf_status},
+        json=patch_body,
+        timeout=15,
+    )
+    patch_resp.raise_for_status()
+
+
+def load_pushed_tracking_map(pb_token):
+    """receipt_id -> list of tracking numbers already pushed to Etsy for it.
+    An Amazon MCF order with multiple line items can ship in separate
+    packages at different times (confirmed live 2026-09-06 - a NL/Boho
+    order's second item shipped 2 days after the first). The original code
+    pushed whatever packages existed on the first run that found any, then
+    set mcf_status="shipped" and never looked at that receipt again - so a
+    later, separate second shipment's tracking was never discovered or
+    pushed, and the buyer was never notified about it. This map lets a later
+    run tell "a package already reported" apart from "a genuinely new
+    package from a later shipment" for the same receipt."""
+    pushed = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+            headers={"Authorization": pb_token},
+            params={"perPage": 200, "page": page, "fields": "receipt_id,mcf_tracking_pushed"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            pushed[item["receipt_id"]] = item.get("mcf_tracking_pushed") or []
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return pushed
+
+
+def set_pushed_tracking(pb_token, receipt_id, tracking_numbers):
+    response = requests.get(
+        f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+        headers={"Authorization": pb_token},
+        params={"filter": f'receipt_id = "{receipt_id}"', "fields": "id", "perPage": 1},
+        timeout=30,
+    )
+    response.raise_for_status()
+    items = response.json().get("items", [])
+    if not items:
+        raise RuntimeError(f"No stored etsy_orders row for receipt {receipt_id} to update mcf_tracking_pushed on")
+    patch_resp = requests.patch(
+        f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{items[0]['id']}",
+        headers={"Authorization": pb_token},
+        json={"mcf_tracking_pushed": tracking_numbers},
         timeout=15,
     )
     patch_resp.raise_for_status()
@@ -112,19 +172,25 @@ def MarkEtsyOrderInProgress(request):
     Amazon Seller Central) rather than via CreateMcfOrderForReceipt. No
     ADMIN_KEY gate, same reasoning as UpdateEtsyListings/UpdateEtsyOrders:
     triggered directly by a frontend button that can't hold a secret, and
-    this only flips our own tracking field - no real Amazon/Etsy write."""
+    this only flips our own tracking field - no real Amazon/Etsy write.
+    Optional mcf_order_id: pass this when the manually created order's real
+    sellerFulfillmentOrderId differs from the default f"ETSY-{receipt_id}"
+    pattern (e.g. a replacement order after the original went Cancelled/
+    Unfulfillable, given a different id to dodge the dead original) - the
+    tracking-sync job then looks the order up under that id instead."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
 
     body = request.get_json(silent=True) or {}
     receipt_id = body.get("receipt_id") or (request.args.get("receipt_id") if hasattr(request, "args") else None)
+    mcf_order_id = body.get("mcf_order_id") or (request.args.get("mcf_order_id") if hasattr(request, "args") else None)
     if not receipt_id:
         return json_response({"error": "receipt_id is required"}, 400)
 
     try:
         pb_token = pb_authenticate()
-        set_order_mcf_status(pb_token, receipt_id, "in_progress")
-        return json_response({"updated": True, "receiptId": receipt_id, "mcfStatus": "in_progress"})
+        set_order_mcf_status(pb_token, receipt_id, "in_progress", mcf_order_id=mcf_order_id)
+        return json_response({"updated": True, "receiptId": receipt_id, "mcfStatus": "in_progress", "mcfOrderId": mcf_order_id})
     except Exception as exc:
         return json_response({"error": str(exc)}, 500)
 
@@ -143,10 +209,19 @@ def build_fulfillment_plan(receipts, sku_map, mcf_status_map):
         # than showing up as "not fulfillable".
         if receipt.get("status") == "Canceled":
             continue
-        # Already has a real MCF order created for it (by hand or by
-        # CreateMcfOrderForReceipt) - already being handled, so drop it
-        # rather than reporting it as pending again every day.
-        if mcf_status_map.get(str(receipt.get("receipt_id"))) == "in_progress":
+        # Already has a real MCF order created for it (by hand, by
+        # CreateMcfOrderForReceipt, or by a previous wet run) - Amazon
+        # rejects a second create call for the same sellerFulfillmentOrderId
+        # ("A create request already exists"), so ANY recorded mcf_status
+        # (in_progress/shipped/cancelled) means never re-create, not just
+        # "in_progress". Found live 2026-09-06: receipt 4164653319 had
+        # mcf_status="shipped" (real order already placed and shipped by
+        # Amazon) but Etsy's own is_shipped was still false because the
+        # tracking push to Etsy had failed separately - this used to let it
+        # slip back into the "pending" plan and get resubmitted to Amazon,
+        # which correctly refused the duplicate but surfaced as a same-day
+        # failure every run thereafter.
+        if mcf_status_map.get(str(receipt.get("receipt_id"))):
             continue
         transactions = receipt.get("transactions", []) or []
         line_items = []
@@ -319,6 +394,7 @@ def RunEtsyMcfFulfillmentWet(request):
 
         created = []
         failed = []
+        needs_manual = []
         for order in plan:
             if not order["fulfillable"]:
                 continue
@@ -326,6 +402,15 @@ def RunEtsyMcfFulfillmentWet(request):
             if not receipt:
                 failed.append({"receiptId": order["receiptId"], "error": "receipt vanished between plan and creation"})
                 continue
+            # 2026-09-08: reverted back to attempting every order via the API
+            # regardless of destination region, per the user's explicit
+            # choice - an earlier Ireland-destination failure ("Brexit/EFN
+            # cross-border") might have been caused by that specific SKU's
+            # EU stock still being in-transit/inbound rather than landed and
+            # available, not a genuine platform bug as first suspected. The
+            # user wants real evidence from further live attempts (including
+            # retrying this same order) rather than pre-emptively skipping
+            # non-US orders.
             try:
                 payload = create_mcf_order(receipt, sku_map)
             except Exception as exc:
@@ -347,20 +432,26 @@ def RunEtsyMcfFulfillmentWet(request):
 
         lines = [
             f"Etsy -> Amazon MCF fulfillment (WET RUN) - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-            f"{len(plan)} pending order(s): {len(created)} MCF order(s) created, {len(failed)} failed, {not_fulfillable} not fulfillable (unmapped SKU).",
+            f"{len(plan)} pending order(s): {len(created)} MCF order(s) created, {len(failed)} failed, "
+            f"{len(needs_manual)} need manual creation (UK/EU), {not_fulfillable} not fulfillable (unmapped SKU).",
             "",
         ]
         for c in created:
             lines.append(f"  CREATED: Order {c['receiptId']} — {c['buyer']}")
         for f in failed:
             lines.append(f"  FAILED: Order {f['receiptId']} — {f.get('buyer', '')} — {f['error']}")
+        if needs_manual:
+            lines.append("")
+            lines.append("NEEDS MANUAL CREATION IN SELLER CENTRAL (UK/EU destination - see mcf/orders/create-order):")
+            for m in needs_manual:
+                lines.append(f"  Order {m['receiptId']} — {m['buyer']} — destination: {m['country']}")
         report_text = "\n".join(lines)
 
         from NotificationRouting import notify
         notify(
             "etsy-daily-mcf-fulfillment-wet", "amzbot", report_text,
             is_error=bool(failed or fetch_errors),
-            subject=f"Etsy MCF fulfillment (WET RUN) - {len(created)} created, {len(failed)} failed",
+            subject=f"Etsy MCF fulfillment (WET RUN) - {len(created)} created, {len(failed)} failed, {len(needs_manual)} manual",
         )
 
         return json_response({
@@ -368,6 +459,7 @@ def RunEtsyMcfFulfillmentWet(request):
             "pendingOrders": len(plan),
             "created": created,
             "failed": failed,
+            "needsManual": needs_manual,
             "notFulfillableOrders": not_fulfillable,
             "fetchErrors": fetch_errors,
         })
@@ -390,16 +482,110 @@ def find_receipt(shop_id, access_token, receipt_id):
     return None, errors
 
 
-def fulfillment_outbound_client():
+# Which real Amazon seller account + FBA inventory pool an MCF order should
+# be placed against, by destination country - mirrors the regional split
+# already used everywhere else in the app (DE sales reports, GetUkInventory/
+# GetDeInventory) rather than always using the USA account regardless of
+# destination, which silently shipped every EU/UK order internationally from
+# US stock and (as of 2026-09-08) started hard-failing on Amazon's required
+# customs declared-value field for those shipments. "EU" covers the whole
+# continental-EU FBA pool via the DE marketplace endpoint, same as how DE
+# sales reports already bundle all of FR/IT/ES/etc - not just Germany itself.
+MCF_REGION_CONFIG = {
+    "US": ("USA", "US"),
+    "UK": ("EU", "UK"),
+    "EU": ("EU", "DE"),
+}
+
+# 2026-09-08: real UK/EU MCF order creation is blocked by a confirmed,
+# unresolved bug in Amazon's own createFulfillmentOrder SP-API - it wrongly
+# rejects non-US-marketplace orders with a Brexit/EFN cross-border error
+# even for same-country shipments (matches real community bug reports;
+# tried both DE and UK marketplace endpoints here, identical failure either
+# way, and the identical order succeeds fine via Seller Central's manual
+# UI). RunEtsyMcfFulfillmentWet only auto-creates US-destination orders now
+# and flags UK/EU ones for manual creation instead of repeatedly failing.
+# CreateMcfOrderForReceipt (manual single-order tool) and
+# UpdateEtsyTrackingFromAmazon still support all 3 regions unchanged, in
+# case Amazon fixes this bug or a workaround is found later.
+
+
+def resolve_mcf_region(country_iso):
+    """US/UK/EU bucket for a destination country_iso, defaulting to US for
+    anything unrecognized (preserves prior behavior for the common case and
+    for any destination outside the 3 regions this business actually ships
+    from)."""
+    if country_iso == "US":
+        return "US"
+    if country_iso == "GB":
+        return "UK"
+    if country_iso in EU_COUNTRY_CODES:
+        return "EU"
+    return "US"
+
+
+# The currency each region's MCF account expects for perUnitDeclaredValue -
+# confirmed empirically (2026-09-08, real order attempt) rather than assumed:
+# an Ireland-destination order routed through the "EU" credentials/DE
+# marketplace was rejected with "was expecting GBP", not EUR - both UK and
+# EU regions here share the same underlying "Boho Paradise UK" seller
+# account, whose settlement currency is GBP regardless of which marketplace
+# endpoint the order is placed through.
+MCF_DECLARED_VALUE_CURRENCY = {"US": "USD", "UK": "GBP", "EU": "GBP"}
+
+_fx_rate_cache = {}
+
+
+def convert_currency_live(amount, from_currency, to_currency):
+    """Live (not historical) FX conversion via frankfurter.dev (frankfurter.app
+    301-redirects here now, confirmed live 2026-09-11 - calling the canonical
+    v1 URL directly avoids that extra redirect hop), same provider already
+    trusted elsewhere in this codebase (UpdateSkuSalesMonth.py's
+    historical-rate lookups) - used here because a customs declared value
+    must reflect the item's real worth in the currency Amazon expects, not
+    just relabel the amount, which would misstate the value at the border.
+
+    A single transient read-timeout here (confirmed live 2026-09-11) fully
+    blocked a real MCF order's automated creation with no retry, forcing a
+    manual Seller Central order instead - 2 attempts with a short backoff
+    now, since this is a small/fast lookup where a brief retry costs nothing
+    but a bare first-try failure has real consequences."""
+    if from_currency == to_currency:
+        return amount
+    key = (from_currency, to_currency)
+    if key not in _fx_rate_cache:
+        last_exc = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    "https://api.frankfurter.dev/v1/latest",
+                    params={"from": from_currency, "to": to_currency},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                _fx_rate_cache[key] = resp.json()["rates"][to_currency]
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(3)
+        if last_exc:
+            raise RuntimeError(f"Could not fetch live FX rate {from_currency}->{to_currency}: {last_exc}")
+    return amount * _fx_rate_cache[key]
+
+
+def fulfillment_outbound_client(region="US"):
     from sp_api.api import FulfillmentOutbound
     from sp_api.base import Marketplaces
 
+    cred_prefix, mp_attr = MCF_REGION_CONFIG.get(region, MCF_REGION_CONFIG["US"])
     credentials = {
-        "refresh_token": os.environ["REFRESH_TOKEN_USA"],
-        "lwa_app_id": os.environ["CLIENT_ID_USA"],
-        "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
+        "refresh_token": os.environ[f"REFRESH_TOKEN_{cred_prefix}"],
+        "lwa_app_id": os.environ[f"CLIENT_ID_{cred_prefix}"],
+        "lwa_client_secret": os.environ[f"CLIENT_SECRET_{cred_prefix}"],
     }
-    return FulfillmentOutbound(credentials=credentials, marketplace=Marketplaces.US)
+    return FulfillmentOutbound(credentials=credentials, marketplace=getattr(Marketplaces, mp_attr))
 
 
 def create_mcf_order(receipt, sku_map):
@@ -407,6 +593,9 @@ def create_mcf_order(receipt, sku_map):
     Etsy receipt. Raises on any unmapped SKU rather than partially fulfilling
     an order. This is the one function in this file with a real, hard-to-
     reverse side effect - callers must gate it deliberately."""
+    region = resolve_mcf_region(receipt.get("country_iso", ""))
+    target_currency = MCF_DECLARED_VALUE_CURRENCY.get(region, "USD")
+
     transactions = receipt.get("transactions", []) or []
     items = []
     for idx, txn in enumerate(transactions):
@@ -415,11 +604,30 @@ def create_mcf_order(receipt, sku_map):
         if not match or not match.get("asin"):
             raise RuntimeError(f"Cannot create MCF order: SKU '{sku}' on receipt {receipt.get('receipt_id')} "
                                 f"is not in asin_group_mapping")
-        items.append({
+        price = txn.get("price") or {}
+        declared_value = None
+        if price.get("divisor"):
+            raw_amount = price["amount"] / price["divisor"]
+            raw_currency = price.get("currency_code", "USD")
+            converted = convert_currency_live(raw_amount, raw_currency, target_currency)
+            declared_value = {
+                "currencyCode": target_currency,
+                "value": f"{converted:.2f}",
+            }
+        item = {
             "sellerSku": sku,
             "sellerFulfillmentOrderItemId": f"{receipt.get('receipt_id')}-{idx}",
             "quantity": txn.get("quantity", 0) or 0,
-        })
+        }
+        # Required by Amazon for cross-border MCF shipments (customs value)
+        # and, per a real 2026-09-08 failure ("must contain the parameter
+        # PerUnitDeclaredValue" on an Ireland-destination order), apparently
+        # enforced beyond just cross-border - included on every item now
+        # rather than only when destination != US, since a present-but-
+        # unneeded value is harmless while a missing one hard-fails the order.
+        if declared_value:
+            item["perUnitDeclaredValue"] = declared_value
+        items.append(item)
     if not items:
         raise RuntimeError(f"Receipt {receipt.get('receipt_id')} has no line items")
 
@@ -434,11 +642,11 @@ def create_mcf_order(receipt, sku_map):
     if receipt.get("second_line"):
         address["addressLine2"] = receipt["second_line"]
 
-    client = fulfillment_outbound_client()
+    client = fulfillment_outbound_client(region)
     created = datetime.fromtimestamp(
         receipt.get("create_timestamp") or receipt.get("created_timestamp") or 0, tz=timezone.utc
     )
-    resp = client.create_fulfillment_order(
+    order_kwargs = dict(
         sellerFulfillmentOrderId=f"ETSY-{receipt.get('receipt_id')}",
         displayableOrderId=str(receipt.get("receipt_id")),
         displayableOrderDate=created.isoformat(),
@@ -446,6 +654,8 @@ def create_mcf_order(receipt, sku_map):
         shippingSpeedCategory="Standard",
         destinationAddress=address,
         items=items,
+    )
+    if region == "US":
         # Explicit rather than relying on Amazon's default: "NotRequired"
         # means the constraint is NOT enforced, i.e. Amazon Logistics stays
         # allowed as a carrier - matches "Block Amazon Logistics" unchecked
@@ -456,8 +666,13 @@ def create_mcf_order(receipt, sku_map):
         # ADULT_SIGNATURE_CONFIRMATION, PACKING_SLIP - "BLOCK_AMAZON_LOGISTICS"
         # (used originally) isn't one of them and broke every order creation
         # until caught here.
-        featureConstraints=[{"featureName": "BLOCK_AMZL", "featureFulfillmentPolicy": "NotRequired"}],
-    )
+        # US-only: confirmed live 2026-09-08 that the UK/EU regions reject
+        # this constraint outright ("Region does not support feature:
+        # BLOCK_AMZL") rather than silently ignoring it, so it's omitted
+        # entirely for non-US orders instead of guessing at a regional
+        # equivalent.
+        order_kwargs["featureConstraints"] = [{"featureName": "BLOCK_AMZL", "featureFulfillmentPolicy": "NotRequired"}]
+    resp = client.create_fulfillment_order(**order_kwargs)
     return resp.payload
 
 
@@ -538,26 +753,36 @@ def CheckMcfAccess(request):
 
 
 def load_in_progress_orders(pb_token):
-    """receipt_id list for every etsy_orders row still mcf_status="in_progress"
-    - these are the ones a real Amazon MCF order was created for (by hand or
-    via CreateMcfOrderForReceipt) but that haven't had a tracking number
-    pushed back to Etsy yet."""
-    receipt_ids = []
+    """receipt_id -> {country_iso, mcf_order_id} for every etsy_orders row
+    still mcf_status="in_progress" - these are the ones a real Amazon MCF
+    order was created for (by hand or via CreateMcfOrderForReceipt) but that
+    haven't had a tracking number pushed back to Etsy yet. country_iso is
+    needed to resolve which regional Amazon account (US/UK/EU) the order
+    actually lives in. mcf_order_id is the real sellerFulfillmentOrderId to
+    look up - normally derived as f"ETSY-{receipt_id}", but a manually
+    created replacement order (e.g. after the original went Unfulfillable)
+    may use a different id to avoid colliding with the dead original, which
+    this field overrides when set (see set_order_mcf_status)."""
+    receipts = {}
     page = 1
     while True:
         response = requests.get(
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
             headers={"Authorization": pb_token},
-            params={"filter": 'mcf_status = "in_progress"', "fields": "receipt_id", "perPage": 200, "page": page},
+            params={"filter": 'mcf_status = "in_progress"', "fields": "receipt_id,country_iso,mcf_order_id", "perPage": 200, "page": page},
             timeout=30,
         )
         response.raise_for_status()
         data = response.json()
-        receipt_ids.extend(item["receipt_id"] for item in data.get("items", []))
+        for item in data.get("items", []):
+            receipts[item["receipt_id"]] = {
+                "country_iso": item.get("country_iso", ""),
+                "mcf_order_id": item.get("mcf_order_id") or f"ETSY-{item['receipt_id']}",
+            }
         if page >= data.get("totalPages", 1):
             break
         page += 1
-    return receipt_ids
+    return receipts
 
 
 def fetch_etsy_carrier_names(access_token, origin_country_iso="US"):
@@ -577,9 +802,7 @@ def fetch_etsy_carrier_names(access_token, origin_country_iso="US"):
 # Amazon's package carrierCode values (e.g. "FEDEX", "AMZN_US") don't always
 # spell the carrier the same way Etsy's shipping-carriers list does (e.g.
 # "FedEx") - these are the mappings confirmed to not line up with a plain
-# case-insensitive equality check. "AMZN_US" (Amazon Logistics) deliberately
-# has no entry: Etsy has no equivalent carrier, so it's left to fall through
-# to "no confident match" rather than mapped to something wrong.
+# case-insensitive equality check.
 AMAZON_TO_ETSY_CARRIER_HINTS = {
     "FEDEX": "fedex",
     "FEDEX_SMARTPOST": "fedex",
@@ -588,24 +811,38 @@ AMAZON_TO_ETSY_CARRIER_HINTS = {
     "DHL_ECOMMERCE": "dhl",
 }
 
+# Amazon Logistics-carried packages (carrierCode "Amazon Logistics"/"AMZN_US")
+# aren't in Etsy's own GET /shipping-carriers list for any origin country
+# checked (US/GB/CA/DE, live 2026-09-06). But per the user (2026-09-06, who
+# sees "Amazon Shipping" as a real selectable carrier in Etsy's own "mark as
+# shipped" UI) and Etsy's own createReceiptShipment schema (carrier_name is
+# a plain free-text string, not an enum, confirmed against Etsy's published
+# OpenAPI spec) - Etsy accepts a carrier_name outside that curated list
+# without rejecting the call, the same way real integrations like
+# ShipStation pass a bare "other" for any carrier they don't recognize.
+AMAZON_LOGISTICS_HINTS = ("amazon logistics", "amzn")
+
 
 def map_carrier_name(amazon_carrier_code, etsy_carrier_names):
-    """Maps one Amazon package carrierCode to one of Etsy's valid carrier
-    names, or None if there's no confident match - callers must skip pushing
-    tracking for a package rather than guess, since a wrong carrier_name on
-    Etsy sends the buyer a shipment notification pointing at the wrong
-    tracking system."""
+    """Maps one Amazon package carrierCode to a carrier_name to send Etsy.
+    Per the user's explicit instruction (2026-09-06): Amazon Logistics maps
+    to "Amazon Shipping", and anything else with no confident match falls
+    back to the generic "Other" label rather than being skipped - a
+    tracking push (and the buyer notification email that comes with it)
+    should always go out, even for an unrecognized carrier."""
     if not amazon_carrier_code:
-        return None
+        return "Other"
     code_lower = amazon_carrier_code.strip().lower()
     for name in etsy_carrier_names:
         if name.lower() == code_lower:
             return name
+    if any(hint in code_lower for hint in AMAZON_LOGISTICS_HINTS):
+        return "Amazon Shipping"
     hint = AMAZON_TO_ETSY_CARRIER_HINTS.get(amazon_carrier_code.strip().upper(), code_lower)
     for name in etsy_carrier_names:
         if hint in name.lower():
             return name
-    return None
+    return "Other"
 
 
 def extract_shipped_packages(payload):
@@ -638,24 +875,31 @@ def push_tracking_to_etsy(access_token, shop_id, receipt_id, tracking_code, carr
     return response.json()
 
 
-def format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, errors):
+def format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, completed_partial, errors):
     lines = [
         f"Etsy tracking sync (from Amazon MCF) - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         "",
-        f"{len(shipped)} order(s) marked shipped on Etsy with tracking, "
-        f"{still_processing} still processing on Amazon, "
+        f"{len(shipped)} package(s) pushed to Etsy with tracking, "
+        f"{still_processing} still processing/awaiting further shipments on Amazon, "
         f"{len(skipped_no_carrier_match)} shipped but skipped (no carrier match), "
-        f"{len(cancelled)} cancelled on Amazon, "
+        f"{len(cancelled)} cancelled/unfulfillable on Amazon, "
+        f"{len(completed_partial)} completed with some items unfulfillable, "
         f"{len(errors)} error(s).",
         "",
     ]
     for entry in shipped:
-        lines.append(f"  Receipt {entry['receiptId']}: {entry['carrier']} {entry['tracking']}")
+        extra = " (additional package on an order already partly shipped)" if entry.get("additional") else ""
+        lines.append(f"  Receipt {entry['receiptId']}: {entry['carrier']} {entry['tracking']}{extra}")
     if cancelled:
         lines.append("")
-        lines.append("Cancelled on Amazon (mcf_status set to 'cancelled', needs manual review/refund on Etsy):")
+        lines.append("Cancelled/Unfulfillable on Amazon (needs manual review - either refund on Etsy or create a replacement order):")
         for entry in cancelled:
             lines.append(f"  Receipt {entry['receiptId']}: {entry['status']}")
+    if completed_partial:
+        lines.append("")
+        lines.append("Completed on Amazon with some item(s) unfulfillable (buyer may be missing part of the order - needs manual review):")
+        for entry in completed_partial:
+            lines.append(f"  Receipt {entry['receiptId']}")
     if skipped_no_carrier_match:
         lines.append("")
         lines.append("Skipped (Amazon carrier code didn't match any Etsy carrier - needs a manual update):")
@@ -699,9 +943,23 @@ def UpdateEtsyTrackingFromAmazon(request):
     Amazon MCF order was placed for it), checks whether that Amazon
     fulfillment order has shipped, and if so pushes the real tracking
     number(s) back to Etsy via createReceiptShipment - this is what actually
-    marks the Etsy order shipped and notifies the buyer. Requires the Etsy
+    marks the Etsy order shipped and notifies the buyer (Etsy sends a fresh
+    shipping-notification email to the buyer on every successful call to
+    this endpoint, per Etsy's own docs - so a second, later call with a new
+    tracking number for the same receipt does notify the buyer again; no
+    separate messaging channel is needed for that). Requires the Etsy
     connection to carry the transactions_w scope (added 2026-08-26); an
-    old read-only-only connection needs reconnecting via /etsy first."""
+    old read-only-only connection needs reconnecting via /etsy first.
+
+    Multi-item orders can ship as separate Amazon packages at different
+    times (found live 2026-09-06) - the order isn't marked mcf_status
+    "shipped" (and dropped from future runs) until Amazon's own
+    fulfillmentOrderStatus says Complete/CompletePartialled; until then it
+    stays "in_progress" so a later, separate shipment is still caught and
+    pushed on a subsequent day. mcf_tracking_pushed tracks which tracking
+    numbers have already been reported so an unchanged package isn't
+    re-pushed (and the buyer isn't re-notified for the same package) on
+    every run while still waiting for the rest of the order to ship."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
@@ -718,42 +976,74 @@ def UpdateEtsyTrackingFromAmazon(request):
         if new_refresh_token != connection.get("refresh_token"):
             pb_save_connection(pb_token, {"refresh_token": new_refresh_token})
 
-        receipt_ids = load_in_progress_orders(pb_token)
-        if not receipt_ids:
+        receipt_info = load_in_progress_orders(pb_token)
+        if not receipt_info:
             return json_response({"inProgress": 0, "shipped": 0, "stillProcessing": 0, "errors": []})
+        receipt_ids = list(receipt_info.keys())
 
+        pushed_map = load_pushed_tracking_map(pb_token)
         etsy_carrier_names = fetch_etsy_carrier_names(access_token)
-        client = fulfillment_outbound_client()
+        # One client per region, built lazily and reused - orders in this
+        # loop can span all 3 regional Amazon accounts now that MCF orders
+        # are created against the destination's own account.
+        clients_by_region = {}
+
+        def client_for(receipt_id):
+            region = resolve_mcf_region(receipt_info[receipt_id]["country_iso"])
+            if region not in clients_by_region:
+                clients_by_region[region] = fulfillment_outbound_client(region)
+            return clients_by_region[region]
 
         shipped = []
         skipped_no_carrier_match = []
         cancelled = []
+        completed_partial = []
         still_processing = 0
         errors = []
 
         for receipt_id in receipt_ids:
             try:
-                resp = client.get_fulfillment_order(sellerFulfillmentOrderId=f"ETSY-{receipt_id}")
+                resp = client_for(receipt_id).get_fulfillment_order(sellerFulfillmentOrderId=receipt_info[receipt_id]["mcf_order_id"])
                 payload = resp.payload or {}
-                # A Cancelled/Invalid MCF order will never produce a shipment -
-                # counting it as "still processing" forever (the original
-                # behavior here) hides a real cancellation indefinitely
-                # instead of surfacing it. Found live 2026-08-30 via receipt
-                # 4158189487, whose Amazon fulfillment order had already been
-                # Cancelled but mcf_status stayed stuck at "in_progress".
+                # A Cancelled/Invalid/Unfulfillable MCF order will never
+                # produce a shipment - counting it as "still processing"
+                # forever (the original behavior here) hides a real
+                # dead-end indefinitely instead of surfacing it. Found live
+                # 2026-08-30 via receipt 4158189487 (Cancelled) and again
+                # 2026-09-08 via receipt 4155936954 (Unfulfillable, missed
+                # by the original Cancelled/Invalid-only check - the user
+                # had to notice and manually create a replacement order).
+                # Amazon's real terminal-status enum also includes
+                # Unfulfillable alongside Cancelled/Invalid, all equally
+                # dead ends per Amazon's own SP-API docs.
                 order_status = (payload.get("fulfillmentOrder") or {}).get("fulfillmentOrderStatus")
-                if order_status in ("Cancelled", "Invalid"):
-                    set_order_mcf_status(pb_token, receipt_id, "cancelled")
+                if order_status in ("Cancelled", "Invalid", "Unfulfillable"):
+                    mcf_status = "unfulfillable" if order_status == "Unfulfillable" else "cancelled"
+                    set_order_mcf_status(pb_token, receipt_id, mcf_status)
                     cancelled.append({"receiptId": receipt_id, "status": order_status})
                     continue
 
+                already_pushed = set(pushed_map.get(receipt_id, []))
                 packages = extract_shipped_packages(payload)
-                if not packages:
+                new_packages = [p for p in packages if p["trackingNumber"] not in already_pushed]
+
+                # Complete/CompletePartialled mean Amazon will never produce
+                # another shipment for this order - safe to stop polling it
+                # even if some line item never got a tracking number at all
+                # (CompletePartialled: an item was unfulfillable).
+                is_final = order_status in ("Complete", "CompletePartialled")
+
+                if not new_packages:
                     still_processing += 1
+                    if is_final and order_status == "CompletePartialled":
+                        set_order_mcf_status(pb_token, receipt_id, "shipped")
+                        completed_partial.append({"receiptId": receipt_id})
+                    elif is_final and already_pushed:
+                        set_order_mcf_status(pb_token, receipt_id, "shipped")
                     continue
 
-                pushed_any = False
-                for pkg in packages:
+                newly_pushed = set()
+                for pkg in new_packages:
                     carrier_name = map_carrier_name(pkg["carrierCode"], etsy_carrier_names)
                     if not carrier_name:
                         skipped_no_carrier_match.append({
@@ -763,19 +1053,29 @@ def UpdateEtsyTrackingFromAmazon(request):
                         })
                         continue
                     push_tracking_to_etsy(access_token, shop_id, receipt_id, pkg["trackingNumber"], carrier_name)
-                    shipped.append({"receiptId": receipt_id, "carrier": carrier_name, "tracking": pkg["trackingNumber"]})
-                    pushed_any = True
+                    shipped.append({
+                        "receiptId": receipt_id, "carrier": carrier_name, "tracking": pkg["trackingNumber"],
+                        "additional": bool(already_pushed),
+                    })
+                    newly_pushed.add(pkg["trackingNumber"])
 
-                if pushed_any:
+                if newly_pushed:
+                    set_pushed_tracking(pb_token, receipt_id, sorted(already_pushed | newly_pushed))
+
+                if is_final:
                     set_order_mcf_status(pb_token, receipt_id, "shipped")
+                    if order_status == "CompletePartialled":
+                        completed_partial.append({"receiptId": receipt_id})
+                # else: leave mcf_status="in_progress" so a later, separate
+                # shipment for the rest of this order is still checked for.
             except Exception as exc:
                 errors.append(f"Receipt {receipt_id}: {exc}")
 
-        report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, errors)
+        report_text = format_tracking_report(shipped, still_processing, skipped_no_carrier_match, cancelled, completed_partial, errors)
         from NotificationRouting import notify
         notify(
             "etsy-daily-tracking-update", "amzbot", report_text,
-            is_error=bool(skipped_no_carrier_match or cancelled or errors),
+            is_error=bool(skipped_no_carrier_match or cancelled or completed_partial or errors),
             subject=f"Etsy tracking sync - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         )
 
@@ -785,6 +1085,7 @@ def UpdateEtsyTrackingFromAmazon(request):
             "stillProcessing": still_processing,
             "skippedNoCarrierMatch": skipped_no_carrier_match,
             "cancelled": cancelled,
+            "completedPartial": completed_partial,
             "errors": errors,
         })
     except Exception as exc:
@@ -831,18 +1132,22 @@ def GetMcfOrderById(request):
     """Read-only: looks up one specific Amazon MCF fulfillment order by its
     exact sellerFulfillmentOrderId - used to check whether a manually
     created Seller Central order actually exists under the id the user
-    thinks they used, without waiting for the daily tracking-sync job."""
+    thinks they used, without waiting for the daily tracking-sync job.
+    Optional region=US|UK|EU query param picks which regional account to
+    check (defaults to US, since most manual lookups are for US orders and
+    this is a low-stakes diagnostic tool, not the bulk sync path)."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     if ADMIN_KEY and (not hasattr(request, "args") or request.args.get("key") != ADMIN_KEY):
         return json_response({"error": "Unauthorized"}, 401)
 
     order_id = request.args.get("order_id") if hasattr(request, "args") else None
+    region = (request.args.get("region") if hasattr(request, "args") else None) or "US"
     if not order_id:
         return json_response({"error": "order_id is required"}, 400)
 
     try:
-        client = fulfillment_outbound_client()
+        client = fulfillment_outbound_client(region)
         resp = client.get_fulfillment_order(sellerFulfillmentOrderId=order_id)
         return json_response({"found": True, "orderId": order_id, "data": resp.payload})
     except Exception as exc:

@@ -8,15 +8,19 @@ import requests
 from AdsAuth import AD_PROFILES, ADS_REGION_ENDPOINTS, cors_headers, json_response
 from AdsReporting import (
     ADMIN_KEY,
+    LEGACY_CREATIVE_TYPES,
+    POCKETBASE_ADS_CAMPAIGNS_COLLECTION,
     POCKETBASE_BATCH_SIZE,
     POCKETBASE_URL,
     check_report_status,
     download_report_rows,
     fetch_campaign_to_portfolio_name,
+    fetch_campaign_to_profile_id,
     last_recorded_date,
     pb_authenticate,
     pb_batch,
     pb_list_connected,
+    poll_legacy_report,
     refresh_access_token,
     request_campaign_report,
 )
@@ -241,6 +245,190 @@ def pb_list_keyword_stats_ids(token, profile_id, start_date, end_date):
     return ids
 
 
+def request_legacy_keyword_report(base_url, access_token, client_id, ads_profile_id, date_str, creative_type):
+    """Same v2 legacy endpoint family as AdsReporting.request_legacy_report,
+    but /v2/hsa/keywords/report - confirmed live 2026-09-06 to exist and
+    return real keyword-level data for legacy Sponsored Brands campaigns
+    (video and non-video) that the modern v3 sbTargeting report never
+    covers at all, the same exclusion already known and worked around at
+    the campaign level (see AdsReporting.py)."""
+    body = {
+        "reportDate": date_str.replace("-", ""),
+        "metrics": "campaignId,adGroupId,keywordId,keywordText,matchType,impressions,clicks,cost,attributedSales14d,attributedConversions14d",
+    }
+    if creative_type:
+        body["creativeType"] = creative_type
+    resp = requests.post(
+        f"{base_url}/v2/hsa/keywords/report",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": client_id,
+            "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=30,
+    )
+    if resp.status_code != 202:
+        raise RuntimeError(f"Legacy keyword report request failed (creativeType={creative_type}): HTTP {resp.status_code} - {resp.text}")
+    return resp.json()["reportId"]
+
+
+def legacy_keyword_row_to_body(ads_profile, row, date_str, campaign_names):
+    """This v2 legacy report has no campaignName/adGroupName/bid fields at
+    all (unlike the v3 report) - campaign_name is backfilled from the live
+    ads_campaigns snapshot; ad_group_name and bid are left blank/None, same
+    tolerance GetAdsKeywordStats already has for a row missing them."""
+    year, month = 0, 0
+    try:
+        parsed = datetime.strptime(date_str, "%Y-%m-%d")
+        year, month = parsed.year, parsed.month
+    except ValueError:
+        pass
+    campaign_id = str(row.get("campaignId"))
+    return {
+        "profile_id": str(ads_profile.get("profileId")),
+        "campaign_id": campaign_id,
+        "campaign_name": campaign_names.get(campaign_id, ""),
+        "campaign_status": "",
+        "ad_group_id": str(row.get("adGroupId", "")),
+        "ad_group_name": "",
+        "target_id": str(row.get("keywordId", "")),
+        "target_text": row.get("keywordText", ""),
+        "target_type": "",
+        "match_type": row.get("matchType", ""),
+        "country_code": ads_profile.get("countryCode", ""),
+        "currency_code": ads_profile.get("currencyCode", ""),
+        "ad_product": "SPONSORED_BRANDS",
+        "date": date_str,
+        "month": month,
+        "year": year,
+        "impressions": row.get("impressions", 0),
+        "clicks": row.get("clicks", 0),
+        "spend": row.get("cost", 0),
+        "sales": row.get("attributedSales14d", 0),
+        "orders": row.get("attributedConversions14d", 0),
+        "bid": None,
+    }
+
+
+def pb_known_target_ids(token, profile_id, ad_product, date_str):
+    ids = set()
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_KEYWORD_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={
+                "filter": f'(profile_id = "{profile_id}" && ad_product = "{ad_product}" && date = "{date_str}")',
+                "perPage": 500,
+                "fields": "target_id",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        ids.update(item["target_id"] for item in data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return ids
+
+
+def fetch_campaign_names(token):
+    names = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "campaign_id,campaign_name"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            names[item.get("campaign_id")] = item.get("campaign_name", "")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return names
+
+
+def pull_and_store_legacy_sb_keyword_stats(pb_token, connections, start_date, end_date, errors):
+    """Supplements the modern keyword pull with legacy-only Sponsored Brands
+    campaigns (both video and non-video, see LEGACY_CREATIVE_TYPES) for
+    every day in the range, per profile - same exclusion and same v2
+    fallback pattern as AdsReporting.pull_and_store_legacy_sb_stats, but at
+    keyword level (confirmed live 2026-09-06: legacy SB campaigns like "FR
+    PAREO VIDEO OLD" never get keyword-level rows from the modern
+    sbTargeting v3 report at all, unlike at the campaign level where at
+    least aggregate totals came through). Skips any target_id already
+    written for that (profile, date) by the v3 pull, since the v2 legacy
+    report also includes modern SBv4 campaigns' keywords already captured
+    correctly there - summing both would double-count them."""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    date_strs = []
+    d = start
+    while d <= end:
+        date_strs.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+
+    campaign_names = fetch_campaign_names(pb_token)
+    rows_written = 0
+    for connection in connections:
+        profile_key = connection.get("region")
+        refresh_token = connection.get("refresh_token")
+        if profile_key not in AD_PROFILES or not refresh_token:
+            continue
+        try:
+            access_token = refresh_access_token(profile_key, refresh_token)
+        except Exception as exc:
+            errors.append(f"legacy-kw {profile_key}: token refresh failed: {exc}")
+            continue
+        client_id = AD_PROFILES[profile_key]["client_id"]
+
+        for ads_profile in connection.get("profiles", []) or []:
+            if ads_profile.get("accountType") == "agency":
+                continue
+            region = ads_profile.get("region")
+            base_url = ADS_REGION_ENDPOINTS.get(region)
+            ads_profile_id = ads_profile.get("profileId")
+            if not base_url or not ads_profile_id:
+                continue
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Amazon-Advertising-API-ClientId": client_id,
+                "Amazon-Advertising-API-Scope": str(ads_profile_id),
+            }
+
+            for date_str in date_strs:
+                for creative_type in LEGACY_CREATIVE_TYPES:
+                    try:
+                        known_ids = pb_known_target_ids(pb_token, str(ads_profile_id), "SPONSORED_BRANDS", date_str)
+                        report_id = request_legacy_keyword_report(
+                            base_url, access_token, client_id, ads_profile_id, date_str, creative_type
+                        )
+                        rows = poll_legacy_report(base_url, headers, report_id)
+                        bodies = [
+                            legacy_keyword_row_to_body(ads_profile, row, date_str, campaign_names)
+                            for row in rows
+                            if str(row.get("keywordId")) not in known_ids and (row.get("cost") or row.get("attributedSales14d"))
+                        ]
+                        ops = [
+                            {"method": "POST", "url": f"/api/collections/{POCKETBASE_ADS_KEYWORD_COLLECTION}/records", "body": b}
+                            for b in bodies
+                        ]
+                        for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+                            pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+                        rows_written += len(bodies)
+                    except Exception as exc:
+                        errors.append(f"legacy-kw({creative_type}) {profile_key}/{ads_profile_id} {date_str}: {exc}")
+
+    return rows_written
+
+
 def pull_and_store_keyword_stats(start_date, end_date):
     pb_token = pb_authenticate()
     connections = pb_list_connected(pb_token)
@@ -268,7 +456,17 @@ def pull_and_store_keyword_stats(start_date, end_date):
     jobs = submit_keyword_report_jobs(connections, start_date, end_date, errors)
     rows_written = poll_and_store_keyword_jobs(pb_token, jobs, errors)
 
-    return {"rowsWritten": rows_written, "profilesPulled": len(profile_ids), "errors": errors}
+    # Legacy Sponsored Brands campaigns (no brandEntityId) are invisible to
+    # the v3 pull above at keyword level too, not just campaign level - see
+    # pull_and_store_legacy_sb_keyword_stats.
+    legacy_rows_written = pull_and_store_legacy_sb_keyword_stats(pb_token, connections, start_date, end_date, errors)
+
+    return {
+        "rowsWritten": rows_written + legacy_rows_written,
+        "legacyRowsWritten": legacy_rows_written,
+        "profilesPulled": len(profile_ids),
+        "errors": errors,
+    }
 
 
 def UpdateAdsKeywordStats(request):
@@ -355,6 +553,16 @@ def GetAdsKeywordStats(request):
             response.raise_for_status()
             data = response.json()
             for item in data.get("items", []):
+                # Keyed WITH profile_id (per-profile totals kept separate
+                # here) - the actual cross-profile de-dup happens in a
+                # second pass below, per the user's correction (2026-09-06):
+                # the same real campaign/ad group/target can be reported
+                # under more than one Amazon Ads profile for this account,
+                # and it's the SAME underlying campaign in both, not two
+                # independent ones - so their numbers must not be summed
+                # together (that would double the real total). Instead,
+                # exactly one profile's own numbers are kept, discarding the
+                # other's entirely.
                 key = (item.get("profile_id"), item.get("campaign_id"), item.get("ad_group_id"), item.get("target_id"))
                 bucket = keywords.setdefault(key, {
                     "profileId": item.get("profile_id"),
@@ -370,7 +578,7 @@ def GetAdsKeywordStats(request):
                     "countryCode": item.get("country_code", ""),
                     "currencyCode": item.get("currency_code", ""),
                     "impressions": 0, "clicks": 0, "spend": 0, "sales": 0, "orders": 0,
-                    "bid": None, "_bidDate": "", "_nameDate": "",
+                    "bid": None, "bidUnverified": False, "_bidDate": "", "_nameDate": "", "_lastDate": "",
                 })
                 bucket["impressions"] += item.get("impressions", 0)
                 bucket["clicks"] += item.get("clicks", 0)
@@ -379,7 +587,10 @@ def GetAdsKeywordStats(request):
                 bucket["orders"] += item.get("orders", 0)
                 # bid is a current setting, not a metric to sum - keep the
                 # value from whichever row in range is most recent.
-                if item.get("bid") is not None and item.get("date", "") >= bucket["_bidDate"]:
+                # A stored 0 means "unknown" (a PocketBase number field
+                # stores a written null as 0, and no real Amazon bid is
+                # ever $0), never let it overwrite an actually-known bid.
+                if item.get("bid") and item.get("date", "") >= bucket["_bidDate"]:
                     bucket["bid"] = item.get("bid")
                     bucket["_bidDate"] = item.get("date", "")
                 # campaignName can change mid-window if the campaign gets
@@ -389,14 +600,87 @@ def GetAdsKeywordStats(request):
                 if item.get("campaign_name") and item.get("date", "") >= bucket["_nameDate"]:
                     bucket["campaignName"] = item.get("campaign_name")
                     bucket["_nameDate"] = item.get("date", "")
+                bucket["_lastDate"] = max(bucket["_lastDate"], item.get("date", ""))
             if page >= data.get("totalPages", 1):
                 break
             page += 1
 
+        # Second pass: when the same real campaign/ad group/target came
+        # back under more than one profile_id, keep only whichever profile
+        # has the most recent activity - not a sum of both.
+        winners = {}
+        candidates_by_outer = {}
+        for bucket in keywords.values():
+            outer_key = (bucket["campaignId"], bucket["adGroupId"], bucket["targetId"])
+            candidates_by_outer.setdefault(outer_key, []).append(bucket)
+            current = winners.get(outer_key)
+            if current is None or bucket["_lastDate"] > current["_lastDate"]:
+                winners[outer_key] = bucket
+        # The winning profile can be the legacy-SB-sourced one (see
+        # pull_and_store_legacy_sb_keyword_stats), which has neither a real
+        # bid nor an ad_group_name at all - found live 2026-09-06 as a real
+        # bid showing as "$0.00" once a legacy row became the most recent.
+        # Backfill just those two fields from a losing candidate that
+        # actually has them, without touching the winner's own real (and
+        # more current) metrics. bidUnverified marks that the bid did NOT
+        # come from the winning (more current) source - it's whatever a
+        # possibly-old historical/manually-imported row last reported, with
+        # no way to confirm it's still accurate today. Per the user
+        # (2026-09-06), Apply is blocked entirely on an unverified bid (see
+        # propose_bid_change/propose_bid_change_multi_period) since the %
+        # change would be calculated from a baseline that might not be real
+        # anymore.
+        for outer_key, winner in winners.items():
+            if winner["bid"] and winner["adGroupName"]:
+                continue
+            for candidate in candidates_by_outer[outer_key]:
+                if candidate is winner:
+                    continue
+                if not winner["bid"] and candidate["bid"]:
+                    winner["bid"] = candidate["bid"]
+                    winner["bidUnverified"] = True
+                if not winner["adGroupName"] and candidate["adGroupName"]:
+                    winner["adGroupName"] = candidate["adGroupName"]
+        keywords = winners
+
+        # Third pass: fold a manual-import synthetic placeholder row (no
+        # real ad_group_id/target_id - see import_manual_ads_report.py's
+        # "unknown-{campaign_id}-..." convention) into the real live-
+        # pipeline row for the same keyword text/match type in the same
+        # campaign, per the user's request (2026-09-06). Unlike the
+        # profile-duplication case above, these two rows cover different
+        # real time periods of the same keyword's history (the manual
+        # import predates live keyword-level tracking), so their numbers
+        # are additive, not duplicate readings of the same period - summed
+        # rather than picking just one.
+        real_by_text = {}
+        for bucket in keywords.values():
+            if not str(bucket["targetId"]).startswith("unknown-"):
+                real_by_text[(bucket["campaignId"], bucket["targetText"].strip().lower(), bucket["matchType"])] = bucket
+        for key, bucket in list(keywords.items()):
+            if not str(bucket["targetId"]).startswith("unknown-"):
+                continue
+            real = real_by_text.get((bucket["campaignId"], bucket["targetText"].strip().lower(), bucket["matchType"]))
+            if real is None or real is bucket:
+                continue
+            real["impressions"] += bucket["impressions"]
+            real["clicks"] += bucket["clicks"]
+            real["spend"] += bucket["spend"]
+            real["sales"] += bucket["sales"]
+            real["orders"] += bucket["orders"]
+            del keywords[key]
+
         campaign_to_portfolio = fetch_campaign_to_portfolio_name(token)
+        campaign_to_profile = fetch_campaign_to_profile_id(token)
         rows = list(keywords.values())
         for row in rows:
             row["portfolioName"] = campaign_to_portfolio.get(row["campaignId"], "")
+            # The live ads_campaigns snapshot is more trustworthy than
+            # whatever profile_id a stats row happens to carry (a manual
+            # import can tag the wrong one of this account's several
+            # per-country profiles) - only falls back to the stats row's
+            # own profile_id for a campaign no longer in the live snapshot.
+            row["profileId"] = campaign_to_profile.get(row["campaignId"], row["profileId"])
         if portfolio:
             rows = [r for r in rows if r["portfolioName"] == portfolio]
 
@@ -405,6 +689,7 @@ def GetAdsKeywordStats(request):
             row["acos"] = (row["spend"] / row["sales"] * 100) if row["sales"] else 0
             row.pop("_bidDate", None)
             row.pop("_nameDate", None)
+            row.pop("_lastDate", None)
 
         return json_response({
             "startDate": start_date,

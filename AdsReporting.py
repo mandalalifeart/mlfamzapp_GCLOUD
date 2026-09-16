@@ -430,6 +430,38 @@ def fetch_campaign_to_portfolio_name(token):
     return campaign_to_portfolio
 
 
+def fetch_campaign_to_profile_id(token):
+    """campaign_id -> the profile_id that currently, live owns it, per the
+    daily-synced ads_campaigns snapshot - more trustworthy than whatever
+    profile_id a stats row (especially an older manually-imported one)
+    happens to carry, since this account has more than one real Ads
+    profile per country and a manual import can tag the wrong one (found
+    live 2026-09-06: a real Apply call failed with Amazon's own
+    KEYWORD_CANNOT_FIND_AD_GROUP because the keyword-stats row's stored
+    profile_id wasn't the one that actually owns that ad group today -
+    the manually-imported row had been tagged with a dormant IT profile
+    while the campaign is actually live under a different IT profile)."""
+    campaign_to_profile = {}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_CAMPAIGNS_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={"perPage": 500, "page": page, "fields": "campaign_id,profile_id"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            if item.get("profile_id"):
+                campaign_to_profile[item.get("campaign_id")] = item.get("profile_id")
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+
+    return campaign_to_profile
+
+
 def GetAdsPortfolios(request):
     """Lightweight standalone list of {portfolioId, name} - lets a frontend
     page populate a portfolio dropdown up front, without first having to run

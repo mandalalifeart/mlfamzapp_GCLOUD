@@ -485,39 +485,125 @@ def DisableBidTarget(request):
         return json_response({"disabled": False, "error": str(exc), "type": exc.__class__.__name__}, 500)
 
 
-def _aggregate_window(token, target_id, start_date, end_date):
-    """Sum spend/sales/clicks/orders for one target across [start_date,
-    end_date] from ads_keyword_stats - used to build before/after windows
-    around a bid change's changed_at date."""
-    totals = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0}
+def _fetch_keyword_stats_by_target(token, min_date, max_date):
+    """Fetches every ads_keyword_stats row across [min_date, max_date] in one
+    paginated pull and indexes it by target_id -> [(date, spend, sales,
+    clicks, orders), ...]. Used by GetBidChangePerformance to compute every
+    change's before/after window from ONE broad fetch instead of a separate
+    PocketBase query per target per window - confirmed live 2026-09-10: with
+    531 applied changes, the old per-change-per-window query pattern meant
+    1000+ sequential round-trips and the endpoint simply never returned
+    (frontend saw "Failed to fetch" - past both the Cloudflare tunnel's
+    ~100s edge timeout and local_server.py's own ACK deadline). The combined
+    date range across every change's before/after window is typically far
+    narrower than the full stats history, so one broad fetch is cheap by
+    comparison regardless of how many distinct targets are involved."""
+    by_target = {}
     page = 1
     while True:
         response = requests.get(
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ADS_KEYWORD_COLLECTION}/records",
             headers={"Authorization": token},
-            params={"filter": f'target_id = "{target_id}" && date >= "{start_date}" && date <= "{end_date}"',
-                    "fields": "spend,sales,clicks,orders", "perPage": 200, "page": page},
+            params={"filter": f'date >= "{min_date}" && date <= "{max_date}"',
+                    "fields": "target_id,date,spend,sales,clicks,orders", "perPage": 500, "page": page},
             timeout=30,
         )
         response.raise_for_status()
         data = response.json()
         for item in data.get("items", []):
-            totals["spend"] += item.get("spend", 0) or 0
-            totals["sales"] += item.get("sales", 0) or 0
-            totals["clicks"] += item.get("clicks", 0) or 0
-            totals["orders"] += item.get("orders", 0) or 0
+            by_target.setdefault(item["target_id"], []).append(item)
         if page >= data.get("totalPages", 1):
             break
         page += 1
+    return by_target
+
+
+def _aggregate_window(rows, start_date, end_date):
+    """Sums spend/sales/clicks/orders from an already-fetched list of a
+    single target's rows (see _fetch_keyword_stats_by_target) over
+    [start_date, end_date] - pure in-memory filtering, no PocketBase call."""
+    totals = {"spend": 0.0, "sales": 0.0, "clicks": 0, "orders": 0}
+    for item in rows:
+        date = item.get("date", "")
+        if not (start_date <= date <= end_date):
+            continue
+        totals["spend"] += item.get("spend", 0) or 0
+        totals["sales"] += item.get("sales", 0) or 0
+        totals["clicks"] += item.get("clicks", 0) or 0
+        totals["orders"] += item.get("orders", 0) or 0
     totals["acos"] = (totals["spend"] / totals["sales"] * 100) if totals["sales"] else None
     return totals
+
+
+def _fetch_all(token, collection, params_extra):
+    items = []
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{collection}/records",
+            headers={"Authorization": token},
+            params={**params_extra, "perPage": 500, "page": page},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        items.extend(data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return items
+
+
+def GetBidChangeLog(request):
+    """Read-only: every applied/disabled bid-change log row, raw (no
+    before/after performance aggregation - see GetBidChangePerformance for
+    that) - added 2026-09-10 per the user ("add a bid change history for
+    the keyword") so AdsKeywordsPage.jsx can show each keyword's own bid
+    history inline, fetched ONCE for the whole page and grouped by
+    target_id client-side, rather than one call per keyword row."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+
+    try:
+        token = pb_authenticate()
+        rows = _fetch_all(token, POCKETBASE_BID_LOG_COLLECTION, {"sort": "-changed_at"})
+        changes = [
+            {
+                "targetId": r.get("target_id", ""),
+                "oldBid": r.get("old_bid"),
+                "newBid": r.get("new_bid"),
+                "changedAt": r.get("changed_at", ""),
+                "reason": r.get("reason", ""),
+                "status": r.get("status", ""),
+                "action": r.get("action", ""),
+            }
+            for r in rows
+        ]
+        return json_response({"changes": changes})
+    except Exception as exc:
+        return json_response({"error": str(exc)}, 500)
 
 
 def GetBidChangePerformance(request):
     """Read-only: for every applied bid change, shows how that keyword
     performed in an equal-length window before vs. after the change - added
     2026-08-29 at the user's request to track outcomes of every bid change
-    made through the Apply button, not just log that it happened."""
+    made through the Apply button, not just log that it happened.
+
+    Performance fix (2026-09-10, confirmed live): with 531 applied changes,
+    the original version queried PocketBase twice per change (before/after
+    window) - 1000+ sequential round-trips, and the endpoint simply never
+    returned (frontend: "Failed to fetch", past both the tunnel's ~100s
+    edge timeout and local_server.py's own ACK deadline). Now fetches every
+    ads_keyword_stats row across the one combined date range every change's
+    window falls within, ONCE, and aggregates each change's before/after
+    from that in-memory index - see _fetch_keyword_stats_by_target.
+
+    Also resolves each change's portfolio (via ads_campaigns.portfolio_id ->
+    ads_portfolios.name, campaign_id already stored on the log row) so the
+    frontend can filter by country/portfolio/campaign name (2026-09-10, per
+    the user) without a second round of backend query-param plumbing -
+    filtering happens client-side against this one enriched response."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
 
@@ -525,23 +611,26 @@ def GetBidChangePerformance(request):
 
     try:
         token = pb_authenticate()
-        changes = []
-        page = 1
-        while True:
-            response = requests.get(
-                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_BID_LOG_COLLECTION}/records",
-                headers={"Authorization": token},
-                params={"filter": 'status = "applied"', "sort": "-changed_at", "perPage": 200, "page": page},
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
-            changes.extend(data.get("items", []))
-            if page >= data.get("totalPages", 1):
-                break
-            page += 1
+        changes = _fetch_all(token, POCKETBASE_BID_LOG_COLLECTION, {"filter": 'status = "applied"', "sort": "-changed_at"})
+        if not changes:
+            return json_response({"windowDays": window_days, "changes": []})
+
+        campaigns = _fetch_all(token, "ads_campaigns", {"fields": "campaign_id,portfolio_id"})
+        portfolio_id_by_campaign = {c["campaign_id"]: c.get("portfolio_id") for c in campaigns if c.get("portfolio_id")}
+        portfolios = _fetch_all(token, "ads_portfolios", {"fields": "portfolio_id,name"})
+        portfolio_name_by_id = {p["portfolio_id"]: p.get("name", "") for p in portfolios}
 
         today = datetime.now(LA_TZ).strftime("%Y-%m-%d")
+        today_dt = datetime.strptime(today, "%Y-%m-%d")
+
+        window_bounds = []
+        for change in changes:
+            changed_dt = datetime.strptime(change["changed_at"], "%Y-%m-%d")
+            window_bounds.append((changed_dt - timedelta(days=window_days)).strftime("%Y-%m-%d"))
+            window_bounds.append(min(today, (changed_dt + timedelta(days=window_days)).strftime("%Y-%m-%d")))
+        min_date, max_date = min(window_bounds), max(window_bounds)
+        stats_by_target = _fetch_keyword_stats_by_target(token, min_date, max_date)
+
         results = []
         for change in changes:
             changed_at = change["changed_at"]
@@ -551,19 +640,22 @@ def GetBidChangePerformance(request):
             post_start = changed_at
             post_end = min(today, (changed_dt + timedelta(days=window_days)).strftime("%Y-%m-%d"))
 
-            before = _aggregate_window(token, change["target_id"], pre_start, pre_end)
-            after = _aggregate_window(token, change["target_id"], post_start, post_end)
+            target_rows = stats_by_target.get(change["target_id"], [])
+            before = _aggregate_window(target_rows, pre_start, pre_end)
+            after = _aggregate_window(target_rows, post_start, post_end)
 
+            portfolio_id = portfolio_id_by_campaign.get(change.get("campaign_id", ""))
             results.append({
                 "targetId": change["target_id"],
                 "targetText": change.get("target_text", ""),
                 "campaignName": change.get("campaign_name", ""),
                 "countryCode": change.get("country_code", ""),
+                "portfolioName": portfolio_name_by_id.get(portfolio_id, "") if portfolio_id else "",
                 "oldBid": change.get("old_bid"),
                 "newBid": change.get("new_bid"),
                 "changedAt": changed_at,
                 "reason": change.get("reason", ""),
-                "daysSinceChange": (datetime.strptime(today, "%Y-%m-%d") - changed_dt).days,
+                "daysSinceChange": (today_dt - changed_dt).days,
                 "before": before,
                 "after": after,
             })
