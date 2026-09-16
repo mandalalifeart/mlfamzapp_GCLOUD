@@ -128,6 +128,7 @@ ROUTED_FUNCTIONS = [
     "UpdateCountryPpcDaily",
     "GetCountryPpcDaily",
     "SendDailyAdsDigest",
+    "SendWeeklyReturnRateDigest",
     "UpdateAmazonFinances",
     "GetPaymentsExpensesSummary",
     "UpdateWiseFinances",

@@ -407,6 +407,11 @@ def SendDailyAdsDigest(request):
     return _impl(request)
 
 
+def SendWeeklyReturnRateDigest(request):
+    from AmazonReturnRateMonitor import SendWeeklyReturnRateDigest as _impl
+    return _impl(request)
+
+
 def GetCountryPpcDaily(request):
     from UpdateCountryPpcDaily import GetCountryPpcDaily as _impl
     return _impl(request)
