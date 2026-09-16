@@ -39,6 +39,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from NotificationRouting import notify
 
 LOCAL_API_BASE = os.environ.get("LOCAL_API_BASE", "https://amzapi.mandalalifeart.com")
+# MlfReportReq/MlfReportGet are SP-API-only (no PocketBase dependency), so
+# they run on GCP - see CLAUDE.md "AmzBot: local job runner".
+GCLOUD_API_BASE = os.environ.get("GCLOUD_API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
 LA_TZ = ZoneInfo("America/Los_Angeles")
 JOB_NAME = "amzbot-daily-monthly-update"
 APP_NAME = "amzbot"
@@ -81,7 +84,7 @@ def build_month_date_range(year, month):
 
 def request_report(marketplace, start_date, end_date):
     resp = requests.post(
-        f"{LOCAL_API_BASE}/MlfReportReq",
+        f"{GCLOUD_API_BASE}/MlfReportReq",
         json={"start_date": start_date, "end_date": end_date, "marketplace": marketplace},
         timeout=60,
     )
@@ -98,7 +101,7 @@ def poll_report_ready(marketplace, report_req_id):
     for attempt in range(1, POLL_MAX_ATTEMPTS + 1):
         try:
             resp = requests.post(
-                f"{LOCAL_API_BASE}/MlfReportGet",
+                f"{GCLOUD_API_BASE}/MlfReportGet",
                 json={"marketplace": marketplace, "report_req_id": report_req_id},
                 timeout=60,
             )

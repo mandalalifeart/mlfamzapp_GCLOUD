@@ -60,14 +60,15 @@ class RequestSnapshot:
 # EtsyOAuthCallback), which stay on GCP because their URLs are registered
 # as fixed redirect URIs in Amazon's/Etsy's own app dashboards - moving
 # them needs a manual dashboard update, not just a routing change here.
+# MlfReportGet/MlfReportReq moved back to GCP 2026-09-16 (SP-API-only, no
+# PocketBase dependency, negligible GCP cost, and shouldn't depend on this
+# mini PC's uptime) - see CLAUDE.md "AmzBot: local job runner".
 ROUTED_FUNCTIONS = [
     "AssignSkuGroup",
     "GetMarketplaceSalesSummary",
     "GetNextOrderData",
     "GetProductDetail",
     "GetSalesDepartmentReport",
-    "MlfReportGet",
-    "MlfReportReq",
     "UpdateNextOrderField",
     "UpdateSkuSalesMonth",
     "GetUkInventory",
