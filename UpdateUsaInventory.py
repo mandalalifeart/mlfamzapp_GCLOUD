@@ -172,94 +172,100 @@ def resolve_target_record(asin, stats_by_sku, sku_to_asin, asin_to_first_sku):
     return None, fallback_sku
 
 
+def sync_usa_inventory():
+    """Pulls FBA + AWD and writes the USA balance fields onto sku_statistics,
+    returning the same result dict the HTTP handler serializes. Split out of
+    the handler so the weekly scheduled job (WeeklyUsaInventorySync.py) can
+    reuse it without going through HTTP."""
+    fba_rows = fetch_fba_rows()
+    awd_rows = fetch_awd_rows()
+
+    token = pb_authenticate()
+    sku_to_asin, asin_to_first_sku = load_mapping(token)
+    stats_records = fetch_all(token, POCKETBASE_STATS_COLLECTION)
+    stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
+
+    fba_by_asin = {}
+    fba_unmapped = []
+    for row in fba_rows:
+        sku = (row.get("sku") or "").strip()
+        if not sku or sku.startswith("amzn.gr."):
+            continue
+        asin = (row.get("asin") or "").strip() or sku_to_asin.get(sku)
+        qty = int(float(row.get("afn-fulfillable-quantity") or 0))
+        if not asin:
+            if qty:
+                fba_unmapped.append(sku)
+            continue
+        fba_by_asin[asin] = fba_by_asin.get(asin, 0) + qty
+
+    # AWD's own onhand/inbound split maps onto this app's existing
+    # balance/on-the-way convention: usa_balance_awd is available (on
+    # hand) stock, and AWD's inbound quantity feeds usa_on_the_way -
+    # not usa_balance_awd - since USA's "on the way" is defined as AWD's
+    # inbound only (FBA doesn't contribute to it here).
+    awd_onhand_by_asin = {}
+    awd_inbound_by_asin = {}
+    awd_unmapped = []
+    for row in awd_rows:
+        sku = (row.get("sku") or "").strip()
+        onhand = int(row.get("totalOnhandQuantity") or 0)
+        inbound = int(row.get("totalInboundQuantity") or 0)
+        asin = sku_to_asin.get(sku)
+        if not asin:
+            if onhand or inbound:
+                awd_unmapped.append(sku)
+            continue
+        awd_onhand_by_asin[asin] = awd_onhand_by_asin.get(asin, 0) + onhand
+        awd_inbound_by_asin[asin] = awd_inbound_by_asin.get(asin, 0) + inbound
+
+    all_asins = set(fba_by_asin) | set(awd_onhand_by_asin) | set(awd_inbound_by_asin)
+    written = []
+    for asin in all_asins:
+        record, target_sku = resolve_target_record(asin, stats_by_sku, sku_to_asin, asin_to_first_sku)
+        if not target_sku:
+            continue
+        fba_qty = fba_by_asin.get(asin, 0)
+        awd_qty = awd_onhand_by_asin.get(asin, 0)
+        body = {
+            "usa_balance_fba": fba_qty,
+            "usa_balance_awd": awd_qty,
+            "usa_balance": fba_qty + awd_qty,
+            "usa_on_the_way": awd_inbound_by_asin.get(asin, 0),
+        }
+        if record:
+            resp = requests.patch(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records/{record['id']}",
+                headers={"Authorization": token},
+                json=body,
+                timeout=30,
+            )
+        else:
+            resp = requests.post(
+                f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records",
+                headers={"Authorization": token},
+                json={"sku": target_sku, **body},
+                timeout=30,
+            )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"PocketBase write failed for {target_sku}: HTTP {resp.status_code} - {resp.text}")
+        written.append({"sku": target_sku, "asin": asin, **body})
+
+    return {
+        "status": "success",
+        "skusWritten": len(written),
+        "fbaUnmappedSkus": sorted(set(fba_unmapped)),
+        "awdUnmappedSkus": sorted(set(awd_unmapped)),
+        "written": written,
+    }
+
+
 def UpdateUsaInventory(request):
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     if request.method not in ("GET", "POST"):
         return json_response({"error": "Method not allowed"}, 405)
-
     try:
-        fba_rows = fetch_fba_rows()
-        awd_rows = fetch_awd_rows()
-
-        token = pb_authenticate()
-        sku_to_asin, asin_to_first_sku = load_mapping(token)
-        stats_records = fetch_all(token, POCKETBASE_STATS_COLLECTION)
-        stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
-
-        fba_by_asin = {}
-        fba_unmapped = []
-        for row in fba_rows:
-            sku = (row.get("sku") or "").strip()
-            if not sku or sku.startswith("amzn.gr."):
-                continue
-            asin = (row.get("asin") or "").strip() or sku_to_asin.get(sku)
-            qty = int(float(row.get("afn-fulfillable-quantity") or 0))
-            if not asin:
-                if qty:
-                    fba_unmapped.append(sku)
-                continue
-            fba_by_asin[asin] = fba_by_asin.get(asin, 0) + qty
-
-        # AWD's own onhand/inbound split maps onto this app's existing
-        # balance/on-the-way convention: usa_balance_awd is available (on
-        # hand) stock, and AWD's inbound quantity feeds usa_on_the_way -
-        # not usa_balance_awd - since USA's "on the way" is defined as AWD's
-        # inbound only (FBA doesn't contribute to it here).
-        awd_onhand_by_asin = {}
-        awd_inbound_by_asin = {}
-        awd_unmapped = []
-        for row in awd_rows:
-            sku = (row.get("sku") or "").strip()
-            onhand = int(row.get("totalOnhandQuantity") or 0)
-            inbound = int(row.get("totalInboundQuantity") or 0)
-            asin = sku_to_asin.get(sku)
-            if not asin:
-                if onhand or inbound:
-                    awd_unmapped.append(sku)
-                continue
-            awd_onhand_by_asin[asin] = awd_onhand_by_asin.get(asin, 0) + onhand
-            awd_inbound_by_asin[asin] = awd_inbound_by_asin.get(asin, 0) + inbound
-
-        all_asins = set(fba_by_asin) | set(awd_onhand_by_asin) | set(awd_inbound_by_asin)
-        written = []
-        for asin in all_asins:
-            record, target_sku = resolve_target_record(asin, stats_by_sku, sku_to_asin, asin_to_first_sku)
-            if not target_sku:
-                continue
-            fba_qty = fba_by_asin.get(asin, 0)
-            awd_qty = awd_onhand_by_asin.get(asin, 0)
-            body = {
-                "usa_balance_fba": fba_qty,
-                "usa_balance_awd": awd_qty,
-                "usa_balance": fba_qty + awd_qty,
-                "usa_on_the_way": awd_inbound_by_asin.get(asin, 0),
-            }
-            if record:
-                resp = requests.patch(
-                    f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records/{record['id']}",
-                    headers={"Authorization": token},
-                    json=body,
-                    timeout=30,
-                )
-            else:
-                resp = requests.post(
-                    f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records",
-                    headers={"Authorization": token},
-                    json={"sku": target_sku, **body},
-                    timeout=30,
-                )
-            if resp.status_code not in (200, 201):
-                raise RuntimeError(f"PocketBase write failed for {target_sku}: HTTP {resp.status_code} - {resp.text}")
-            written.append({"sku": target_sku, "asin": asin, **body})
-
-        return json_response({
-            "status": "success",
-            "skusWritten": len(written),
-            "fbaUnmappedSkus": sorted(set(fba_unmapped)),
-            "awdUnmappedSkus": sorted(set(awd_unmapped)),
-            "written": written,
-        })
-
+        return json_response(sync_usa_inventory())
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

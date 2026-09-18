@@ -412,6 +412,11 @@ def SendWeeklyReturnRateDigest(request):
     return _impl(request)
 
 
+def RunWeeklyUsaInventorySync(request):
+    from WeeklyUsaInventorySync import RunWeeklyUsaInventorySync as _impl
+    return _impl(request)
+
+
 def GetCountryPpcDaily(request):
     from UpdateCountryPpcDaily import GetCountryPpcDaily as _impl
     return _impl(request)
