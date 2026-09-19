@@ -147,25 +147,27 @@ def trailing_completed_months(n, today=None):
     return list(reversed(months))
 
 
-def fetch_usa_sales_by_asin(token, months):
-    """Sums sku_sales quantity per ASIN across USA_SALES_MARKETPLACES for the
-    given (year, month) pairs. sku_sales rows already carry the real ASIN a
-    sale was recorded under regardless of which SKU spelling was used, so
-    this sums correctly across e.g. a relisted SKU's old and new spellings
-    without needing the mapping table at all."""
-    if not months:
-        return {}
-    month_clause = " || ".join(f'(year = {y} && month = {m})' for y, m in months)
+def fetch_all_usa_sales_by_asin_month(token):
+    """Every sku_sales row across USA_SALES_MARKETPLACES, ALL years, summed
+    per (asin, year, month) - {asin: {(year, month): qty}}. A single fetch
+    (only ~5-6k rows total for this app's whole USA-market history) backs
+    both recommendation formulas below: the recent one needs the trailing 3
+    months, the seasonal one needs the same 3 calendar months from 1-2 years
+    ago - both are just different (year, month) slices of the same data, so
+    one broad fetch is simpler and cheaper than fetching each window
+    separately. sku_sales rows already carry the real ASIN a sale was
+    recorded under regardless of which SKU spelling was used, so this sums
+    correctly across e.g. a relisted SKU's old and new spellings without
+    needing the mapping table at all."""
     marketplace_clause = " || ".join(f'marketplace = "{mkt}"' for mkt in USA_SALES_MARKETPLACES)
-    filter_str = f"({month_clause}) && ({marketplace_clause})"
 
-    totals = defaultdict(int)
+    totals = defaultdict(lambda: defaultdict(int))
     page = 1
     while True:
         response = requests.get(
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_SALES_COLLECTION}/records",
             headers={"Authorization": token},
-            params={"filter": filter_str, "perPage": 500, "page": page, "fields": "ASIN,quantity"},
+            params={"filter": marketplace_clause, "perPage": 500, "page": page, "fields": "ASIN,quantity,year,month"},
             timeout=60,
         )
         if response.status_code != 200:
@@ -173,8 +175,9 @@ def fetch_usa_sales_by_asin(token, months):
         data = response.json()
         for row in data.get("items", []):
             asin = row.get("ASIN")
-            if asin:
-                totals[asin] += int(row.get("quantity") or 0)
+            if not asin:
+                continue
+            totals[asin][(row.get("year"), row.get("month"))] += int(row.get("quantity") or 0)
         if page >= data.get("totalPages", 1):
             break
         page += 1
@@ -188,26 +191,93 @@ def days_in_months(months):
     return sum(calendar.monthrange(y, m)[1] for y, m in months)
 
 
-def compute_usa_recommendation(total_sales_3mo, lookback_days, item, next_shipment_date, today):
-    """Per the user's exact spec (2026-09-19):
-        A = today, B = next_shipment_date, x = B - A (days)
-        need_for_x_days = x * (average per day over the last 3 months)
-        need_for_3_months = the last 3 months' total (used as-is as the
-            forecast for the NEXT 3 months, same assumption a 3-month
-            shipping cadence already relies on)
-        reco = need_for_3_months + need_for_x_days
-               - USA_Bal - USA_OTW - USA_Next(already entered)
+def shipment_window_months(shipment_date, years_back=0):
+    """The 3 calendar months starting at shipment_date's own month, shifted
+    back by years_back full years - e.g. shipment_date=2027-12-01,
+    years_back=1 -> [(2026,12), (2027,1), (2027,2)] (Dec+Jan+Feb one year
+    earlier: the actual season this shipment needs to cover once it lands,
+    as it played out last time that season happened)."""
+    year = shipment_date.year - years_back
+    month = shipment_date.month
+    months = []
+    for i in range(3):
+        m = month + i
+        y = year + (m - 1) // 12
+        mm = ((m - 1) % 12) + 1
+        months.append((y, mm))
+    return months
 
-    x is clamped to >=0 (an overdue next_shipment_date shouldn't reduce the
-    recommendation) - not otherwise specified, but the formula assumes B is
-    in the future."""
+
+def sum_window(asin_sales, months):
+    return sum(asin_sales.get(ym, 0) for ym in months)
+
+
+def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months):
+    """Two recommendations, both confirmed with the user (2026-09-19), both
+    in the same "how many MORE units to still add to USA Next" shape as the
+    page's existing Missing column (0 = already covered):
+
+    Reco 1 ("recent"): assumes the next 3 months look like the last 3.
+        x = days from today to next_shipment_date
+        need_for_x_days = x * (recent 3-month total / real days in those months)
+        need_for_3_months = the recent 3-month total, used as-is
+        reco = need_for_3_months + need_for_x_days - USA_Bal - USA_OTW - USA_Next
+
+    Reco 2 ("seasonal"): a seasonal product's next-3-months can look nothing
+    like its last-3-months (e.g. shipping into summer from a winter
+    baseline), so instead of the recent total it uses the ACTUAL same
+    3-calendar-month window the shipment lands into, from 1 and 2 years ago
+    (averaged - smooths out a one-off spike/dip in either single year), and
+    keeps the same near-term need_for_x_days term as Reco 1 (that portion is
+    the gap before the shipment even arrives, not the season it lands in).
+    Falls back to only whichever of the two years has real history if the
+    other doesn't (e.g. a newer SKU), or to Reco 1's own number if neither
+    year has any - seasonal_source says which case applied."""
+    trailing_total = sum_window(asin_sales, trailing_months)
+    avg_per_day = (trailing_total / lookback_days) if lookback_days else 0
+
     x_days = max(0, (next_shipment_date - today).days)
-    avg_per_day = (total_sales_3mo / lookback_days) if lookback_days else 0
     need_for_x_days = x_days * avg_per_day
-    need_for_3_months = total_sales_3mo
 
     already_covered = (item.get("usa_balance") or 0) + (item.get("usa_on_the_way") or 0) + (item.get("usa_next_shipment") or 0)
-    return max(0, round(need_for_3_months + need_for_x_days - already_covered))
+
+    reco_recent = max(0, round(trailing_total + need_for_x_days - already_covered))
+
+    year1_total = sum_window(asin_sales, year1_months)
+    year2_total = sum_window(asin_sales, year2_months)
+    earliest = min(asin_sales.keys()) if asin_sales else None
+    has_year1 = earliest is not None and earliest <= year1_months[0]
+    has_year2 = earliest is not None and earliest <= year2_months[0]
+
+    if has_year1 and has_year2:
+        seasonal_3mo = (year1_total + year2_total) / 2
+        seasonal_source = "2yr_avg"
+    elif has_year1:
+        seasonal_3mo = year1_total
+        seasonal_source = "1yr_only"
+    elif has_year2:
+        seasonal_3mo = year2_total
+        seasonal_source = "2yr_only"
+    else:
+        seasonal_3mo = trailing_total
+        seasonal_source = "fallback_recent"
+
+    reco_seasonal = max(0, round(seasonal_3mo + need_for_x_days - already_covered))
+
+    return {
+        "avg_monthly": round(trailing_total / SALES_LOOKBACK_MONTHS, 1),
+        "reco_recent": reco_recent,
+        "reco_seasonal": reco_seasonal,
+        "seasonal_source": seasonal_source,
+        # Raw intermediates, exposed so the frontend can render an always-
+        # accurate worked-example breakdown without re-deriving any of this.
+        "trailing_total": trailing_total,
+        "year1_total": year1_total,
+        "year2_total": year2_total,
+        "x_days": x_days,
+        "need_for_x_days": round(need_for_x_days, 1),
+        "already_covered": already_covered,
+    }
 
 
 def GetNextOrderData(request):
@@ -234,9 +304,12 @@ def GetNextOrderData(request):
         next_shipment_date_str = get_or_create_next_shipment_date(token)
         next_shipment_date = date.fromisoformat(next_shipment_date_str)
         today = date.today()
-        sales_months = trailing_completed_months(SALES_LOOKBACK_MONTHS, today)
-        usa_sales_by_asin = fetch_usa_sales_by_asin(token, sales_months)
-        lookback_days = days_in_months(sales_months)
+
+        trailing_months = trailing_completed_months(SALES_LOOKBACK_MONTHS, today)
+        lookback_days = days_in_months(trailing_months)
+        year1_months = shipment_window_months(next_shipment_date, 1)
+        year2_months = shipment_window_months(next_shipment_date, 2)
+        all_usa_sales = fetch_all_usa_sales_by_asin_month(token)
 
         groups = defaultdict(list)
         for row in mapping_rows:
@@ -245,9 +318,23 @@ def GetNextOrderData(request):
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
 
-            total_sales = usa_sales_by_asin.get(row["asin"], 0) if row["asin"] else 0
-            item["usa_avg_monthly_sales"] = round(total_sales / SALES_LOOKBACK_MONTHS, 1)
-            item["usa_recommended_order"] = compute_usa_recommendation(total_sales, lookback_days, item, next_shipment_date, today)
+            asin_sales = all_usa_sales.get(row["asin"], {}) if row["asin"] else {}
+            reco = compute_usa_recommendations(
+                asin_sales, item, next_shipment_date, today,
+                trailing_months, lookback_days, year1_months, year2_months,
+            )
+            item["usa_avg_monthly_sales"] = reco["avg_monthly"]
+            item["usa_recommended_order"] = reco["reco_recent"]
+            item["usa_recommended_order_seasonal"] = reco["reco_seasonal"]
+            item["usa_seasonal_source"] = reco["seasonal_source"]
+            item["usa_reco_debug"] = {
+                "trailingTotal": reco["trailing_total"],
+                "year1Total": reco["year1_total"],
+                "year2Total": reco["year2_total"],
+                "xDays": reco["x_days"],
+                "needForXDays": reco["need_for_x_days"],
+                "alreadyCovered": reco["already_covered"],
+            }
 
             groups[row["group"]].append(item)
 
@@ -262,6 +349,10 @@ def GetNextOrderData(request):
             "groups": group_list,
             "nextShipmentDate": next_shipment_date_str,
             "salesLookbackMonths": SALES_LOOKBACK_MONTHS,
+            "trailingMonths": trailing_months,
+            "trailingLookbackDays": lookback_days,
+            "seasonalYear1Months": year1_months,
+            "seasonalYear2Months": year2_months,
         })
 
     except Exception as exc:
