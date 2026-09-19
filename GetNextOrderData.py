@@ -1,3 +1,4 @@
+import calendar
 import json
 import os
 from collections import defaultdict
@@ -31,13 +32,10 @@ USA_SALES_MARKETPLACES = ("usa", "ca", "mex")
 # Trailing whole calendar months used for the sales-velocity average -
 # excludes the current in-progress month so a half-elapsed month doesn't
 # understate velocity. 3 months mirrors the user's own ~3-month shipping
-# cadence, so the average reacts to the same timescale the shipments do.
+# cadence: the same 3-month total is used both to derive an average-per-day
+# rate AND, taken as-is, as the forecast for the next ~3 months of demand
+# (the natural assumption that the next cycle looks like the last one).
 SALES_LOOKBACK_MONTHS = 3
-# The user ships to the US every ~3 months. A shipment placed now needs to
-# arrive and then last until the shipment AFTER the one being planned -
-# i.e. cover consumption from today through (next_shipment_date + this many
-# more days), not just until the upcoming shipment itself arrives.
-REPLENISHMENT_CYCLE_DAYS = 90
 
 
 def cors_headers():
@@ -183,23 +181,33 @@ def fetch_usa_sales_by_asin(token, months):
     return totals
 
 
-def compute_usa_recommendation(avg_monthly_sales, item, next_shipment_date, today):
-    """How many MORE units to still add to usa_next_shipment, given what's
-    already available (usa_balance + usa_on_the_way) and already planned
-    (usa_next_shipment) - the same "subtract what's already covered" shape
-    as the page's existing Needed/Missing columns, so this reads the same
-    way: 0 means "you're already covered," not "don't ship anything."
+def days_in_months(months):
+    """Exact real day count spanning the given (year, month) pairs (e.g.
+    Jun+Jul+Aug = 30+31+31 = 92), used as the denominator for a real
+    average-per-day rate instead of a flat 30-day approximation."""
+    return sum(calendar.monthrange(y, m)[1] for y, m in months)
 
-    Coverage window = today through (next_shipment_date + REPLENISHMENT_
-    CYCLE_DAYS) - i.e. the shipment being planned now must last until the
-    ONE AFTER it arrives, not just until next_shipment_date itself."""
-    days_until_next_shipment = max(0, (next_shipment_date - today).days)
-    coverage_days = days_until_next_shipment + REPLENISHMENT_CYCLE_DAYS
-    avg_daily_sales = avg_monthly_sales / 30.44  # average days/month
-    projected_need = avg_daily_sales * coverage_days
+
+def compute_usa_recommendation(total_sales_3mo, lookback_days, item, next_shipment_date, today):
+    """Per the user's exact spec (2026-09-19):
+        A = today, B = next_shipment_date, x = B - A (days)
+        need_for_x_days = x * (average per day over the last 3 months)
+        need_for_3_months = the last 3 months' total (used as-is as the
+            forecast for the NEXT 3 months, same assumption a 3-month
+            shipping cadence already relies on)
+        reco = need_for_3_months + need_for_x_days
+               - USA_Bal - USA_OTW - USA_Next(already entered)
+
+    x is clamped to >=0 (an overdue next_shipment_date shouldn't reduce the
+    recommendation) - not otherwise specified, but the formula assumes B is
+    in the future."""
+    x_days = max(0, (next_shipment_date - today).days)
+    avg_per_day = (total_sales_3mo / lookback_days) if lookback_days else 0
+    need_for_x_days = x_days * avg_per_day
+    need_for_3_months = total_sales_3mo
 
     already_covered = (item.get("usa_balance") or 0) + (item.get("usa_on_the_way") or 0) + (item.get("usa_next_shipment") or 0)
-    return max(0, round(projected_need - already_covered))
+    return max(0, round(need_for_3_months + need_for_x_days - already_covered))
 
 
 def GetNextOrderData(request):
@@ -228,6 +236,7 @@ def GetNextOrderData(request):
         today = date.today()
         sales_months = trailing_completed_months(SALES_LOOKBACK_MONTHS, today)
         usa_sales_by_asin = fetch_usa_sales_by_asin(token, sales_months)
+        lookback_days = days_in_months(sales_months)
 
         groups = defaultdict(list)
         for row in mapping_rows:
@@ -237,9 +246,8 @@ def GetNextOrderData(request):
                 item[field] = stats.get(field) or 0
 
             total_sales = usa_sales_by_asin.get(row["asin"], 0) if row["asin"] else 0
-            avg_monthly_sales = total_sales / SALES_LOOKBACK_MONTHS
-            item["usa_avg_monthly_sales"] = round(avg_monthly_sales, 1)
-            item["usa_recommended_order"] = compute_usa_recommendation(avg_monthly_sales, item, next_shipment_date, today)
+            item["usa_avg_monthly_sales"] = round(total_sales / SALES_LOOKBACK_MONTHS, 1)
+            item["usa_recommended_order"] = compute_usa_recommendation(total_sales, lookback_days, item, next_shipment_date, today)
 
             groups[row["group"]].append(item)
 
@@ -254,7 +262,6 @@ def GetNextOrderData(request):
             "groups": group_list,
             "nextShipmentDate": next_shipment_date_str,
             "salesLookbackMonths": SALES_LOOKBACK_MONTHS,
-            "replenishmentCycleDays": REPLENISHMENT_CYCLE_DAYS,
         })
 
     except Exception as exc:
