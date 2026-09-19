@@ -131,6 +131,7 @@ ROUTED_FUNCTIONS = [
     "SendDailyAdsDigest",
     "SendWeeklyReturnRateDigest",
     "RunWeeklyUsaInventorySync",
+    "SendRecentSalesDigest",
     "UpdateAmazonFinances",
     "GetPaymentsExpensesSummary",
     "UpdateWiseFinances",
