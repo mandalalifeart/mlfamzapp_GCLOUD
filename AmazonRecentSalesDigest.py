@@ -32,12 +32,18 @@ import os
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY, pb_authenticate
 from JobState import get_job_state, set_job_state
+
+# Displayed times are always Israel local time per the user (2026-09-19) -
+# window math itself stays in UTC internally (Amazon's CreatedAfter/
+# CreatedBefore are UTC ISO8601), only the digest text's rendering converts.
+DISPLAY_TZ = ZoneInfo("Asia/Jerusalem")
 
 # Paces get_order_items calls (one per order) to stay well under the Orders
 # API's per-account rate limit - this account's real order volume is low
@@ -178,7 +184,7 @@ def build_digest_text(window_start, window_end, results, errors):
 
     text = (
         f"\U0001f6d2 Amazon sales - last {int((window_end - window_start).total_seconds() / 60)} min\n"
-        f"({window_start.strftime('%H:%M')} - {window_end.strftime('%H:%M')} UTC)\n\n"
+        f"({window_start.astimezone(DISPLAY_TZ).strftime('%H:%M')} - {window_end.astimezone(DISPLAY_TZ).strftime('%H:%M %Z')})\n\n"
         f"{body}"
     )
     if errors:
