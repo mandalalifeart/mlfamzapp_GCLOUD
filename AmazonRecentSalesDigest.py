@@ -37,7 +37,16 @@ Runs on the round hour (cron `0 * * * *`) per the user's request. Displayed
 times are Israel local time per the user. Sends to MCF_TELEGRAM_BOT_TOKEN/
 CHAT_ID (@baba_social_bot) - the user explicitly asked for "the other
 channel," not the interactive Claude Code Telegram session.
+
+The per-item visual is a single generated table image (Image/SKU/# rows,
+matching a reference screenshot the user provided 2026-09-19) rather than a
+Telegram photo album, since chat messages can't render an actual HTML
+table. Needs Pillow, installed directly into this project's local .venv
+(NOT added to requirements.txt, which only feeds GCP Cloud Function
+deploys - this digest is local-only, so bloating every unrelated GCP
+function's deploy package with Pillow would be pointless).
 """
+import io
 import json
 import os
 import time
@@ -220,45 +229,128 @@ def send_telegram(text):
     )
 
 
-def send_telegram_sku_photos(results):
-    """One photo per (marketplace, SKU) line in the digest, captioned with
-    the same "marketplace: SKU xQTY" text - a flat list across every
-    marketplace, not grouped, since Telegram's sendMediaGroup doesn't
-    support any kind of section header between items anyway. Chunked into
-    groups of <=10 (Telegram's per-call max); a lone leftover photo uses
-    sendPhoto instead, since sendMediaGroup requires at least 2 items. Each
-    chunk's failure is isolated (e.g. one SKU with no image on the bucket)
-    so it never blocks the rest - the text digest already carries the full
-    real information regardless of whether any photo sends."""
+TABLE_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+TABLE_FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+TABLE_THUMB_SIZE = 60
+TABLE_ROW_HEIGHT = 74
+TABLE_HEADER_HEIGHT = 46
+TABLE_WIDTH = 640
+TABLE_COL_IMAGE = 90
+TABLE_COL_QTY = 70
+TABLE_BORDER_COLOR = (204, 204, 204)
+TABLE_HEADER_BG = (244, 244, 244)
+
+
+def fetch_circular_thumbnail(sku):
+    """Downloads a SKU's product photo (same public bucket used everywhere
+    else in this app) and returns it center-cropped to a square + masked
+    into a circle, matching the reference screenshot's look. Returns a
+    plain gray circle placeholder (never raises) if the image is missing or
+    the download fails, so one bad SKU image never breaks the whole table."""
+    from PIL import Image, ImageDraw
+
+    size = TABLE_THUMB_SIZE
+    try:
+        url = f"{IMAGE_BASE}{urllib.parse.quote(sku)}.jpg"
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        side = min(img.size)
+        left = (img.width - side) // 2
+        top = (img.height - side) // 2
+        img = img.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
+    except Exception:
+        img = Image.new("RGB", (size, size), (220, 220, 220))
+
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    circular = Image.new("RGBA", (size, size))
+    circular.paste(img, (0, 0), mask)
+    return circular
+
+
+def render_sku_table_image(line_items):
+    """One PNG, styled after the user's reference screenshot: a plain table
+    with Image / SKU / # columns, one row per (marketplace, SKU) line item -
+    the marketplace is folded into the SKU cell (small gray tag under the
+    SKU name) rather than a 4th column, to keep the exact 3-column look
+    while not losing which marketplace each line came from. Returns the
+    local file path of the saved PNG."""
+    import tempfile
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype(TABLE_FONT_PATH, 18)
+    font_small = ImageFont.truetype(TABLE_FONT_PATH, 13)
+    font_bold = ImageFont.truetype(TABLE_FONT_BOLD_PATH, 18)
+
+    height = TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT * len(line_items) + 1
+    img = Image.new("RGB", (TABLE_WIDTH, height), "white")
+    draw = ImageDraw.Draw(img)
+
+    col_sku_x0 = TABLE_COL_IMAGE
+    col_qty_x0 = TABLE_WIDTH - TABLE_COL_QTY
+
+    draw.rectangle((0, 0, TABLE_WIDTH, TABLE_HEADER_HEIGHT), fill=TABLE_HEADER_BG)
+    draw.text((TABLE_COL_IMAGE / 2, TABLE_HEADER_HEIGHT / 2), "Image", font=font_bold, fill="black", anchor="mm")
+    draw.text(((col_sku_x0 + col_qty_x0) / 2, TABLE_HEADER_HEIGHT / 2), "SKU", font=font_bold, fill="black", anchor="mm")
+    draw.text((col_qty_x0 + TABLE_COL_QTY / 2, TABLE_HEADER_HEIGHT / 2), "#", font=font_bold, fill="black", anchor="mm")
+
+    y = TABLE_HEADER_HEIGHT
+    for marketplace, sku, qty in line_items:
+        thumb = fetch_circular_thumbnail(sku)
+        thumb_x = (TABLE_COL_IMAGE - TABLE_THUMB_SIZE) // 2
+        thumb_y = y + (TABLE_ROW_HEIGHT - TABLE_THUMB_SIZE) // 2
+        img.paste(thumb, (thumb_x, thumb_y), thumb)
+
+        sku_cx = (col_sku_x0 + col_qty_x0) / 2
+        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 - 10), sku, font=font, fill="black", anchor="mm")
+        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 + 14), marketplace, font=font_small, fill=(120, 120, 120), anchor="mm")
+
+        draw.text((col_qty_x0 + TABLE_COL_QTY / 2, y + TABLE_ROW_HEIGHT / 2), str(qty), font=font_bold, fill="black", anchor="mm")
+
+        y += TABLE_ROW_HEIGHT
+        draw.line((0, y, TABLE_WIDTH, y), fill=TABLE_BORDER_COLOR)
+
+    draw.rectangle((0, 0, TABLE_WIDTH - 1, height - 1), outline=TABLE_BORDER_COLOR)
+    draw.line((TABLE_COL_IMAGE, 0, TABLE_COL_IMAGE, height), fill=TABLE_BORDER_COLOR)
+    draw.line((col_qty_x0, 0, col_qty_x0, height), fill=TABLE_BORDER_COLOR)
+
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="amzbot_sales_table_")
+    os.close(fd)
+    img.save(path, "PNG")
+    return path
+
+
+def send_telegram_sku_table_image(results):
+    """Single generated table image (Image/SKU/# rows) instead of a photo
+    album - per the user's explicit reference screenshot (2026-09-19), since
+    Telegram chat messages can't render an actual HTML table."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    photos = []
-    for r in results:
-        for sku, qty in sorted(r["units"].items(), key=lambda kv: -kv[1]):
-            photos.append({
-                "type": "photo",
-                "media": f"{IMAGE_BASE}{urllib.parse.quote(sku)}.jpg",
-                "caption": f"{r['marketplace']}: {sku} x{qty}",
-            })
+    line_items = [
+        (r["marketplace"], sku, qty)
+        for r in results
+        for sku, qty in sorted(r["units"].items(), key=lambda kv: -kv[1])
+    ]
+    if not line_items:
+        return
 
-    for i in range(0, len(photos), 10):
-        chunk = photos[i:i + 10]
-        try:
-            if len(chunk) == 1:
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                    json={"chat_id": TELEGRAM_CHAT_ID, "photo": chunk[0]["media"], "caption": chunk[0]["caption"]},
-                    timeout=30,
-                )
-            else:
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
-                    json={"chat_id": TELEGRAM_CHAT_ID, "media": chunk},
-                    timeout=30,
-                )
-        except Exception:
-            pass  # a photo/image-bucket problem should never break the digest
+    path = None
+    try:
+        path = render_sku_table_image(line_items)
+        with open(path, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT_ID},
+                files={"photo": ("sales.png", f, "image/png")},
+                timeout=30,
+            )
+    except Exception:
+        pass  # an image-generation/send problem should never break the digest
+    finally:
+        if path and os.path.exists(path):
+            os.remove(path)
 
 
 def SendRecentSalesDigest(request):
@@ -298,7 +390,7 @@ def SendRecentSalesDigest(request):
 
         text = build_digest_text(now_local, results, errors)
         send_telegram(text)
-        send_telegram_sku_photos(results)
+        send_telegram_sku_table_image(results)
 
         seen_order_ids.update(all_new_ids)
         set_job_state(token, JOB_STATE_KEY, json.dumps({"date": today_str, "seenOrderIds": sorted(seen_order_ids)}))
