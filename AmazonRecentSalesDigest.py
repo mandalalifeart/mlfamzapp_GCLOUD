@@ -364,7 +364,14 @@ def SendRecentSalesDigest(request):
         now_local = now_utc.astimezone(DISPLAY_TZ)
         today_str = now_local.date().isoformat()
         day_start_utc = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-        window_end_utc = now_utc - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES)
+        # Right at local midnight, day_start_utc is essentially "now," so
+        # subtracting the lag below would land BEFORE day_start_utc and
+        # Amazon rejects CreatedAfter > CreatedBefore outright (hit live
+        # 2026-09-20: every marketplace errored on the first run of a new
+        # day). Clamping keeps the range valid (possibly zero-width, which
+        # Amazon accepts) instead of erroring for the first minute or two
+        # of every single day.
+        window_end_utc = max(day_start_utc, now_utc - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES))
 
         token = pb_authenticate()
         state_raw = get_job_state(token, JOB_STATE_KEY)
