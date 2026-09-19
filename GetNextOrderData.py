@@ -37,6 +37,30 @@ USA_SALES_MARKETPLACES = ("usa", "ca", "mex")
 # (the natural assumption that the next cycle looks like the last one).
 SALES_LOOKBACK_MONTHS = 3
 
+# Per the user (2026-09-19): never recommend a token/small order for these
+# product families - real minimum-practical-order-size floors, not a
+# calculation input. Applied AFTER the reco formula, and only when the
+# formula already recommends something (a real 0 - "already covered" - is
+# left alone, not bumped up to a floor). Matched by a case-insensitive
+# substring of the SKU (confirmed against the full asin_group_mapping table:
+# every SKU in a PAREO_* group contains "pareo", every SKU in a pouf-cover
+# group contains "pouf", with zero exceptions), so no dependency on the
+# mapping's own group naming.
+CATEGORY_MIN_ORDER = (
+    ("pareo", 50),
+    ("pouf", 15),
+)
+
+
+def apply_category_min_order(sku, reco):
+    if reco <= 0:
+        return reco
+    sku_lower = sku.lower()
+    for keyword, minimum in CATEGORY_MIN_ORDER:
+        if keyword in sku_lower:
+            return max(reco, minimum)
+    return reco
+
 
 def cors_headers():
     return {
@@ -324,8 +348,8 @@ def GetNextOrderData(request):
                 trailing_months, lookback_days, year1_months, year2_months,
             )
             item["usa_avg_monthly_sales"] = reco["avg_monthly"]
-            item["usa_recommended_order"] = reco["reco_recent"]
-            item["usa_recommended_order_seasonal"] = reco["reco_seasonal"]
+            item["usa_recommended_order"] = apply_category_min_order(row["sku"], reco["reco_recent"])
+            item["usa_recommended_order_seasonal"] = apply_category_min_order(row["sku"], reco["reco_seasonal"])
             item["usa_seasonal_source"] = reco["seasonal_source"]
             item["usa_reco_debug"] = {
                 "trailingTotal": reco["trailing_total"],
