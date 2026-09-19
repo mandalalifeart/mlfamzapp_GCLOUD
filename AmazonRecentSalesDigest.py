@@ -41,6 +41,7 @@ channel," not the interactive Claude Code Telegram session.
 import json
 import os
 import time
+import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -61,6 +62,11 @@ ORDER_ITEMS_PACING_SECONDS = 1.1
 
 TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+
+# Same per-SKU product photo bucket NextOrderPage.jsx already renders
+# directly in the browser (public, no auth needed) - confirmed live
+# 2026-09-19 that Telegram's servers can fetch these URLs directly.
+IMAGE_BASE = "https://storage.googleapis.com/mlf-amz-images/"
 
 JOB_STATE_KEY = "recent_sales_digest_seen_orders"
 # Amazon rejects a CreatedBefore within ~2 minutes of the real current time
@@ -214,6 +220,47 @@ def send_telegram(text):
     )
 
 
+def send_telegram_sku_photos(results):
+    """One photo per (marketplace, SKU) line in the digest, captioned with
+    the same "marketplace: SKU xQTY" text - a flat list across every
+    marketplace, not grouped, since Telegram's sendMediaGroup doesn't
+    support any kind of section header between items anyway. Chunked into
+    groups of <=10 (Telegram's per-call max); a lone leftover photo uses
+    sendPhoto instead, since sendMediaGroup requires at least 2 items. Each
+    chunk's failure is isolated (e.g. one SKU with no image on the bucket)
+    so it never blocks the rest - the text digest already carries the full
+    real information regardless of whether any photo sends."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    photos = []
+    for r in results:
+        for sku, qty in sorted(r["units"].items(), key=lambda kv: -kv[1]):
+            photos.append({
+                "type": "photo",
+                "media": f"{IMAGE_BASE}{urllib.parse.quote(sku)}.jpg",
+                "caption": f"{r['marketplace']}: {sku} x{qty}",
+            })
+
+    for i in range(0, len(photos), 10):
+        chunk = photos[i:i + 10]
+        try:
+            if len(chunk) == 1:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    json={"chat_id": TELEGRAM_CHAT_ID, "photo": chunk[0]["media"], "caption": chunk[0]["caption"]},
+                    timeout=30,
+                )
+            else:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
+                    json={"chat_id": TELEGRAM_CHAT_ID, "media": chunk},
+                    timeout=30,
+                )
+        except Exception:
+            pass  # a photo/image-bucket problem should never break the digest
+
+
 def SendRecentSalesDigest(request):
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
@@ -251,6 +298,7 @@ def SendRecentSalesDigest(request):
 
         text = build_digest_text(now_local, results, errors)
         send_telegram(text)
+        send_telegram_sku_photos(results)
 
         seen_order_ids.update(all_new_ids)
         set_job_state(token, JOB_STATE_KEY, json.dumps({"date": today_str, "seenOrderIds": sorted(seen_order_ids)}))
