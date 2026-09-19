@@ -187,14 +187,15 @@ def build_digest_text(as_of, results, errors):
         lines = []
         for r in results:
             item_count = sum(r["units"].values())
-            sku_str = ", ".join(f"{sku} x{qty}" for sku, qty in sorted(r["units"].items(), key=lambda kv: -kv[1]))
             lines.append(
                 f"  {r['marketplace']}: {r['orderCount']} order{'s' if r['orderCount'] != 1 else ''}, "
-                f"{item_count} item{'s' if item_count != 1 else ''} - {sku_str or '(no items found)'}"
+                f"{item_count} item{'s' if item_count != 1 else ''}"
             )
-            if r["revenue"]:
-                revenue_str = ", ".join(f"{amount:,.2f} {ccy}" for ccy, amount in r["revenue"].items())
-                lines.append(f"    (partial revenue already available: {revenue_str} - most new orders' totals aren't released by Amazon yet)")
+            if r["units"]:
+                for sku, qty in sorted(r["units"].items(), key=lambda kv: -kv[1]):
+                    lines.append(f"    {sku} x{qty}")
+            else:
+                lines.append("    (no items found)")
         body = "\n".join(lines)
 
     text = f"\U0001f6d2 Amazon sales - new orders as of {as_of.strftime('%H:%M %Z')}\n\n{body}"
