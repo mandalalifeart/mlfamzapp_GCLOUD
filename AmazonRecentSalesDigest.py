@@ -1,33 +1,44 @@
-"""Hourly "sales in the last hour" Telegram digest, added 2026-09-19 at the
-user's request. Live SP-API Orders pull (GET /orders/v0/orders,
-CreatedAfter/CreatedBefore) across every real Amazon marketplace - no
-PocketBase sales data involved, since sku_sales/country_sales are only
-updated daily/monthly and can't answer "in the last hour."
+"""Hourly "new orders since the last update" Telegram digest, added
+2026-09-19 at the user's request, redesigned same day per a follow-up
+request. Live SP-API Orders pull (GET /orders/v0/orders) across every real
+Amazon marketplace - no PocketBase sales data involved, since
+sku_sales/country_sales are only updated daily/monthly.
+
+**Design: fetch every order placed so far TODAY (Israel calendar day), then
+report only the ones not already reported in an earlier run this same
+day** - not a fixed rolling 60-minute CreatedAfter/CreatedBefore window. The
+user explicitly asked for this shape ("get all orders list for that day, and
+show all new orders that were not shown in a previous hourly update")
+instead of the original rolling-window version. This is also strictly more
+robust: a fixed window can miss or double-report an order sitting right at
+a boundary, or a job tick that runs late; scanning the whole day and
+deduping by AmazonOrderId can't miss anything within the day, and
+automatically self-heals after a missed tick with no separate catch-up-cap
+logic needed (unlike a rolling window, which needed one). Dedup state lives
+in JobState (job_state collection) as {"date": "YYYY-MM-DD", "seenOrderIds":
+[...]} - resets automatically the first run after Israel-local midnight.
 
 Deliberately Amazon-only, not Etsy: Etsy sales already get their own
 real-time push notification the moment they happen (SocialMarketting's
 webhook - see CLAUDE.md), so folding Etsy in here would just duplicate that.
 
-**Content is order count + per-SKU units, NOT dollar revenue** - confirmed
-live 2026-09-19 against this account's real orders (18 Pending vs 17 Shipped
-orders checked): a brand-new order sits in "Pending" status and Amazon does
-NOT expose its OrderTotal until it later clears Pending (some orders were
-still Pending 6+ hours after creation in this account) - so a revenue figure
-for a genuine last-60-minutes window would show ~$0 almost every run, not
-because nothing sold, just because Amazon hasn't released the dollar amount
-yet. SKU + QuantityOrdered, by contrast, ARE available immediately for a
-Pending order (confirmed via a real get_order_items call) - only the payment
-total is delayed, not the cart contents - so units-sold is the metric that
-can actually be real-time here. Any OrderTotal that IS already present gets
-included too, clearly labeled as partial/incomplete, rather than hidden.
+**Content is order count + total items + per-SKU units, NOT dollar
+revenue** - confirmed live 2026-09-19 against this account's real orders (18
+Pending vs 17 Shipped orders checked): a brand-new order sits in "Pending"
+status and Amazon does NOT expose its OrderTotal until it later clears
+Pending (some orders were still Pending 6+ hours after creation in this
+account). SKU + QuantityOrdered, by contrast, ARE available immediately for
+a Pending order (confirmed via a real get_order_items call) - only the
+payment total is delayed, not the cart contents - so units-sold is the
+metric that can actually be real-time here. Any OrderTotal that IS already
+present gets included too, clearly labeled as partial/incomplete.
 
-Runs on the round hour (cron `0 * * * *`, not "every 60 minutes from
-whenever this was first deployed") per the user's explicit request.
-
-Sends to MCF_TELEGRAM_BOT_TOKEN/CHAT_ID (@baba_social_bot) - the user
-explicitly asked for "the other channel," i.e. this app's existing shared
-alert bot, not the interactive Claude Code Telegram session.
+Runs on the round hour (cron `0 * * * *`) per the user's request. Displayed
+times are Israel local time per the user. Sends to MCF_TELEGRAM_BOT_TOKEN/
+CHAT_ID (@baba_social_bot) - the user explicitly asked for "the other
+channel," not the interactive Claude Code Telegram session.
 """
+import json
 import os
 import time
 from collections import defaultdict
@@ -40,30 +51,22 @@ from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY, pb_authenticate
 from JobState import get_job_state, set_job_state
 
-# Displayed times are always Israel local time per the user (2026-09-19) -
-# window math itself stays in UTC internally (Amazon's CreatedAfter/
-# CreatedBefore are UTC ISO8601), only the digest text's rendering converts.
 DISPLAY_TZ = ZoneInfo("Asia/Jerusalem")
 
-# Paces get_order_items calls (one per order) to stay well under the Orders
-# API's per-account rate limit - this account's real order volume is low
-# enough (a handful per marketplace per hour, confirmed by testing) that
-# this adds negligible run time.
+# Paces get_order_items calls (one per NEW order) to stay well under the
+# Orders API's per-account rate limit - only genuinely new orders each run
+# incur this call (already-seen orders are skipped entirely), so this stays
+# cheap even as the day's full order list grows hour over hour.
 ORDER_ITEMS_PACING_SECONDS = 1.1
 
 TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
 
-JOB_STATE_KEY = "recent_sales_digest_window_end"
-DEFAULT_LOOKBACK_MINUTES = 60
+JOB_STATE_KEY = "recent_sales_digest_seen_orders"
 # Amazon rejects a CreatedBefore within ~2 minutes of the real current time
 # (HTTP 400 "not valid") - confirmed via this project's own earlier Orders.py
-# probe script. The window's end is always pinned this far behind "now."
+# probe script.
 CREATED_BEFORE_LAG_MINUTES = 2
-# Caps a catch-up window after a missed tick (a long WSL-idle outage, etc.)
-# so recovery doesn't try to pull many hours of orders in one run - matches
-# the same bounded-catch-up shape as AdsReporting's 31-day report cap.
-MAX_CATCHUP_HOURS = 6
 
 # marketplace_code -> (credential scope, sp_api Marketplaces enum attribute
 # name). Credential scopes/env vars mirror every other multi-marketplace
@@ -121,7 +124,13 @@ def fetch_order_items(client, order_id):
     return items
 
 
-def summarize_marketplace(cred_scope, marketplace_enum_name, created_after, created_before):
+def summarize_new_orders(cred_scope, marketplace_enum_name, created_after, created_before, seen_order_ids):
+    """Fetches every order today's-so-far for one marketplace, skips any
+    AmazonOrderId already in seen_order_ids (already reported in an earlier
+    run today), and returns (order_count, revenue_by_currency, units_by_sku,
+    newly_seen_ids) for just the new ones. Every fetched order id - reported
+    or not (e.g. Canceled) - is returned in newly_seen_ids so it's never
+    reconsidered on a later run this same day."""
     from sp_api.api import Orders
     from sp_api.base import Marketplaces
 
@@ -136,13 +145,19 @@ def summarize_marketplace(cred_scope, marketplace_enum_name, created_after, crea
     orders = fetch_orders(client, created_after, created_before, marketplace_enum.marketplace_id)
 
     order_count = 0
-    # Almost always empty for a genuine last-hour window (see module
-    # docstring - Amazon withholds OrderTotal until a Pending order clears),
-    # kept anyway so any order that DOES already have one isn't hidden.
+    # Almost always empty for a brand-new order (see module docstring -
+    # Amazon withholds OrderTotal until a Pending order clears), kept anyway
+    # so any order that DOES already have one isn't hidden.
     partial_revenue_by_currency = defaultdict(float)
     units_by_sku = defaultdict(int)
+    newly_seen_ids = []
 
     for order in orders:
+        order_id = order.get("AmazonOrderId")
+        if not order_id or order_id in seen_order_ids:
+            continue
+        newly_seen_ids.append(order_id)
+
         if order.get("OrderStatus") == "Canceled":
             continue
         order_count += 1
@@ -154,7 +169,7 @@ def summarize_marketplace(cred_scope, marketplace_enum_name, created_after, crea
 
         time.sleep(ORDER_ITEMS_PACING_SECONDS)
         try:
-            for item in fetch_order_items(client, order["AmazonOrderId"]):
+            for item in fetch_order_items(client, order_id):
                 sku = item.get("SellerSKU")
                 qty = int(item.get("QuantityOrdered") or 0)
                 if sku:
@@ -162,12 +177,12 @@ def summarize_marketplace(cred_scope, marketplace_enum_name, created_after, crea
         except Exception:
             pass  # one order's items failing shouldn't drop its order count
 
-    return order_count, dict(partial_revenue_by_currency), dict(units_by_sku)
+    return order_count, dict(partial_revenue_by_currency), dict(units_by_sku), newly_seen_ids
 
 
-def build_digest_text(window_start, window_end, results, errors):
+def build_digest_text(as_of, results, errors):
     if not results:
-        body = "No orders in this window."
+        body = "No new orders since the last update."
     else:
         lines = []
         for r in results:
@@ -182,11 +197,7 @@ def build_digest_text(window_start, window_end, results, errors):
                 lines.append(f"    (partial revenue already available: {revenue_str} - most new orders' totals aren't released by Amazon yet)")
         body = "\n".join(lines)
 
-    text = (
-        f"\U0001f6d2 Amazon sales - last {int((window_end - window_start).total_seconds() / 60)} min\n"
-        f"({window_start.astimezone(DISPLAY_TZ).strftime('%H:%M')} - {window_end.astimezone(DISPLAY_TZ).strftime('%H:%M %Z')})\n\n"
-        f"{body}"
-    )
+    text = f"\U0001f6d2 Amazon sales - new orders as of {as_of.strftime('%H:%M %Z')}\n\n{body}"
     if errors:
         text += "\n\n⚠️ Errors (skipped): " + "; ".join(errors)
     return text
@@ -209,40 +220,46 @@ def SendRecentSalesDigest(request):
         return json_response({"error": "Unauthorized"}, 401)
 
     try:
-        now = datetime.now(timezone.utc)
-        window_end = now - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES)
+        now_utc = datetime.now(timezone.utc)
+        now_local = now_utc.astimezone(DISPLAY_TZ)
+        today_str = now_local.date().isoformat()
+        day_start_utc = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        window_end_utc = now_utc - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES)
 
         token = pb_authenticate()
-        last_window_end_str = get_job_state(token, JOB_STATE_KEY)
-        if last_window_end_str:
-            window_start = datetime.strptime(last_window_end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            window_start = max(window_start, window_end - timedelta(hours=MAX_CATCHUP_HOURS))
-        else:
-            window_start = window_end - timedelta(minutes=DEFAULT_LOOKBACK_MINUTES)
+        state_raw = get_job_state(token, JOB_STATE_KEY)
+        state = json.loads(state_raw) if state_raw else {}
+        # A different (or missing) stored date means a new day - start with
+        # no seen orders, since a new day's order list is naturally empty.
+        seen_order_ids = set(state.get("seenOrderIds", [])) if state.get("date") == today_str else set()
 
-        created_after = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
-        created_before = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+        created_after = day_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        created_before = window_end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         results = []
         errors = []
+        all_new_ids = []
         for mp_code, cred_scope, enum_name in MARKETPLACES:
             try:
-                count, revenue, units = summarize_marketplace(cred_scope, enum_name, created_after, created_before)
+                count, revenue, units, new_ids = summarize_new_orders(cred_scope, enum_name, created_after, created_before, seen_order_ids)
+                all_new_ids.extend(new_ids)
                 if count > 0:
                     results.append({"marketplace": mp_code, "orderCount": count, "revenue": revenue, "units": units})
             except Exception as exc:
                 errors.append(f"{mp_code}: {exc}")
 
-        text = build_digest_text(window_start, window_end, results, errors)
+        text = build_digest_text(now_local, results, errors)
         send_telegram(text)
-        set_job_state(token, JOB_STATE_KEY, created_before)
+
+        seen_order_ids.update(all_new_ids)
+        set_job_state(token, JOB_STATE_KEY, json.dumps({"date": today_str, "seenOrderIds": sorted(seen_order_ids)}))
 
         return json_response({
             "status": "success",
-            "windowStart": created_after,
-            "windowEnd": created_before,
+            "date": today_str,
             "results": results,
             "errors": errors,
+            "totalSeenToday": len(seen_order_ids),
         })
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
