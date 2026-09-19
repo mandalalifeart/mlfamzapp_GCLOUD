@@ -70,6 +70,7 @@ ROUTED_FUNCTIONS = [
     "GetProductDetail",
     "GetSalesDepartmentReport",
     "UpdateNextOrderField",
+    "UpdateNextShipmentDate",
     "UpdateSkuSalesMonth",
     "GetUkInventory",
     "GetDeInventory",

@@ -28,6 +28,11 @@ def UpdateNextOrderField(request):
     return _impl(request)
 
 
+def UpdateNextShipmentDate(request):
+    from NextOrderSettings import UpdateNextShipmentDate as _impl
+    return _impl(request)
+
+
 def GetUkInventory(request):
     from GetUkInventory import GetUkInventory as _impl
     return _impl(request)
