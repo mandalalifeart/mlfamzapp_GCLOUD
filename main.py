@@ -422,6 +422,16 @@ def RunWeeklyUsaInventorySync(request):
     return _impl(request)
 
 
+def UpdateEuInventory(request):
+    from UpdateEuInventory import UpdateEuInventory as _impl
+    return _impl(request)
+
+
+def RunWeeklyEuInventorySync(request):
+    from WeeklyEuInventorySync import RunWeeklyEuInventorySync as _impl
+    return _impl(request)
+
+
 def SendRecentSalesDigest(request):
     from AmazonRecentSalesDigest import SendRecentSalesDigest as _impl
     return _impl(request)

@@ -19,11 +19,9 @@ import requests
 
 from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY
+from InventoryHistory import write_inventory_history_snapshot
 from NotificationRouting import notify, pb_authenticate
 from UpdateUsaInventory import POCKETBASE_STATS_COLLECTION, POCKETBASE_URL, sync_usa_inventory
-
-POCKETBASE_INVENTORY_HISTORY_COLLECTION = os.environ.get("POCKETBASE_INVENTORY_HISTORY_COLLECTION", "sku_inventory_history")
-POCKETBASE_BATCH_SIZE = 50
 
 TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
@@ -38,8 +36,8 @@ USA_FIELDS = ("usa_balance_fba", "usa_balance_awd", "usa_balance", "usa_on_the_w
 # read in Excel shouldn't lead with collectionId/id).
 EXPORT_FIELDS = (
     "sku", "malani_balance", "malani_order",
-    "uk_balance", "uk_on_the_way", "uk_next_shipment",
-    "de_balance", "de_on_the_way", "de_next_shipment",
+    "uk_balance", "uk_balance_fba", "uk_balance_awd", "uk_on_the_way", "uk_next_shipment",
+    "de_balance", "de_balance_fba", "de_balance_awd", "de_balance_lg", "de_on_the_way", "de_next_shipment",
     "usa_balance", "usa_balance_fba", "usa_balance_awd",
     "usa_on_the_way", "usa_next_shipment", "next_order",
 )
@@ -63,52 +61,6 @@ def fetch_stats(token):
     return records
 
 
-def pb_batch(token, batch_requests):
-    for i in range(0, len(batch_requests), POCKETBASE_BATCH_SIZE):
-        chunk = batch_requests[i:i + POCKETBASE_BATCH_SIZE]
-        response = requests.post(
-            f"{POCKETBASE_URL}/api/batch",
-            headers={"Authorization": token},
-            json={"requests": chunk},
-            timeout=60,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"PocketBase batch failed: HTTP {response.status_code} - {response.text}")
-        results = response.json()
-        failed = [r for r in results if not (200 <= r.get("status", 0) < 300)]
-        if failed:
-            raise RuntimeError(f"PocketBase batch had {len(failed)}/{len(results)} failed op(s): {failed[:3]}")
-
-
-def write_inventory_history_snapshot(token, written_records, week_date):
-    """One row per SKU per week into sku_inventory_history - added
-    2026-09-20 at the user's request, to let the Reco formula later exclude
-    weeks where a SKU had zero USA stock from its sales-velocity denominator
-    (a stockout week can't produce real sales no matter the true demand, so
-    counting it as a normal sales day understates velocity). This only
-    starts building real history from today forward - there's no way to
-    know past weeks' stock levels retroactively.
-
-    Sourced from sync_usa_inventory()'s own `written` list (each entry
-    already carries sku+asin+usa_balance from the real FBA/AWD pull), not a
-    fresh sku_statistics read - that collection has no asin column at all,
-    so it can't supply the ASIN this history needs for GetNextOrderData's
-    ASIN-based join later."""
-    requests_body = [
-        {
-            "method": "POST",
-            "url": f"/api/collections/{POCKETBASE_INVENTORY_HISTORY_COLLECTION}/records",
-            "body": {
-                "sku": rec.get("sku"),
-                "asin": rec.get("asin", ""),
-                "usa_balance": rec.get("usa_balance") or 0,
-                "week_date": week_date,
-            },
-        }
-        for rec in written_records
-        if rec.get("sku")
-    ]
-    pb_batch(token, requests_body)
 
 
 def build_csv(records):
@@ -207,7 +159,7 @@ def RunWeeklyUsaInventorySync(request):
         after = fetch_stats(token)
 
         week_date = datetime.now(SYSTEM_TZ).strftime("%Y-%m-%d")
-        write_inventory_history_snapshot(token, result.get("written") or [], week_date)
+        write_inventory_history_snapshot(token, result.get("written") or [], "usa", week_date, "usa_balance")
 
         text = summarize(before, after, result)
         csv_text = build_csv(after)
