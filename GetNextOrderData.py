@@ -37,15 +37,20 @@ USA_SALES_MARKETPLACES = ("usa", "ca", "mex")
 # (the natural assumption that the next cycle looks like the last one).
 SALES_LOOKBACK_MONTHS = 3
 
-# Per the user (2026-09-19): never recommend a token/small order for these
-# product families - real minimum-practical-order-size floors, not a
-# calculation input. Applied AFTER the reco formula, and only when the
-# formula already recommends something (a real 0 - "already covered" - is
-# left alone, not bumped up to a floor). Matched by a case-insensitive
-# substring of the SKU (confirmed against the full asin_group_mapping table:
-# every SKU in a PAREO_* group contains "pareo", every SKU in a pouf-cover
-# group contains "pouf", with zero exceptions), so no dependency on the
-# mapping's own group naming.
+# Per the user (2026-09-19, refined 2026-09-20): never recommend a token/
+# small order for these product families - real minimum-practical-order-
+# size thresholds, not a calculation input. Refined rule (replaces the
+# original "floor up to the minimum" behavior): below half the category
+# minimum, the real need is too small to bother with at all, so it's
+# zeroed out; at or above half the minimum, the computed value is shown
+# AS-IS (NOT rounded up to the full minimum - e.g. a computed 8 for a pouf
+# cover, minimum 15, shows 8, not 15; a computed 5 shows 0). Applied AFTER
+# the reco formula, and only when the formula already recommends something
+# (a real 0 - "already covered" - is left alone). Matched by a case-
+# insensitive substring of the SKU (confirmed against the full
+# asin_group_mapping table: every SKU in a PAREO_* group contains "pareo",
+# every SKU in a pouf-cover group contains "pouf", with zero exceptions),
+# so no dependency on the mapping's own group naming.
 CATEGORY_MIN_ORDER = (
     ("pareo", 50),
     ("pouf", 15),
@@ -58,7 +63,7 @@ def apply_category_min_order(sku, reco):
     sku_lower = sku.lower()
     for keyword, minimum in CATEGORY_MIN_ORDER:
         if keyword in sku_lower:
-            return max(reco, minimum)
+            return 0 if reco < minimum / 2 else reco
     return reco
 
 
@@ -269,23 +274,30 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
 
     year1_total = sum_window(asin_sales, year1_months)
     year2_total = sum_window(asin_sales, year2_months)
+    year1_days = days_in_months(year1_months)
+    year2_days = days_in_months(year2_months)
     earliest = min(asin_sales.keys()) if asin_sales else None
     has_year1 = earliest is not None and earliest <= year1_months[0]
     has_year2 = earliest is not None and earliest <= year2_months[0]
 
     if has_year1 and has_year2:
         seasonal_3mo = (year1_total + year2_total) / 2
+        seasonal_lookback_days = (year1_days + year2_days) / 2
         seasonal_source = "2yr_avg"
     elif has_year1:
         seasonal_3mo = year1_total
+        seasonal_lookback_days = year1_days
         seasonal_source = "1yr_only"
     elif has_year2:
         seasonal_3mo = year2_total
+        seasonal_lookback_days = year2_days
         seasonal_source = "2yr_only"
     else:
         seasonal_3mo = trailing_total
+        seasonal_lookback_days = lookback_days
         seasonal_source = "fallback_recent"
 
+    avg_per_day_seasonal = (seasonal_3mo / seasonal_lookback_days) if seasonal_lookback_days else 0
     reco_seasonal = max(0, round(seasonal_3mo + need_for_x_days - already_covered))
 
     return {
@@ -294,13 +306,16 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
         "reco_seasonal": reco_seasonal,
         "seasonal_source": seasonal_source,
         # Raw intermediates, exposed so the frontend can render an always-
-        # accurate worked-example breakdown without re-deriving any of this.
+        # accurate worked-example breakdown (and the per-item hover tooltip)
+        # without re-deriving any of this.
         "trailing_total": trailing_total,
         "year1_total": year1_total,
         "year2_total": year2_total,
         "x_days": x_days,
         "need_for_x_days": round(need_for_x_days, 1),
         "already_covered": already_covered,
+        "avg_daily_recent": round(avg_per_day, 2),
+        "avg_daily_seasonal": round(avg_per_day_seasonal, 2),
     }
 
 
@@ -358,6 +373,8 @@ def GetNextOrderData(request):
                 "xDays": reco["x_days"],
                 "needForXDays": reco["need_for_x_days"],
                 "alreadyCovered": reco["already_covered"],
+                "avgDailyRecent": reco["avg_daily_recent"],
+                "avgDailySeasonal": reco["avg_daily_seasonal"],
             }
 
             groups[row["group"]].append(item)
