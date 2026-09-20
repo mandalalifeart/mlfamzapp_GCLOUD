@@ -237,12 +237,20 @@ def send_telegram(text):
 
 TABLE_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 TABLE_FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-TABLE_THUMB_SIZE = 60
-TABLE_ROW_HEIGHT = 74
-TABLE_HEADER_HEIGHT = 46
-TABLE_WIDTH = 640
-TABLE_COL_IMAGE = 90
-TABLE_COL_QTY = 70
+# Narrower + a bit shorter per row than the first version - confirmed live
+# 2026-09-20 that the original 640px-wide table rendered too wide relative
+# to its height (a handful of rows made for a short, very wide image), and
+# Telegram's inline chat-feed preview crops an image with that kind of
+# extreme aspect ratio instead of showing all of it - the Image column and
+# thumbnails were getting cut off entirely without tapping to open. A
+# narrower table with the same row count is meaningfully less wide relative
+# to its height, so more of it stays visible in the inline preview.
+TABLE_THUMB_SIZE = 46
+TABLE_ROW_HEIGHT = 60
+TABLE_HEADER_HEIGHT = 38
+TABLE_WIDTH = 380
+TABLE_COL_IMAGE = 60
+TABLE_COL_QTY = 46
 TABLE_BORDER_COLOR = (204, 204, 204)
 TABLE_HEADER_BG = (244, 244, 244)
 
@@ -285,9 +293,9 @@ def render_sku_table_image(line_items):
     import tempfile
     from PIL import Image, ImageDraw, ImageFont
 
-    font = ImageFont.truetype(TABLE_FONT_PATH, 18)
-    font_small = ImageFont.truetype(TABLE_FONT_PATH, 13)
-    font_bold = ImageFont.truetype(TABLE_FONT_BOLD_PATH, 18)
+    font = ImageFont.truetype(TABLE_FONT_PATH, 15)
+    font_small = ImageFont.truetype(TABLE_FONT_PATH, 11)
+    font_bold = ImageFont.truetype(TABLE_FONT_BOLD_PATH, 15)
 
     height = TABLE_HEADER_HEIGHT + TABLE_ROW_HEIGHT * len(line_items) + 1
     img = Image.new("RGB", (TABLE_WIDTH, height), "white")
@@ -309,8 +317,8 @@ def render_sku_table_image(line_items):
         img.paste(thumb, (thumb_x, thumb_y), thumb)
 
         sku_cx = (col_sku_x0 + col_qty_x0) / 2
-        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 - 10), sku, font=font, fill="black", anchor="mm")
-        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 + 14), marketplace, font=font_small, fill=(120, 120, 120), anchor="mm")
+        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 - 9), sku, font=font, fill="black", anchor="mm")
+        draw.text((sku_cx, y + TABLE_ROW_HEIGHT / 2 + 12), marketplace, font=font_small, fill=(120, 120, 120), anchor="mm")
 
         draw.text((col_qty_x0 + TABLE_COL_QTY / 2, y + TABLE_ROW_HEIGHT / 2), str(qty), font=font_bold, fill="black", anchor="mm")
 
