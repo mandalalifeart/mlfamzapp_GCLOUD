@@ -68,6 +68,18 @@ def apply_category_min_order(sku, reco):
     return reco
 
 
+# Generalized to UK/DE 2026-09-20 at the user's request ("same reco" for
+# de/uk). Each region's own sales-marketplace scope: USA folds in Canada/
+# Mexico (same convention used everywhere else in this app sales are broken
+# out by marketplace - see CLAUDE.md); UK and DE are each their own single
+# marketplace, not folded with any other EU country or the "eu" aggregate.
+REGION_RECO_CONFIGS = {
+    "usa": {"balance": "usa_balance", "otw": "usa_on_the_way", "next": "usa_next_shipment", "sales_marketplaces": ("usa", "ca", "mex")},
+    "uk": {"balance": "uk_balance", "otw": "uk_on_the_way", "next": "uk_next_shipment", "sales_marketplaces": ("uk",)},
+    "de": {"balance": "de_balance", "otw": "de_on_the_way", "next": "de_next_shipment", "sales_marketplaces": ("de",)},
+}
+
+
 def cors_headers():
     return {
         "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
@@ -177,19 +189,20 @@ def trailing_completed_months(n, today=None):
     return list(reversed(months))
 
 
-def fetch_all_usa_sales_by_asin_month(token):
-    """Every sku_sales row across USA_SALES_MARKETPLACES, ALL years, summed
+def fetch_all_sales_by_asin_month(token, marketplaces):
+    """Every sku_sales row across the given marketplaces, ALL years, summed
     per (asin, year, month) - {asin: {(year, month): qty}}. A single fetch
-    (only ~5-6k rows total for this app's whole USA-market history) backs
-    both recommendation formulas below: the recent one needs the trailing 3
-    months, the seasonal one needs the same 3 calendar months from 1-2 years
-    ago - both are just different (year, month) slices of the same data, so
-    one broad fetch is simpler and cheaper than fetching each window
-    separately. sku_sales rows already carry the real ASIN a sale was
-    recorded under regardless of which SKU spelling was used, so this sums
-    correctly across e.g. a relisted SKU's old and new spellings without
-    needing the mapping table at all."""
-    marketplace_clause = " || ".join(f'marketplace = "{mkt}"' for mkt in USA_SALES_MARKETPLACES)
+    per region (only ~5-6k rows total for this app's whole USA-market
+    history, less for a single EU country) backs both recommendation
+    formulas below: the recent one needs the trailing 3 months, the
+    seasonal one needs the same 3 calendar months from 1-2 years ago - both
+    are just different (year, month) slices of the same data, so one broad
+    fetch is simpler and cheaper than fetching each window separately.
+    sku_sales rows already carry the real ASIN a sale was recorded under
+    regardless of which SKU spelling was used, so this sums correctly
+    across e.g. a relisted SKU's old and new spellings without needing the
+    mapping table at all."""
+    marketplace_clause = " || ".join(f'marketplace = "{mkt}"' for mkt in marketplaces)
 
     totals = defaultdict(lambda: defaultdict(int))
     page = 1
@@ -214,14 +227,14 @@ def fetch_all_usa_sales_by_asin_month(token):
     return totals
 
 
-def fetch_zero_inventory_week_counts_by_asin(token, since_date_str):
+def fetch_zero_inventory_week_counts_by_asin(token, since_date_str, region):
     """{asin: count of distinct weekly snapshots (sku_inventory_history,
-    written every Monday by WeeklyUsaInventorySync.py) with usa_balance <= 0
-    on/after since_date_str} - used to exclude stockout weeks from the
-    recent sales-velocity denominator (see compute_usa_recommendations).
-    This collection only started being written 2026-09-20, so it returns
-    all-zero counts (no adjustment) until enough weekly history accumulates -
-    expected and fine, not a bug."""
+    written every Monday by WeeklyUsaInventorySync.py/WeeklyEuInventorySync.py)
+    with balance <= 0 for the given region, on/after since_date_str} - used
+    to exclude stockout weeks from the recent sales-velocity denominator
+    (see compute_region_recommendations). USA history started 2026-09-20,
+    UK/DE the same day - all return all-zero counts (no adjustment) until
+    enough weekly history accumulates, expected and fine, not a bug."""
     counts = defaultdict(set)
     page = 1
     while True:
@@ -229,7 +242,7 @@ def fetch_zero_inventory_week_counts_by_asin(token, since_date_str):
             f"{POCKETBASE_URL}/api/collections/{POCKETBASE_INVENTORY_HISTORY_COLLECTION}/records",
             headers={"Authorization": token},
             params={
-                "filter": f'week_date >= "{since_date_str}" && usa_balance <= 0',
+                "filter": f'region = "{region}" && week_date >= "{since_date_str}" && balance <= 0',
                 "perPage": 500,
                 "page": page,
                 "fields": "asin,week_date",
@@ -277,9 +290,11 @@ def sum_window(asin_sales, months):
     return sum(asin_sales.get(ym, 0) for ym in months)
 
 
-def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
-    """Two recommendations, both confirmed with the user (2026-09-19), both
-    in the same "how many MORE units to still add to USA Next" shape as the
+def compute_region_recommendations(asin_sales, already_covered, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
+    """Generalized across USA/UK/DE (originally USA-only, generalized
+    2026-09-20 at the user's request - "same reco" for UK/DE). Two
+    recommendations, both confirmed with the user (2026-09-19), both in the
+    same "how many MORE units to still add to <region> Next" shape as the
     page's existing Missing column (0 = already covered):
 
     Reco 1 ("recent"): assumes the next 3 months look like the last 3.
@@ -287,7 +302,7 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
         need_for_x_days = x * (recent 3-month total / real SELLABLE days in
             those months - see zero_inventory_weeks below)
         need_for_3_months = the recent 3-month total, used as-is
-        reco = need_for_3_months + need_for_x_days - USA_Bal - USA_OTW - USA_Next
+        reco = need_for_3_months + need_for_x_days - already_covered (Bal + OTW + Next, all for this region)
 
     Reco 2 ("seasonal"): a seasonal product's next-3-months can look nothing
     like its last-3-months (e.g. shipping into summer from a winter
@@ -302,7 +317,7 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
 
     zero_inventory_weeks (per the user, 2026-09-20): count of weekly
     snapshots (sku_inventory_history) within the trailing window where this
-    SKU had zero USA stock. A stockout week can't produce real sales no
+    SKU had zero stock in this region. A stockout week can't produce real sales no
     matter the true demand, so counting those days as normal sales days
     would understate velocity - each such week is dropped from the
     denominator entirely (both the days AND, implicitly, its ~0 sales).
@@ -319,8 +334,6 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
 
     x_days = max(0, (next_shipment_date - today).days)
     need_for_x_days = x_days * avg_per_day
-
-    already_covered = (item.get("usa_balance") or 0) + (item.get("usa_on_the_way") or 0) + (item.get("usa_next_shipment") or 0)
 
     reco_recent = max(0, round(trailing_total + need_for_x_days - already_covered))
 
@@ -402,9 +415,16 @@ def GetNextOrderData(request):
         lookback_days = days_in_months(trailing_months)
         year1_months = shipment_window_months(next_shipment_date, 1)
         year2_months = shipment_window_months(next_shipment_date, 2)
-        all_usa_sales = fetch_all_usa_sales_by_asin_month(token)
         trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
-        zero_inventory_weeks_by_asin = fetch_zero_inventory_week_counts_by_asin(token, trailing_window_start)
+
+        all_sales_by_region = {
+            region: fetch_all_sales_by_asin_month(token, cfg["sales_marketplaces"])
+            for region, cfg in REGION_RECO_CONFIGS.items()
+        }
+        zero_inventory_weeks_by_region = {
+            region: fetch_zero_inventory_week_counts_by_asin(token, trailing_window_start, region)
+            for region in REGION_RECO_CONFIGS
+        }
 
         groups = defaultdict(list)
         for row in mapping_rows:
@@ -413,28 +433,30 @@ def GetNextOrderData(request):
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
 
-            asin_sales = all_usa_sales.get(row["asin"], {}) if row["asin"] else {}
-            zero_inventory_weeks = zero_inventory_weeks_by_asin.get(row["asin"], 0) if row["asin"] else 0
-            reco = compute_usa_recommendations(
-                asin_sales, item, next_shipment_date, today,
-                trailing_months, lookback_days, year1_months, year2_months,
-                zero_inventory_weeks,
-            )
-            item["usa_avg_monthly_sales"] = reco["avg_monthly"]
-            item["usa_recommended_order"] = apply_category_min_order(row["sku"], reco["reco_recent"])
-            item["usa_recommended_order_seasonal"] = apply_category_min_order(row["sku"], reco["reco_seasonal"])
-            item["usa_seasonal_source"] = reco["seasonal_source"]
-            item["usa_reco_debug"] = {
-                "trailingTotal": reco["trailing_total"],
-                "year1Total": reco["year1_total"],
-                "year2Total": reco["year2_total"],
-                "xDays": reco["x_days"],
-                "needForXDays": reco["need_for_x_days"],
-                "alreadyCovered": reco["already_covered"],
-                "avgDailyRecent": reco["avg_daily_recent"],
-                "avgDailySeasonal": reco["avg_daily_seasonal"],
-                "zeroInventoryWeeks": reco["zero_inventory_weeks"],
-            }
+            for region, cfg in REGION_RECO_CONFIGS.items():
+                asin_sales = all_sales_by_region[region].get(row["asin"], {}) if row["asin"] else {}
+                zero_inventory_weeks = zero_inventory_weeks_by_region[region].get(row["asin"], 0) if row["asin"] else 0
+                already_covered = (item.get(cfg["balance"]) or 0) + (item.get(cfg["otw"]) or 0) + (item.get(cfg["next"]) or 0)
+                reco = compute_region_recommendations(
+                    asin_sales, already_covered, next_shipment_date, today,
+                    trailing_months, lookback_days, year1_months, year2_months,
+                    zero_inventory_weeks,
+                )
+                item[f"{region}_avg_monthly_sales"] = reco["avg_monthly"]
+                item[f"{region}_recommended_order"] = apply_category_min_order(row["sku"], reco["reco_recent"])
+                item[f"{region}_recommended_order_seasonal"] = apply_category_min_order(row["sku"], reco["reco_seasonal"])
+                item[f"{region}_seasonal_source"] = reco["seasonal_source"]
+                item[f"{region}_reco_debug"] = {
+                    "trailingTotal": reco["trailing_total"],
+                    "year1Total": reco["year1_total"],
+                    "year2Total": reco["year2_total"],
+                    "xDays": reco["x_days"],
+                    "needForXDays": reco["need_for_x_days"],
+                    "alreadyCovered": reco["already_covered"],
+                    "avgDailyRecent": reco["avg_daily_recent"],
+                    "avgDailySeasonal": reco["avg_daily_seasonal"],
+                    "zeroInventoryWeeks": reco["zero_inventory_weeks"],
+                }
 
             groups[row["group"]].append(item)
 
