@@ -14,6 +14,7 @@ POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
 POCKETBASE_STATS_COLLECTION = os.environ.get("POCKETBASE_STATS_COLLECTION", "sku_statistics")
 POCKETBASE_MAPPING_COLLECTION = os.environ.get("POCKETBASE_MAPPING_COLLECTION", "asin_group_mapping")
 POCKETBASE_SALES_COLLECTION = os.environ.get("POCKETBASE_SALES_COLLECTION", "sku_sales")
+POCKETBASE_INVENTORY_HISTORY_COLLECTION = os.environ.get("POCKETBASE_INVENTORY_HISTORY_COLLECTION", "sku_inventory_history")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 
 STATS_FIELDS = [
@@ -213,6 +214,41 @@ def fetch_all_usa_sales_by_asin_month(token):
     return totals
 
 
+def fetch_zero_inventory_week_counts_by_asin(token, since_date_str):
+    """{asin: count of distinct weekly snapshots (sku_inventory_history,
+    written every Monday by WeeklyUsaInventorySync.py) with usa_balance <= 0
+    on/after since_date_str} - used to exclude stockout weeks from the
+    recent sales-velocity denominator (see compute_usa_recommendations).
+    This collection only started being written 2026-09-20, so it returns
+    all-zero counts (no adjustment) until enough weekly history accumulates -
+    expected and fine, not a bug."""
+    counts = defaultdict(set)
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_INVENTORY_HISTORY_COLLECTION}/records",
+            headers={"Authorization": token},
+            params={
+                "filter": f'week_date >= "{since_date_str}" && usa_balance <= 0',
+                "perPage": 500,
+                "page": page,
+                "fields": "asin,week_date",
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+        data = response.json()
+        for row in data.get("items", []):
+            asin = row.get("asin")
+            if asin:
+                counts[asin].add(row.get("week_date"))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return {asin: len(weeks) for asin, weeks in counts.items()}
+
+
 def days_in_months(months):
     """Exact real day count spanning the given (year, month) pairs (e.g.
     Jun+Jul+Aug = 30+31+31 = 92), used as the denominator for a real
@@ -241,14 +277,15 @@ def sum_window(asin_sales, months):
     return sum(asin_sales.get(ym, 0) for ym in months)
 
 
-def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months):
+def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
     """Two recommendations, both confirmed with the user (2026-09-19), both
     in the same "how many MORE units to still add to USA Next" shape as the
     page's existing Missing column (0 = already covered):
 
     Reco 1 ("recent"): assumes the next 3 months look like the last 3.
         x = days from today to next_shipment_date
-        need_for_x_days = x * (recent 3-month total / real days in those months)
+        need_for_x_days = x * (recent 3-month total / real SELLABLE days in
+            those months - see zero_inventory_weeks below)
         need_for_3_months = the recent 3-month total, used as-is
         reco = need_for_3_months + need_for_x_days - USA_Bal - USA_OTW - USA_Next
 
@@ -261,9 +298,24 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
     the gap before the shipment even arrives, not the season it lands in).
     Falls back to only whichever of the two years has real history if the
     other doesn't (e.g. a newer SKU), or to Reco 1's own number if neither
-    year has any - seasonal_source says which case applied."""
+    year has any - seasonal_source says which case applied.
+
+    zero_inventory_weeks (per the user, 2026-09-20): count of weekly
+    snapshots (sku_inventory_history) within the trailing window where this
+    SKU had zero USA stock. A stockout week can't produce real sales no
+    matter the true demand, so counting those days as normal sales days
+    would understate velocity - each such week is dropped from the
+    denominator entirely (both the days AND, implicitly, its ~0 sales).
+    Only ever non-zero once enough weekly history has accumulated (this
+    tracking started 2026-09-20), and short/sub-week stockouts aren't
+    detectable at all with weekly-only snapshots - both known, accepted
+    limitations, not bugs."""
     trailing_total = sum_window(asin_sales, trailing_months)
-    avg_per_day = (trailing_total / lookback_days) if lookback_days else 0
+    excluded_days = zero_inventory_weeks * 7
+    effective_lookback_days = lookback_days - excluded_days
+    if effective_lookback_days <= 0:
+        effective_lookback_days = lookback_days  # fully-excluded edge case: fall back rather than divide by ~0
+    avg_per_day = (trailing_total / effective_lookback_days) if effective_lookback_days else 0
 
     x_days = max(0, (next_shipment_date - today).days)
     need_for_x_days = x_days * avg_per_day
@@ -316,6 +368,8 @@ def compute_usa_recommendations(asin_sales, item, next_shipment_date, today, tra
         "already_covered": already_covered,
         "avg_daily_recent": round(avg_per_day, 2),
         "avg_daily_seasonal": round(avg_per_day_seasonal, 2),
+        "zero_inventory_weeks": zero_inventory_weeks,
+        "effective_lookback_days": effective_lookback_days,
     }
 
 
@@ -349,6 +403,8 @@ def GetNextOrderData(request):
         year1_months = shipment_window_months(next_shipment_date, 1)
         year2_months = shipment_window_months(next_shipment_date, 2)
         all_usa_sales = fetch_all_usa_sales_by_asin_month(token)
+        trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
+        zero_inventory_weeks_by_asin = fetch_zero_inventory_week_counts_by_asin(token, trailing_window_start)
 
         groups = defaultdict(list)
         for row in mapping_rows:
@@ -358,9 +414,11 @@ def GetNextOrderData(request):
                 item[field] = stats.get(field) or 0
 
             asin_sales = all_usa_sales.get(row["asin"], {}) if row["asin"] else {}
+            zero_inventory_weeks = zero_inventory_weeks_by_asin.get(row["asin"], 0) if row["asin"] else 0
             reco = compute_usa_recommendations(
                 asin_sales, item, next_shipment_date, today,
                 trailing_months, lookback_days, year1_months, year2_months,
+                zero_inventory_weeks,
             )
             item["usa_avg_monthly_sales"] = reco["avg_monthly"]
             item["usa_recommended_order"] = apply_category_min_order(row["sku"], reco["reco_recent"])
@@ -375,6 +433,7 @@ def GetNextOrderData(request):
                 "alreadyCovered": reco["already_covered"],
                 "avgDailyRecent": reco["avg_daily_recent"],
                 "avgDailySeasonal": reco["avg_daily_seasonal"],
+                "zeroInventoryWeeks": reco["zero_inventory_weeks"],
             }
 
             groups[row["group"]].append(item)
