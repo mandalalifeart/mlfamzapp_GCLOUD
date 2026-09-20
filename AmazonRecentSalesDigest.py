@@ -78,10 +78,16 @@ TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
 IMAGE_BASE = "https://storage.googleapis.com/mlf-amz-images/"
 
 JOB_STATE_KEY = "recent_sales_digest_seen_orders"
-# Amazon rejects a CreatedBefore within ~2 minutes of the real current time
-# (HTTP 400 "not valid") - confirmed via this project's own earlier Orders.py
-# probe script.
-CREATED_BEFORE_LAG_MINUTES = 2
+# Amazon documents/rejects a CreatedBefore within 2 minutes of the real
+# current time (HTTP 400 "not valid"). Using exactly 2 minutes here left
+# zero margin for the real latency between computing window_end_utc and
+# Amazon's own server evaluating it (token refresh + network round-trip) -
+# confirmed live 2026-09-20: the FIRST marketplace processed each run (US)
+# occasionally errored on exactly this, while later marketplaces (processed
+# a few seconds later in the same run, by which point more real time had
+# elapsed) didn't. 3 minutes gives real headroom instead of sitting exactly
+# on Amazon's stated minimum.
+CREATED_BEFORE_LAG_MINUTES = 3
 
 # marketplace_code -> (credential scope, sp_api Marketplaces enum attribute
 # name). Credential scopes/env vars mirror every other multi-marketplace
