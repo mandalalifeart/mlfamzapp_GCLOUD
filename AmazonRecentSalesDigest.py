@@ -378,14 +378,20 @@ def SendRecentSalesDigest(request):
         now_local = now_utc.astimezone(DISPLAY_TZ)
         today_str = now_local.date().isoformat()
         day_start_utc = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-        # Right at local midnight, day_start_utc is essentially "now," so
-        # subtracting the lag below would land BEFORE day_start_utc and
-        # Amazon rejects CreatedAfter > CreatedBefore outright (hit live
-        # 2026-09-20: every marketplace errored on the first run of a new
-        # day). Clamping keeps the range valid (possibly zero-width, which
-        # Amazon accepts) instead of erroring for the first minute or two
-        # of every single day.
-        window_end_utc = max(day_start_utc, now_utc - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES))
+        # window_end must ALWAYS be >= CREATED_BEFORE_LAG_MINUTES in the past
+        # - that's a hard, non-negotiable Amazon requirement, so it must
+        # never be clamped upward toward day_start (an earlier version did
+        # exactly that, which "fixed" CreatedAfter>CreatedBefore at midnight
+        # but broke this separate rule instead - hit live 2026-09-21, EVERY
+        # marketplace errored again, just with a different message). Right
+        # at local midnight day_start_utc is essentially "now," so the
+        # window is briefly degenerate (end <= start) for the first minute
+        # or two of each day - the correct fix is to skip the fetch entirely
+        # for this one run rather than force either boundary to be wrong;
+        # the very next hourly run picks up from day_start with a real,
+        # valid window, and nothing is lost since no order could have
+        # existed in that near-zero window anyway.
+        window_end_utc = now_utc - timedelta(minutes=CREATED_BEFORE_LAG_MINUTES)
 
         token = pb_authenticate()
         state_raw = get_job_state(token, JOB_STATE_KEY)
@@ -394,20 +400,22 @@ def SendRecentSalesDigest(request):
         # no seen orders, since a new day's order list is naturally empty.
         seen_order_ids = set(state.get("seenOrderIds", [])) if state.get("date") == today_str else set()
 
-        created_after = day_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-        created_before = window_end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         results = []
         errors = []
         all_new_ids = []
-        for mp_code, cred_scope, enum_name in MARKETPLACES:
-            try:
-                count, revenue, units, new_ids = summarize_new_orders(cred_scope, enum_name, created_after, created_before, seen_order_ids)
-                all_new_ids.extend(new_ids)
-                if count > 0:
-                    results.append({"marketplace": mp_code, "orderCount": count, "revenue": revenue, "units": units})
-            except Exception as exc:
-                errors.append(f"{mp_code}: {exc}")
+        if window_end_utc <= day_start_utc:
+            pass  # degenerate window right at local midnight - skip, see comment above
+        else:
+            created_after = day_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            created_before = window_end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            for mp_code, cred_scope, enum_name in MARKETPLACES:
+                try:
+                    count, revenue, units, new_ids = summarize_new_orders(cred_scope, enum_name, created_after, created_before, seen_order_ids)
+                    all_new_ids.extend(new_ids)
+                    if count > 0:
+                        results.append({"marketplace": mp_code, "orderCount": count, "revenue": revenue, "units": units})
+                except Exception as exc:
+                    errors.append(f"{mp_code}: {exc}")
 
         text = build_digest_text(now_local, results, errors)
         send_telegram(text)
