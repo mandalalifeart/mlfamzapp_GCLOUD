@@ -10,9 +10,9 @@ from GetNextOrderData import (
     REGION_RECO_CONFIGS,
     apply_category_min_order,
     compute_region_recommendations,
-    days_in_months,
+    compute_trailing_total_prorated,
     shipment_window_months,
-    trailing_completed_months,
+    trailing_months_with_current,
 )
 from NextOrderSettings import get_or_create_next_shipment_date
 
@@ -138,8 +138,7 @@ def compute_product_recos(token, asin, sku, stock):
     next_shipment_date = date.fromisoformat(next_shipment_date_str)
     today = date.today()
 
-    trailing_months = trailing_completed_months(3, today)
-    lookback_days = days_in_months(trailing_months)
+    trailing_months = trailing_months_with_current(3, today)
     year1_months = shipment_window_months(next_shipment_date, 1)
     year2_months = shipment_window_months(next_shipment_date, 2)
     trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
@@ -149,9 +148,10 @@ def compute_product_recos(token, asin, sku, stock):
         asin_sales = fetch_sales_by_month_for_asin(token, asin, cfg["sales_marketplaces"])
         zero_inventory_weeks = fetch_zero_inventory_weeks_for_asin(token, asin, region, trailing_window_start)
         already_covered = (stock.get(cfg["balance"]) or 0) + (stock.get(cfg["otw"]) or 0) + (stock.get(cfg["next"]) or 0)
+        trailing_total, lookback_days, _ = compute_trailing_total_prorated(asin_sales, 3, today)
         reco = compute_region_recommendations(
             asin_sales, already_covered, next_shipment_date, today,
-            trailing_months, lookback_days, year1_months, year2_months,
+            trailing_total, lookback_days, year1_months, year2_months,
             zero_inventory_weeks,
         )
         recos[region] = {

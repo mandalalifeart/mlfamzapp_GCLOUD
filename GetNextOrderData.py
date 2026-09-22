@@ -171,22 +171,50 @@ def fetch_sku_statistics(token):
     return records
 
 
-def trailing_completed_months(n, today=None):
-    """Returns the last n whole calendar months before the current
-    in-progress one, as (year, month) tuples, oldest first - e.g. on
-    2026-09-19 with n=3: [(2026,6), (2026,7), (2026,8)]. Handles a year
-    rollover the same way run_daily_monthly_update.py's month-boundary
-    helpers do elsewhere in this codebase."""
+def trailing_months_with_current(n, today=None):
+    """Same idea as trailing_completed_months, but the window ENDS AT the
+    current in-progress month (inclusive) instead of stopping before it -
+    e.g. on 2026-09-22 with n=3: [(2026,7), (2026,8), (2026,9)]."""
     today = today or date.today()
     months = []
     year, month = today.year, today.month
     for _ in range(n):
+        months.append((year, month))
         month -= 1
         if month == 0:
             month = 12
             year -= 1
-        months.append((year, month))
     return list(reversed(months))
+
+
+def compute_trailing_total_prorated(asin_sales, n, today=None):
+    """Per the user (2026-09-22): the current in-progress month's sales-so-
+    far are included in the recent-velocity window, prorated up to a
+    full-month estimate, rather than excluded outright (the original
+    design) or counted as-is (which would understate the rate early in the
+    month, since e.g. 4 units by day 22 of a 30-day month undercounts what
+    the full month will likely show). The window shifts to END at the
+    current month - dropping the oldest of the previously-n-completed
+    months - rather than growing to n+1 months, so "the last n months"
+    stays a consistent window size.
+
+    Returns (trailing_total, lookback_days, months_used) - lookback_days is
+    the real full day-count of all n months (including the current one's
+    full length, not just days-elapsed), matching the fact trailing_total
+    already estimates what the full current month will produce."""
+    today = today or date.today()
+    months = trailing_months_with_current(n, today)
+    lookback_days = days_in_months(months)
+
+    completed_months, current_ym = months[:-1], months[-1]
+    completed_total = sum(asin_sales.get(ym, 0) for ym in completed_months)
+
+    days_elapsed = today.day
+    days_in_current = calendar.monthrange(*current_ym)[1]
+    current_actual = asin_sales.get(current_ym, 0)
+    current_prorated = (current_actual * days_in_current / days_elapsed) if days_elapsed else float(current_actual)
+
+    return completed_total + current_prorated, lookback_days, months
 
 
 def fetch_all_sales_by_asin_month(token, marketplaces):
@@ -290,7 +318,7 @@ def sum_window(asin_sales, months):
     return sum(asin_sales.get(ym, 0) for ym in months)
 
 
-def compute_region_recommendations(asin_sales, already_covered, next_shipment_date, today, trailing_months, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
+def compute_region_recommendations(asin_sales, already_covered, next_shipment_date, today, trailing_total, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
     """Generalized across USA/UK/DE (originally USA-only, generalized
     2026-09-20 at the user's request - "same reco" for UK/DE). Two
     recommendations, both confirmed with the user (2026-09-19), both in the
@@ -324,8 +352,14 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
     Only ever non-zero once enough weekly history has accumulated (this
     tracking started 2026-09-20), and short/sub-week stockouts aren't
     detectable at all with weekly-only snapshots - both known, accepted
-    limitations, not bugs."""
-    trailing_total = sum_window(asin_sales, trailing_months)
+    limitations, not bugs.
+
+    trailing_total/lookback_days are precomputed by the caller (see
+    compute_trailing_total_prorated - the current in-progress month's
+    sales-so-far are prorated into trailing_total, per the user 2026-09-22),
+    not derived here - asin_sales is still needed below for the seasonal
+    (year1/year2) totals, which are always fully-complete historical months
+    with no proration concept."""
     excluded_days = zero_inventory_weeks * 7
     effective_lookback_days = lookback_days - excluded_days
     if effective_lookback_days <= 0:
@@ -411,8 +445,7 @@ def GetNextOrderData(request):
         next_shipment_date = date.fromisoformat(next_shipment_date_str)
         today = date.today()
 
-        trailing_months = trailing_completed_months(SALES_LOOKBACK_MONTHS, today)
-        lookback_days = days_in_months(trailing_months)
+        trailing_months = trailing_months_with_current(SALES_LOOKBACK_MONTHS, today)
         year1_months = shipment_window_months(next_shipment_date, 1)
         year2_months = shipment_window_months(next_shipment_date, 2)
         trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
@@ -437,9 +470,10 @@ def GetNextOrderData(request):
                 asin_sales = all_sales_by_region[region].get(row["asin"], {}) if row["asin"] else {}
                 zero_inventory_weeks = zero_inventory_weeks_by_region[region].get(row["asin"], 0) if row["asin"] else 0
                 already_covered = (item.get(cfg["balance"]) or 0) + (item.get(cfg["otw"]) or 0) + (item.get(cfg["next"]) or 0)
+                trailing_total, lookback_days, _ = compute_trailing_total_prorated(asin_sales, SALES_LOOKBACK_MONTHS, today)
                 reco = compute_region_recommendations(
                     asin_sales, already_covered, next_shipment_date, today,
-                    trailing_months, lookback_days, year1_months, year2_months,
+                    trailing_total, lookback_days, year1_months, year2_months,
                     zero_inventory_weeks,
                 )
                 item[f"{region}_avg_monthly_sales"] = reco["avg_monthly"]
