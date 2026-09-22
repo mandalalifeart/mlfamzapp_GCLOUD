@@ -406,8 +406,12 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
         "seasonal_source": seasonal_source,
         # Raw intermediates, exposed so the frontend can render an always-
         # accurate worked-example breakdown (and the per-item hover tooltip)
-        # without re-deriving any of this.
-        "trailing_total": trailing_total,
+        # without re-deriving any of this. trailing_total is rounded to 1dp
+        # for display only (the un-rounded value already drove every actual
+        # calculation above) - it's frequently fractional now that the
+        # current month's sales are prorated in, and showing its full float
+        # precision in a tooltip would look broken.
+        "trailing_total": round(trailing_total, 1),
         "year1_total": year1_total,
         "year2_total": year2_total,
         "x_days": x_days,
