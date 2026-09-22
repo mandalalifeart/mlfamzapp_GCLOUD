@@ -65,6 +65,7 @@ class RequestSnapshot:
 # mini PC's uptime) - see CLAUDE.md "AmzBot: local job runner".
 ROUTED_FUNCTIONS = [
     "AssignSkuGroup",
+    "SetEndOfLife",
     "GetMarketplaceSalesSummary",
     "GetNextOrderData",
     "GetProductDetail",

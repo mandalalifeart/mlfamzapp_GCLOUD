@@ -220,6 +220,13 @@ def GetProductDetail(request):
         mapping_record = find_one(token, POCKETBASE_MAPPING_COLLECTION, f'asin="{pb_escape(asin)}"')
         main_sku = mapping_record.get("sku") if mapping_record else ""
         group = mapping_record.get("group") if mapping_record else ""
+        # end_of_life is a product-level (ASIN-level) flag, not tied to
+        # whichever single SKU spelling this find_one() happened to match -
+        # true if ANY mapping row sharing this ASIN is flagged, matching
+        # SetEndOfLife's own "apply to every sibling spelling" write and
+        # GetNextOrderData's exclusion logic.
+        all_asin_rows = fetch_all(token, POCKETBASE_MAPPING_COLLECTION, f'asin="{pb_escape(asin)}"', fields="end_of_life")
+        end_of_life = any(row.get("end_of_life") for row in all_asin_rows)
 
         # IGNORE is a valid destination group (excludes a SKU from every report)
         # but real mapping rows rarely use it, so add it explicitly - same
@@ -260,6 +267,7 @@ def GetProductDetail(request):
             "asin": asin,
             "mainSku": main_sku,
             "group": group,
+            "endOfLife": end_of_life,
             "allGroups": all_groups,
             "years": years,
             "currentMonth": current_month,

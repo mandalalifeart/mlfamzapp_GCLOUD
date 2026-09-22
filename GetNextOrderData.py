@@ -116,12 +116,31 @@ def fetch_mapping_records(token):
 def load_mapping(token):
     # Same GROUP/IGNORE handling as GetSalesDepartmentReport.load_mapping -
     # IGNORE-group SKUs are deliberately excluded products, not candidates to reorder.
-    # sku_to_asin covers every row (IGNORE included) so an sku_statistics record
-    # filed under any SKU spelling - even one belonging to an ignored/retired
-    # SKU string - can still be resolved to its ASIN for the join below.
+    # end_of_life (added 2026-09-22, set via the product page's "EndOfLife
+    # List" button) is a SEPARATE exclusion from group - a discontinued
+    # product keeps its real group (still shows up in sales reports etc.),
+    # it's just flagged as no longer worth reordering, so only THIS page
+    # skips it. Excluded by ASIN, not just the one flagged SKU row - the
+    # button is set from one specific SKU spelling on the product page, but
+    # a product can have multiple mapping rows sharing one ASIN (old/new
+    # spellings), and end-of-life is a property of the PRODUCT, not one
+    # spelling of it (confirmed live 2026-09-22: without this, Stool260_New
+    # got excluded but its sibling spelling Stool260, same ASIN, still
+    # showed up).
+    # sku_to_asin covers every row (IGNORE and end_of_life included) so an
+    # sku_statistics record filed under any SKU spelling - even one
+    # belonging to an ignored/retired/end-of-life SKU string - can still be
+    # resolved to its ASIN for the join below.
+    all_rows = fetch_mapping_records(token)
+    end_of_life_asins = {
+        (row.get("asin") or "").strip()
+        for row in all_rows
+        if row.get("end_of_life") and (row.get("asin") or "").strip()
+    }
+
     rows = []
     sku_to_asin = {}
-    for row in fetch_mapping_records(token):
+    for row in all_rows:
         sku = (row.get("sku") or "").strip()
         asin = (row.get("asin") or "").strip()
         upc = (row.get("ean") or "").strip()
@@ -131,7 +150,7 @@ def load_mapping(token):
             continue
         if asin:
             sku_to_asin[sku] = asin
-        if group == "IGNORE":
+        if group == "IGNORE" or row.get("end_of_life") or (asin and asin in end_of_life_asins):
             continue
         rows.append({"sku": sku, "asin": asin, "upc": upc, "supplier_sku": supplier_sku, "group": group})
     return rows, sku_to_asin

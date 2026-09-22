@@ -48,6 +48,11 @@ def AssignSkuGroup(request):
     return _impl(request)
 
 
+def SetEndOfLife(request):
+    from SetEndOfLife import SetEndOfLife as _impl
+    return _impl(request)
+
+
 def GetProductDetail(request):
     from GetProductDetail import GetProductDetail as _impl
     return _impl(request)
