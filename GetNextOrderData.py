@@ -2,11 +2,11 @@ import calendar
 import json
 import os
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 import requests
 
-from NextOrderSettings import get_or_create_next_shipment_date
+from NextOrderSettings import get_next_shipment_dates, get_cover_until_dates, region_cover_months
 
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
@@ -21,8 +21,13 @@ STATS_FIELDS = [
     "uk_balance", "uk_on_the_way", "uk_next_shipment",
     "de_balance", "de_on_the_way", "de_next_shipment",
     "usa_balance", "usa_on_the_way", "usa_next_shipment",
+    "au_balance", "au_on_the_way", "au_next_shipment",
     "malani_balance", "malani_order", "next_order",
 ]
+
+# AU (2026-10-20) has FBA only - au_balance is written directly by
+# UpdateEuInventory, there are no au_balance_<part> fields.
+BALANCE_PARTS = {"usa": ("fba", "awd"), "uk": ("fba", "awd"), "de": ("fba", "awd", "lg"), "au": ("fba",)}
 
 # USA Recommendation to Order - see compute_usa_recommendation for the full
 # formula. Canada/Mexico sales are folded into "usa" everywhere sales are
@@ -77,6 +82,8 @@ REGION_RECO_CONFIGS = {
     "usa": {"balance": "usa_balance", "otw": "usa_on_the_way", "next": "usa_next_shipment", "sales_marketplaces": ("usa", "ca", "mex")},
     "uk": {"balance": "uk_balance", "otw": "uk_on_the_way", "next": "uk_next_shipment", "sales_marketplaces": ("uk",)},
     "de": {"balance": "de_balance", "otw": "de_on_the_way", "next": "de_next_shipment", "sales_marketplaces": ("de",)},
+    # Added 2026-10-20 per the user; the page hides AU while AU has no sellable stock.
+    "au": {"balance": "au_balance", "otw": "au_on_the_way", "next": "au_next_shipment", "sales_marketplaces": ("au",)},
 }
 
 
@@ -206,36 +213,6 @@ def trailing_months_with_current(n, today=None):
     return list(reversed(months))
 
 
-def compute_trailing_total_prorated(asin_sales, n, today=None):
-    """Per the user (2026-09-22): the current in-progress month's sales-so-
-    far are included in the recent-velocity window, prorated up to a
-    full-month estimate, rather than excluded outright (the original
-    design) or counted as-is (which would understate the rate early in the
-    month, since e.g. 4 units by day 22 of a 30-day month undercounts what
-    the full month will likely show). The window shifts to END at the
-    current month - dropping the oldest of the previously-n-completed
-    months - rather than growing to n+1 months, so "the last n months"
-    stays a consistent window size.
-
-    Returns (trailing_total, lookback_days, months_used) - lookback_days is
-    the real full day-count of all n months (including the current one's
-    full length, not just days-elapsed), matching the fact trailing_total
-    already estimates what the full current month will produce."""
-    today = today or date.today()
-    months = trailing_months_with_current(n, today)
-    lookback_days = days_in_months(months)
-
-    completed_months, current_ym = months[:-1], months[-1]
-    completed_total = sum(asin_sales.get(ym, 0) for ym in completed_months)
-
-    days_elapsed = today.day
-    days_in_current = calendar.monthrange(*current_ym)[1]
-    current_actual = asin_sales.get(current_ym, 0)
-    current_prorated = (current_actual * days_in_current / days_elapsed) if days_elapsed else float(current_actual)
-
-    return completed_total + current_prorated, lookback_days, months
-
-
 def fetch_all_sales_by_asin_month(token, marketplaces):
     """Every sku_sales row across the given marketplaces, ALL years, summed
     per (asin, year, month) - {asin: {(year, month): qty}}. A single fetch
@@ -274,41 +251,6 @@ def fetch_all_sales_by_asin_month(token, marketplaces):
     return totals
 
 
-def fetch_zero_inventory_week_counts_by_asin(token, since_date_str, region):
-    """{asin: count of distinct weekly snapshots (sku_inventory_history,
-    written every Monday by WeeklyUsaInventorySync.py/WeeklyEuInventorySync.py)
-    with balance <= 0 for the given region, on/after since_date_str} - used
-    to exclude stockout weeks from the recent sales-velocity denominator
-    (see compute_region_recommendations). USA history started 2026-09-20,
-    UK/DE the same day - all return all-zero counts (no adjustment) until
-    enough weekly history accumulates, expected and fine, not a bug."""
-    counts = defaultdict(set)
-    page = 1
-    while True:
-        response = requests.get(
-            f"{POCKETBASE_URL}/api/collections/{POCKETBASE_INVENTORY_HISTORY_COLLECTION}/records",
-            headers={"Authorization": token},
-            params={
-                "filter": f'region = "{region}" && week_date >= "{since_date_str}" && balance <= 0',
-                "perPage": 500,
-                "page": page,
-                "fields": "asin,week_date",
-            },
-            timeout=30,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
-        data = response.json()
-        for row in data.get("items", []):
-            asin = row.get("asin")
-            if asin:
-                counts[asin].add(row.get("week_date"))
-        if page >= data.get("totalPages", 1):
-            break
-        page += 1
-    return {asin: len(weeks) for asin, weeks in counts.items()}
-
-
 def days_in_months(months):
     """Exact real day count spanning the given (year, month) pairs (e.g.
     Jun+Jul+Aug = 30+31+31 = 92), used as the denominator for a real
@@ -316,7 +258,7 @@ def days_in_months(months):
     return sum(calendar.monthrange(y, m)[1] for y, m in months)
 
 
-def shipment_window_months(shipment_date, years_back=0):
+def shipment_window_months(shipment_date, years_back=0, count=3):
     """The 3 calendar months starting at shipment_date's own month, shifted
     back by years_back full years - e.g. shipment_date=2027-12-01,
     years_back=1 -> [(2026,12), (2027,1), (2027,2)] (Dec+Jan+Feb one year
@@ -325,7 +267,7 @@ def shipment_window_months(shipment_date, years_back=0):
     year = shipment_date.year - years_back
     month = shipment_date.month
     months = []
-    for i in range(3):
+    for i in range(count):
         m = month + i
         y = year + (m - 1) // 12
         mm = ((m - 1) % 12) + 1
@@ -337,110 +279,208 @@ def sum_window(asin_sales, months):
     return sum(asin_sales.get(ym, 0) for ym in months)
 
 
-def compute_region_recommendations(asin_sales, already_covered, next_shipment_date, today, trailing_total, lookback_days, year1_months, year2_months, zero_inventory_weeks=0):
-    """Generalized across USA/UK/DE (originally USA-only, generalized
-    2026-09-20 at the user's request - "same reco" for UK/DE). Two
-    recommendations, both confirmed with the user (2026-09-19), both in the
-    same "how many MORE units to still add to <region> Next" shape as the
-    page's existing Missing column (0 = already covered):
+MIN_IN_STOCK_DAYS = 7
 
-    Reco 1 ("recent"): assumes the next 3 months look like the last 3.
-        x = days from today to next_shipment_date
-        need_for_x_days = x * (recent 3-month total / real SELLABLE days in
-            those months - see zero_inventory_weeks below)
-        need_for_3_months = the recent 3-month total, used as-is
-        reco = need_for_3_months + need_for_x_days - already_covered (Bal + OTW + Next, all for this region)
 
-    Reco 2 ("seasonal"): a seasonal product's next-3-months can look nothing
-    like its last-3-months (e.g. shipping into summer from a winter
-    baseline), so instead of the recent total it uses the ACTUAL same
-    3-calendar-month window the shipment lands into, from 1 and 2 years ago
-    (averaged - smooths out a one-off spike/dip in either single year), and
-    keeps the same near-term need_for_x_days term as Reco 1 (that portion is
-    the gap before the shipment even arrives, not the season it lands in).
-    Falls back to only whichever of the two years has real history if the
-    other doesn't (e.g. a newer SKU), or to Reco 1's own number if neither
-    year has any - seasonal_source says which case applied.
+def window_rate(asin_sales, months, stock_months, covered_months, today):
+    """Sales per day over the given calendar months, counting only days the
+    product was IN STOCK in the region (per the user 2026-10-03, see
+    StockDays.py). Days not covered by Amazon's inventory ledger (older than
+    its ~18-month history, or not reported yet) are assumed in stock. The
+    current month counts only the days elapsed so far, with its actual units
+    (no proration needed - the rate is per in-stock day). Fewer than
+    MIN_IN_STOCK_DAYS in-stock days -> all days are used instead (too little
+    data). Returns (rate, units, in_stock_days, total_days, all_days_used)."""
+    units = in_stock = total = 0
+    for (y, m) in months:
+        days = today.day if (y, m) == (today.year, today.month) else calendar.monthrange(y, m)[1]
+        units += asin_sales.get((y, m), 0)
+        cov = min(covered_months.get((y, m), 0), days)
+        in_stock += (min(stock_months.get((y, m), 0), cov) if cov else 0) + (days - cov)
+        total += days
+    all_days = in_stock < MIN_IN_STOCK_DAYS
+    denom = total if all_days else in_stock
+    return (units / denom if denom else 0.0), units, (total if all_days else in_stock), total, all_days
 
-    zero_inventory_weeks (per the user, 2026-09-20): count of weekly
-    snapshots (sku_inventory_history) within the trailing window where this
-    SKU had zero stock in this region. A stockout week can't produce real sales no
-    matter the true demand, so counting those days as normal sales days
-    would understate velocity - each such week is dropped from the
-    denominator entirely (both the days AND, implicitly, its ~0 sales).
-    Only ever non-zero once enough weekly history has accumulated (this
-    tracking started 2026-09-20), and short/sub-week stockouts aren't
-    detectable at all with weekly-only snapshots - both known, accepted
-    limitations, not bugs.
 
-    trailing_total/lookback_days are precomputed by the caller (see
-    compute_trailing_total_prorated - the current in-progress month's
-    sales-so-far are prorated into trailing_total, per the user 2026-09-22),
-    not derived here - asin_sales is still needed below for the seasonal
-    (year1/year2) totals, which are always fully-complete historical months
-    with no proration concept."""
-    excluded_days = zero_inventory_weeks * 7
-    effective_lookback_days = lookback_days - excluded_days
-    if effective_lookback_days <= 0:
-        effective_lookback_days = lookback_days  # fully-excluded edge case: fall back rather than divide by ~0
-    avg_per_day = (trailing_total / effective_lookback_days) if effective_lookback_days else 0
+def months_spanning(start, end):
+    """Calendar (year, month) pairs touched by the date range [start, end)."""
+    months, y, m = [], start.year, start.month
+    last = end - timedelta(days=1)
+    while (y, m) <= (last.year, last.month):
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return months
 
+
+def _shift_years(d, years):
+    try:
+        return d.replace(year=d.year - years)
+    except ValueError:   # 29 Feb
+        return d.replace(year=d.year - years, day=28)
+
+
+def compute_region_recommendations(asin_sales, already_covered, next_shipment_date, today, trailing_months,
+                                   year1_months, year2_months, stock_months, covered_months, pb_count=3):
+    """Next shipment, per the user (2026-10-03):
+        PA = today -> shipment arrival (x days); PB = the 3 months after arrival
+        QA = pieces needed during PA, QB = pieces needed during PB, H = Bal + OTW
+        at arrival we have max(H - QA, 0)   (running out early is lost sales,
+                                              not something to refill - no over-ordering)
+        next shipment = QB - max(H - QA, 0)   (floored at 0)
+    Three demand forecasts, every rate counting only in-stock days (window_rate):
+        A (recent):     QA = recent rate x days(PA),               QB = recent rate x days(PB)
+        B (1 year ago): QA = rate in PA's dates 1 year ago x days(PA), QB = rate in PB's months 1 year ago x days(PB)
+        C (2 years ago): same with 2 years ago
+    B/C use the recent rate for a window with no sales history that far back
+    (seasonal_*_source = "fallback_recent"). The Next column is not counted."""
+    rate_recent, units_recent, stock_recent, total_recent, all_recent = window_rate(
+        asin_sales, trailing_months, stock_months, covered_months, today)
     x_days = max(0, (next_shipment_date - today).days)
-    need_for_x_days = x_days * avg_per_day
-
-    reco_recent = max(0, round(trailing_total + need_for_x_days - already_covered))
-
-    year1_total = sum_window(asin_sales, year1_months)
-    year2_total = sum_window(asin_sales, year2_months)
-    year1_days = days_in_months(year1_months)
-    year2_days = days_in_months(year2_months)
+    pb_months = shipment_window_months(next_shipment_date, 0, pb_count)
+    pb_days = days_in_months(pb_months)
     earliest = min(asin_sales.keys()) if asin_sales else None
-    has_year1 = earliest is not None and earliest <= year1_months[0]
-    has_year2 = earliest is not None and earliest <= year2_months[0]
+    h = already_covered
 
-    if has_year1 and has_year2:
-        seasonal_3mo = (year1_total + year2_total) / 2
-        seasonal_lookback_days = (year1_days + year2_days) / 2
-        seasonal_source = "2yr_avg"
-    elif has_year1:
-        seasonal_3mo = year1_total
-        seasonal_lookback_days = year1_days
-        seasonal_source = "1yr_only"
-    elif has_year2:
-        seasonal_3mo = year2_total
-        seasonal_lookback_days = year2_days
-        seasonal_source = "2yr_only"
-    else:
-        seasonal_3mo = trailing_total
-        seasonal_lookback_days = lookback_days
-        seasonal_source = "fallback_recent"
+    def variant(rate_a, rate_b):
+        qa, qb = rate_a * x_days, rate_b * pb_days
+        left = max(h - qa, 0)
+        return {"qa": round(qa, 1), "qb": round(qb, 1), "left": round(left, 1), "reco": max(0, round(qb - left))}
 
-    avg_per_day_seasonal = (seasonal_3mo / seasonal_lookback_days) if seasonal_lookback_days else 0
-    reco_seasonal = max(0, round(seasonal_3mo + need_for_x_days - already_covered))
+    out = {"recent": variant(rate_recent, rate_recent)}
+    windows = {}
+    for key, years, pb_window in (("1yr", 1, year1_months), ("2yr", 2, year2_months)):
+        pa_months = months_spanning(_shift_years(today, years), _shift_years(next_shipment_date, years)) if x_days else []
+        res = {}
+        for name, months in (("pa", pa_months), ("pb", pb_window)):
+            if months and earliest is not None and earliest <= months[0]:
+                rate, units, stock, total, all_days = window_rate(asin_sales, months, stock_months, covered_months, today)
+                res[name] = {"rate": rate, "units": units, "inStock": stock, "total": total, "allDays": all_days,
+                             "months": months, "source": "actual"}
+            else:
+                res[name] = {"rate": rate_recent, "units": 0, "inStock": 0, "total": 0, "allDays": False,
+                             "months": months, "source": "fallback_recent"}
+        windows[key] = res
+        out[key] = variant(res["pa"]["rate"], res["pb"]["rate"])
+
+    def win_debug(w):
+        return {"rate": round(w["rate"], 2), "units": w["units"], "inStockDays": w["inStock"], "totalDays": w["total"],
+                "allDaysUsed": w["allDays"], "source": w["source"],
+                "months": [f"{y:04d}-{m:02d}" for y, m in w["months"]]}
 
     return {
-        "avg_monthly": round(trailing_total / SALES_LOOKBACK_MONTHS, 1),
-        "reco_recent": reco_recent,
-        "reco_seasonal": reco_seasonal,
-        "seasonal_source": seasonal_source,
-        # Raw intermediates, exposed so the frontend can render an always-
-        # accurate worked-example breakdown (and the per-item hover tooltip)
-        # without re-deriving any of this. trailing_total is rounded to 1dp
-        # for display only (the un-rounded value already drove every actual
-        # calculation above) - it's frequently fractional now that the
-        # current month's sales are prorated in, and showing its full float
-        # precision in a tooltip would look broken.
-        "trailing_total": round(trailing_total, 1),
-        "year1_total": year1_total,
-        "year2_total": year2_total,
-        "x_days": x_days,
-        "need_for_x_days": round(need_for_x_days, 1),
-        "already_covered": already_covered,
-        "avg_daily_recent": round(avg_per_day, 2),
-        "avg_daily_seasonal": round(avg_per_day_seasonal, 2),
-        "zero_inventory_weeks": zero_inventory_weeks,
-        "effective_lookback_days": effective_lookback_days,
+        "avg_monthly": round(rate_recent * 30.4, 1),
+        "reco_recent": out["recent"]["reco"],
+        "reco_seasonal_1yr": out["1yr"]["reco"],
+        "reco_seasonal_2yr": out["2yr"]["reco"],
+        "seasonal_1yr_source": windows["1yr"]["pb"]["source"],
+        "seasonal_2yr_source": windows["2yr"]["pb"]["source"],
+        "debug": {
+            "xDays": x_days, "pbDays": pb_days, "have": h, "alreadyCovered": h,
+            "recent": {"rate": round(rate_recent, 2), "units": units_recent, "inStockDays": stock_recent,
+                       "totalDays": total_recent, "allDaysUsed": all_recent, "source": "actual",
+                       "months": [f"{y:04d}-{m:02d}" for y, m in trailing_months]},
+            "year1": {"pa": win_debug(windows["1yr"]["pa"]), "pb": win_debug(windows["1yr"]["pb"])},
+            "year2": {"pa": win_debug(windows["2yr"]["pa"]), "pb": win_debug(windows["2yr"]["pb"])},
+            "A": out["recent"], "B": out["1yr"], "C": out["2yr"],
+            # daily rates used for Days of Supply (A recent, B/C = season after arrival)
+            "avgDailyRecent": round(rate_recent, 2),
+            "avgDailySeasonal1yr": round(windows["1yr"]["pb"]["rate"], 2),
+            "avgDailySeasonal2yr": round(windows["2yr"]["pb"]["rate"], 2),
+        },
     }
+
+
+# Ads countries per Next Order region - same scope as each region's sales
+# marketplaces in REGION_RECO_CONFIGS (USA folds in CA/MX; DE and UK are
+# single marketplaces). Added 2026-10-03 per the user (ACOS per product).
+REGION_ADS_COUNTRIES = {"usa": ("US", "CA", "MX"), "de": ("DE",), "uk": ("UK", "GB"), "au": ("AU",)}
+# Only used to put CA/MX spend+sales on the USD scale before taking the
+# spend/sales ratio - ACOS itself is unit-free, so an approximate rate only
+# shifts the weighting of these tiny marketplaces, never a single-currency ACOS.
+APPROX_TO_USD = {"USD": 1.0, "CAD": 0.73, "MXN": 0.055, "EUR": 1.0, "GBP": 1.0, "AUD": 1.0}
+
+
+def fetch_ads_acos_by_region_asin(token, year, recent_since):
+    """{region: {asin: {"ytdSpend", "ytdSales", "recentSpend", "recentSales"}}}
+    from ads_advertised_product_stats (Amazon's own spend/sales7d, i.e. the
+    ACOS Seller Central shows). The same campaign can be reported under two
+    Ads profiles - one profile is kept (see memory
+    amzbot-dedupe-duplicate-profile-campaigns)."""
+    rows, page = [], 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/ads_advertised_product_stats/records",
+            headers={"Authorization": token},
+            params={"filter": f'date >= "{year}-01-01"', "perPage": 500, "page": page,
+                    "fields": "asin,sku,country_code,profile_id,campaign_id,ad_group_id,date,spend,sales,orders,"
+                              "same_sku_units,has_same_sku,currency_code"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        rows.extend(data.get("items", []))
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    best = {}
+    for r in rows:
+        k = (r.get("campaign_id"), r.get("ad_group_id"), r.get("asin"), r.get("sku"), r.get("date"))
+        if k not in best or (r.get("profile_id") or "") < (best[k].get("profile_id") or ""):
+            best[k] = r
+    out = {region: defaultdict(lambda: {"ytdSpend": 0.0, "ytdSales": 0.0, "recentSpend": 0.0, "recentSales": 0.0,
+                                         "ytdUnits": 0, "recentUnits": 0})
+           for region in REGION_ADS_COUNTRIES}
+    for r in best.values():
+        for region, countries in REGION_ADS_COUNTRIES.items():
+            if r.get("country_code") in countries and r.get("asin"):
+                fx = APPROX_TO_USD.get(r.get("currency_code") or "", 1.0)
+                a = out[region][r["asin"]]
+                a["ytdSpend"] += (r.get("spend") or 0) * fx
+                a["ytdSales"] += (r.get("sales") or 0) * fx
+                # units of THIS product sold through ads: exact-SKU units where
+                # stored (SP rows since Sep 2026), else Amazon's ad orders
+                units = (r.get("same_sku_units") or 0) if r.get("has_same_sku") else (r.get("orders") or 0)
+                a["ytdUnits"] += units
+                if (r.get("date") or "") >= recent_since:
+                    a["recentSpend"] += (r.get("spend") or 0) * fx
+                    a["recentSales"] += (r.get("sales") or 0) * fx
+                    a["recentUnits"] += units
+    return out
+
+
+REGION_TRAFFIC_MARKETPLACES = {"usa": ("us", "ca", "mx"), "de": ("de",), "uk": ("uk",), "au": ("au",)}
+
+
+def fetch_total_sales_by_region_asin(token, year):
+    """{region: {asin: total sales this year}} from asin_traffic_monthly
+    (Business Reports ordered product sales, all channels - organic + ads),
+    the denominator of TACOS (per the user 2026-10-23). CA/MX converted with
+    the same approximate rates as the ad spend."""
+    out = {region: defaultdict(float) for region in REGION_TRAFFIC_MARKETPLACES}
+    page = 1
+    while True:
+        response = requests.get(
+            f"{POCKETBASE_URL}/api/collections/asin_traffic_monthly/records",
+            headers={"Authorization": token},
+            params={"filter": f"year = {year}", "perPage": 500, "page": page,
+                    "fields": "asin,marketplace,sales,currency"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        for r in data.get("items", []):
+            for region, mps in REGION_TRAFFIC_MARKETPLACES.items():
+                if r.get("marketplace") in mps and r.get("asin"):
+                    out[region][r["asin"]] += (r.get("sales") or 0) * APPROX_TO_USD.get(r.get("currency") or "", 1.0)
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return out
+
+
+def _acos(spend, sales):
+    return round(100 * spend / sales, 1) if sales else None
 
 
 def GetNextOrderData(request):
@@ -464,23 +504,30 @@ def GetNextOrderData(request):
             if asin and asin not in stats_by_asin:
                 stats_by_asin[asin] = rec
 
-        next_shipment_date_str = get_or_create_next_shipment_date(token)
-        next_shipment_date = date.fromisoformat(next_shipment_date_str)
+        # One arriving date per region (2026-10-18, per the user).
+        shipment_dates = get_next_shipment_dates(token)
+        region_dates = {r: date.fromisoformat(shipment_dates[r]) for r in REGION_RECO_CONFIGS}
+        cover_until = get_cover_until_dates(token)
+        pb_count = region_cover_months(token, region_dates)
+        year1_by_region = {r: shipment_window_months(d, 1, pb_count[r]) for r, d in region_dates.items()}
+        year2_by_region = {r: shipment_window_months(d, 2, pb_count[r]) for r, d in region_dates.items()}
+        next_shipment_date_str = shipment_dates["usa"]
         today = date.today()
 
         trailing_months = trailing_months_with_current(SALES_LOOKBACK_MONTHS, today)
-        year1_months = shipment_window_months(next_shipment_date, 1)
-        year2_months = shipment_window_months(next_shipment_date, 2)
-        trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
+        year1_months = year1_by_region["usa"]
+        year2_months = year2_by_region["usa"]
 
         all_sales_by_region = {
             region: fetch_all_sales_by_asin_month(token, cfg["sales_marketplaces"])
             for region, cfg in REGION_RECO_CONFIGS.items()
         }
-        zero_inventory_weeks_by_region = {
-            region: fetch_zero_inventory_week_counts_by_asin(token, trailing_window_start, region)
-            for region in REGION_RECO_CONFIGS
-        }
+        from StockDays import load_stock_days
+        stock_days, covered_days = load_stock_days(token)
+
+        ads_by_region = fetch_ads_acos_by_region_asin(token, today.year, (today - timedelta(days=30)).isoformat())
+        sales_years = [today.year, today.year - 1, today.year - 2]
+        total_sales_by_region = fetch_total_sales_by_region_asin(token, today.year)
 
         groups = defaultdict(list)
         for row in mapping_rows:
@@ -488,31 +535,51 @@ def GetNextOrderData(request):
             item = {"sku": row["sku"], "asin": row["asin"], "upc": row["upc"], "supplier_sku": row["supplier_sku"]}
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
+            # Balance = FBA + AWD (+ LG warehouse for DE), per the user
+            # 2026-10-03 - rebuilt from the parts so a stale combined field
+            # can't disagree; parts are returned for the hover breakdown.
+            for region, parts in BALANCE_PARTS.items():
+                values = {p: stats.get(f"{region}_balance_{p}") or 0 for p in parts}
+                if any(values.values()):
+                    item[f"{region}_balance"] = sum(values.values())
+                item[f"{region}_balance_parts"] = values
 
             for region, cfg in REGION_RECO_CONFIGS.items():
                 asin_sales = all_sales_by_region[region].get(row["asin"], {}) if row["asin"] else {}
-                zero_inventory_weeks = zero_inventory_weeks_by_region[region].get(row["asin"], 0) if row["asin"] else 0
-                already_covered = (item.get(cfg["balance"]) or 0) + (item.get(cfg["otw"]) or 0) + (item.get(cfg["next"]) or 0)
-                trailing_total, lookback_days, _ = compute_trailing_total_prorated(asin_sales, SALES_LOOKBACK_MONTHS, today)
+                # Reco ignores the Next column (per the user 2026-10-03): Bal + OTW only.
+                already_covered = (item.get(cfg["balance"]) or 0) + (item.get(cfg["otw"]) or 0)
                 reco = compute_region_recommendations(
-                    asin_sales, already_covered, next_shipment_date, today,
-                    trailing_total, lookback_days, year1_months, year2_months,
-                    zero_inventory_weeks,
+                    asin_sales, already_covered, region_dates[region], today, trailing_months,
+                    year1_by_region[region], year2_by_region[region],
+                    stock_days[region].get(row["asin"], {}) if row["asin"] else {}, covered_days[region],
+                    pb_count[region],
                 )
                 item[f"{region}_avg_monthly_sales"] = reco["avg_monthly"]
                 item[f"{region}_recommended_order"] = apply_category_min_order(row["sku"], reco["reco_recent"])
-                item[f"{region}_recommended_order_seasonal"] = apply_category_min_order(row["sku"], reco["reco_seasonal"])
-                item[f"{region}_seasonal_source"] = reco["seasonal_source"]
-                item[f"{region}_reco_debug"] = {
-                    "trailingTotal": reco["trailing_total"],
-                    "year1Total": reco["year1_total"],
-                    "year2Total": reco["year2_total"],
-                    "xDays": reco["x_days"],
-                    "needForXDays": reco["need_for_x_days"],
-                    "alreadyCovered": reco["already_covered"],
-                    "avgDailyRecent": reco["avg_daily_recent"],
-                    "avgDailySeasonal": reco["avg_daily_seasonal"],
-                    "zeroInventoryWeeks": reco["zero_inventory_weeks"],
+                item[f"{region}_recommended_order_seasonal_1yr"] = apply_category_min_order(row["sku"], reco["reco_seasonal_1yr"])
+                item[f"{region}_recommended_order_seasonal_2yr"] = apply_category_min_order(row["sku"], reco["reco_seasonal_2yr"])
+                item[f"{region}_seasonal_1yr_source"] = reco["seasonal_1yr_source"]
+                item[f"{region}_seasonal_2yr_source"] = reco["seasonal_2yr_source"]
+                item[f"{region}_reco_debug"] = reco["debug"]
+                # Per the user (2026-10-03): yearly units (this year to date,
+                # last year, 2 years ago) + ad ACOS for the region view.
+                item[f"{region}_yearly_sales"] = [
+                    sum(q for (y, _m), q in asin_sales.items() if y == yr) for yr in sales_years
+                ]
+                ads = ads_by_region[region].get(row["asin"]) if row["asin"] else None
+                item[f"{region}_ads"] = {
+                    "acosYtd": _acos(ads["ytdSpend"], ads["ytdSales"]),
+                    "spendYtd": round(ads["ytdSpend"], 2), "salesYtd": round(ads["ytdSales"], 2),
+                    "acos30d": _acos(ads["recentSpend"], ads["recentSales"]),
+                    "spend30d": round(ads["recentSpend"], 2), "sales30d": round(ads["recentSales"], 2),
+                    "unitsYtd": ads["ytdUnits"], "units30d": ads["recentUnits"],
+                } if ads else None
+                # TACOS = ad spend / ALL sales of the product this year (per the user 2026-10-23)
+                total_sales = total_sales_by_region[region].get(row["asin"], 0.0) if row["asin"] else 0.0
+                item[f"{region}_tacos"] = {
+                    "tacosYtd": _acos(ads["ytdSpend"] if ads else 0.0, total_sales),
+                    "spendYtd": round(ads["ytdSpend"], 2) if ads else 0.0,
+                    "totalSalesYtd": round(total_sales, 2),
                 }
 
             groups[row["group"]].append(item)
@@ -527,11 +594,17 @@ def GetNextOrderData(request):
             "status": "success",
             "groups": group_list,
             "nextShipmentDate": next_shipment_date_str,
+            "nextShipmentDates": shipment_dates,
+            "coverUntil": cover_until,
+            "coverMonths": pb_count,
+            "seasonalYear1MonthsByRegion": year1_by_region,
+            "seasonalYear2MonthsByRegion": year2_by_region,
             "salesLookbackMonths": SALES_LOOKBACK_MONTHS,
             "trailingMonths": trailing_months,
-            "trailingLookbackDays": lookback_days,
+            "trailingLookbackDays": days_in_months(trailing_months),
             "seasonalYear1Months": year1_months,
             "seasonalYear2Months": year2_months,
+            "salesYears": sales_years,
         })
 
     except Exception as exc:
