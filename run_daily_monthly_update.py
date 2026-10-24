@@ -33,6 +33,8 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import calendar
+
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -82,9 +84,14 @@ def build_month_date_range(year, month):
     return to_iso_utc(start), to_iso_utc(end)
 
 
+def report_api_base(marketplace):
+    """AU reports run on the local server (its app isn't on the GCP copies)."""
+    return LOCAL_API_BASE if marketplace == "au" else GCLOUD_API_BASE
+
+
 def request_report(marketplace, start_date, end_date):
     resp = requests.post(
-        f"{GCLOUD_API_BASE}/MlfReportReq",
+        f"{report_api_base(marketplace)}/MlfReportReq",
         json={"start_date": start_date, "end_date": end_date, "marketplace": marketplace},
         timeout=60,
     )
@@ -101,7 +108,7 @@ def poll_report_ready(marketplace, report_req_id):
     for attempt in range(1, POLL_MAX_ATTEMPTS + 1):
         try:
             resp = requests.post(
-                f"{GCLOUD_API_BASE}/MlfReportGet",
+                f"{report_api_base(marketplace)}/MlfReportGet",
                 json={"marketplace": marketplace, "report_req_id": report_req_id},
                 timeout=60,
             )
@@ -145,6 +152,201 @@ def run_update(report_ids, start_date, end_date, month, year):
     return data
 
 
+# country_sales/UpdateSkuSalesMonth marketplace code -> label + the local
+# currency its amounts are in (never converted per-country - see CLAUDE.md
+# "Per-marketplace currency"). "eu" is the combined, EUR-converted EU row.
+MARKETPLACE_LABELS = {
+    "usa": ("USA", "USD"), "ca": ("Canada", "CAD"), "mex": ("Mexico", "MXN"),
+    "uk": ("UK", "GBP"), "de": ("Germany", "EUR"), "fr": ("France", "EUR"),
+    "it": ("Italy", "EUR"), "es": ("Spain", "EUR"), "nl": ("NL", "EUR"),
+    "be": ("Belgium", "EUR"), "ie": ("Ireland", "EUR"), "se": ("SE", "SEK"),
+    "pl": ("PL", "PLN"), "jp": ("Japan", "JPY"), "au": ("Australia", "AUD"), "eu": ("EU total", "EUR"),
+}
+
+
+def format_sales_section(title, rows_by_marketplace, with_ppc=False):
+    """rows_by_marketplace: {code: {"QUANTITY", "AMOUNT", optional PPC_*}}.
+    Sorted by units, "eu" combined total always last."""
+    lines = [title]
+    real = {k: v for k, v in rows_by_marketplace.items() if v.get("QUANTITY") or v.get("AMOUNT")}
+    if not real:
+        lines.append("  (no sales recorded)")
+        return "\n".join(lines)
+    order = sorted((c for c in real if c != "eu"), key=lambda c: -real[c]["QUANTITY"])
+    if "eu" in real:
+        order.append("eu")
+    for code in order:
+        vals = real[code]
+        label, currency = MARKETPLACE_LABELS.get(code, (code.upper(), ""))
+        line = f"  {label}: {vals['QUANTITY']:,} units / {currency} {vals['AMOUNT']:,.2f} sales"
+        if with_ppc:
+            spend = float(vals.get("PPC_SPEND") or 0)
+            tacos = f"{spend / vals['AMOUNT'] * 100:.1f}%" if vals["AMOUNT"] else "n/a"
+            line += f" / ad spend {spend:,.2f} (TACoS {tacos})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def fetch_promotion_names():
+    try:
+        from GetPromotionSales import fetch_promotion_names as _f, pb_authenticate as _auth
+        return _f(_auth())
+    except Exception:
+        return {}
+
+
+def format_promo_section(title, rows, names):
+    """rows: [{marketplace, promotion_id, kind, units, sales, discount}] -
+    one line per (promotion, marketplace), most units first."""
+    lines = [title]
+    if not rows:
+        lines.append("  (none)")
+        return "\n".join(lines)
+    merged = {}
+    for r in rows:
+        k = (r["promotion_id"], r["marketplace"])
+        m = merged.setdefault(k, {"kind": r.get("kind"), "units": 0, "discount": 0.0})
+        m["units"] += int(r.get("units") or 0)
+        m["discount"] += float(r.get("discount") or 0)
+    for (pid, mp), m in sorted(merged.items(), key=lambda kv: -kv[1]["units"]):
+        label, currency = MARKETPLACE_LABELS.get(mp, (mp.upper(), ""))
+        name = (names.get(pid) or {}).get("name") or (f"Coupon {pid[:12]}" if m["kind"] == "coupon" else pid)
+        icon = "🎟" if m["kind"] == "coupon" else "🏷"
+        lines.append(f"  {icon} {name} ({label}): {m['units']} units, {currency} {m['discount']:,.2f} off")
+    return "\n".join(lines)
+
+
+def build_sales_digest_text(result, year, month, marketplaces_used):
+    """Same shape as the Ads Daily Digest (DailyAdsPerformanceDigest.py):
+    latest day + month-to-date, per marketplace. This job runs just after
+    LA midnight with the report covering the month through "now", so LA
+    calendar-yesterday is always complete in the report."""
+    yesterday = (datetime.now(LA_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+    daily = (result.get("dailyCountryTotals") or {}).get(yesterday, {})
+    month_rows = {r["MARKETPLACE"]: r for r in (result.get("updatedCountryRows") or [])}
+
+    is_closed_month = datetime.now(LA_TZ).day == 1
+    month_title = (
+        f"Month closed ({year}-{month:02d}, final):" if is_closed_month
+        else f"Month to date ({year}-{month:02d}-01 to {yesterday}):"
+    )
+    parts = [
+        f"🛒 Sales Daily Digest - {datetime.now(LA_TZ).strftime('%Y-%m-%d')}",
+        "",
+        format_sales_section(f"Yesterday ({yesterday}):", daily),
+        "",
+        format_sales_section(month_title, month_rows, with_ppc=True),
+        "",
+        f"(sales = item price excl. tax/shipping, local currency; reports: {marketplaces_used})",
+    ]
+    # Coupons & promotions used (added 2026-10-21, per the user).
+    names = fetch_promotion_names()
+    parts += [
+        "",
+        "Coupons & promotions",
+        format_promo_section(f"Yesterday ({yesterday}):", (result.get("dailyPromoTotals") or {}).get(yesterday, []), names),
+        format_promo_section("Month to date:" if not is_closed_month else "Month:", result.get("promoRows") or [], names),
+    ]
+    return "\n".join(parts)
+
+
+# Off until the user approves the preview (sent 2026-10-24).
+COMBINED_DIGEST = False
+
+# --- Combined Sales + Ads digest (2026-10-24, per the user: "merge those
+# updates to a single update, with a clear view table, include both acos and
+# tacos"). Replaces the separate 🛒 Sales and 📊 Ads daily digests.
+ADS_COUNTRY_TO_CODE = {"US": "usa", "CA": "ca", "MX": "mex", "UK": "uk", "GB": "uk", "DE": "de", "FR": "fr",
+                       "IT": "it", "ES": "es", "NL": "nl", "BE": "be", "IE": "ie", "SE": "se", "PL": "pl",
+                       "AU": "au", "JP": "jp"}
+SHORT_LABEL = {"usa": "US$", "ca": "CA$", "mex": "MX$", "uk": "UK£", "de": "DE€", "fr": "FR€", "it": "IT€",
+               "es": "ES€", "nl": "NL€", "be": "BE€", "ie": "IE€", "se": "SEK", "pl": "PLN", "au": "AU$", "jp": "JP¥"}
+
+
+def _ads_by_code(token, start, end):
+    from DailyAdsPerformanceDigest import fetch_country_totals
+    out = {}
+    for cc, v in fetch_country_totals(token, start, end).items():
+        code = ADS_COUNTRY_TO_CODE.get(cc, cc.lower())
+        b = out.setdefault(code, {"spend": 0.0, "sales": 0.0})
+        b["spend"] += v["spend"]
+        b["sales"] += v["sales"]
+    return out
+
+
+def _pct(a, b):
+    if not b:
+        return "∞" if a else "-"
+    return f"{100 * a / b:.0f}%"
+
+
+def _num(v):
+    return f"{v:,.0f}" if abs(v) < 10000 else f"{v / 1000:.1f}k" if abs(v) < 100000 else f"{v / 1000:.0f}k"
+
+
+def format_table(sales, ads, rates):
+    """sales: {code: {QUANTITY, AMOUNT}}, ads: {code: {spend, sales}} (local
+    currency). One monospace row per marketplace + a USD total row."""
+    codes = [c for c in set(sales) | set(ads) if c != "eu"
+             and ((sales.get(c) or {}).get("QUANTITY") or (sales.get(c) or {}).get("AMOUNT") or (ads.get(c) or {}).get("spend"))]
+    codes.sort(key=lambda c: -((sales.get(c) or {}).get("AMOUNT", 0) / (rates.get(MARKETPLACE_LABELS.get(c, ("", "USD"))[1]) or 1)))
+    head = f"{'':4}{'Units':>5}{'Sales':>7}{'AdSpd':>6}{'AdSal':>6}{'ACOS':>5}{'TACOS':>6}"
+    lines = [head]
+    tot = {"u": 0, "s": 0.0, "sp": 0.0, "as": 0.0}
+    for c in codes:
+        u = int((sales.get(c) or {}).get("QUANTITY") or 0)
+        s = float((sales.get(c) or {}).get("AMOUNT") or 0)
+        sp = float((ads.get(c) or {}).get("spend") or 0)
+        a = float((ads.get(c) or {}).get("sales") or 0)
+        cur = MARKETPLACE_LABELS.get(c, ("", "USD"))[1]
+        r = 1.0 if cur == "USD" else rates.get(cur)
+        if r:
+            tot["u"] += u; tot["s"] += s / r; tot["sp"] += sp / r; tot["as"] += a / r
+        lines.append(f"{SHORT_LABEL.get(c, c.upper()[:3]):4}{u:>5}{_num(s):>7}{_num(sp):>6}{_num(a):>6}{_pct(sp, a):>5}{_pct(sp, s):>6}")
+    lines.append("-" * len(head))
+    lines.append(f"{'ALL$':4}{tot['u']:>5}{_num(tot['s']):>7}{_num(tot['sp']):>6}{_num(tot['as']):>6}"
+                 f"{_pct(tot['sp'], tot['as']):>5}{_pct(tot['sp'], tot['s']):>6}")
+    return "\n".join(lines)
+
+
+def _esc(t):
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_combined_digest_text(result, year, month, marketplaces_used):
+    from GetMarketplaceSalesSummary import fetch_usd_rates
+    from AdsReporting import last_recorded_date, pb_authenticate
+    now_la = datetime.now(LA_TZ)
+    yesterday = (now_la - timedelta(days=1)).strftime("%Y-%m-%d")
+    is_closed_month = now_la.day == 1
+    month_start = f"{year}-{month:02d}-01"
+    daily_sales = (result.get("dailyCountryTotals") or {}).get(yesterday, {})
+    month_sales = {r["MARKETPLACE"]: r for r in (result.get("updatedCountryRows") or [])}
+    token = pb_authenticate()
+    last_ads = last_recorded_date(token) or yesterday
+    ads_day = _ads_by_code(token, yesterday, yesterday)
+    month_end = f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}" if is_closed_month else yesterday
+    ads_month = _ads_by_code(token, month_start, month_end)
+    currencies = {MARKETPLACE_LABELS.get(c, ("", "USD"))[1] for c in set(daily_sales) | set(month_sales) | set(ads_day) | set(ads_month)}
+    rates = fetch_usd_rates(currencies)
+
+    parts = [f"🛒📊 <b>Sales &amp; Ads - {now_la.strftime('%Y-%m-%d')}</b>", "",
+             f"<b>Yesterday ({yesterday})</b>",
+             f"<pre>{_esc(format_table(daily_sales, ads_day, rates))}</pre>"]
+    if last_ads < yesterday:
+        parts.append(f"⚠️ ads data only up to {last_ads}")
+    parts += [f"<b>{'Month closed' if is_closed_month else 'Month to date'} ({month_start} to {month_end})</b>",
+              f"<pre>{_esc(format_table(month_sales, ads_month, rates))}</pre>",
+              "<i>Local currency per row, ALL$ = everything in USD. AdSpd/AdSal = Ads spend / Ads sales (7-day). "
+              "ACOS = AdSpd/AdSal, TACOS = AdSpd/Sales (all sales, excl. tax/shipping).</i>"]
+    names = fetch_promotion_names()
+    promo = [format_promo_section(f"Yesterday:", (result.get("dailyPromoTotals") or {}).get(yesterday, []), names),
+             format_promo_section("Month to date:" if not is_closed_month else "Month:", result.get("promoRows") or [], names)]
+    parts += ["", "<b>Coupons &amp; promotions</b>", _esc("\n".join(promo))]
+    parts.append(f"<i>reports: {_esc(marketplaces_used)}</i>")
+    return "\n".join(parts)
+
+
 def in_target_window():
     """This system's cron only fires on its own local timezone (Asia/Jerusalem,
     confirmed via `man 5 crontab` - it has no per-job CRON_TZ support), but the
@@ -171,7 +373,7 @@ def main():
 
     report_ids = {}
     request_errors = []
-    for marketplace in ("usa", "de"):
+    for marketplace in ("usa", "de", "au"):
         try:
             report_ids[marketplace] = request_report(marketplace, start_date, end_date)
         except Exception as exc:
@@ -179,7 +381,7 @@ def main():
 
     if not report_ids:
         text = f"Monthly update for {year}-{month:02d} FAILED - both report requests failed: {'; '.join(request_errors)}"
-        notify(JOB_NAME, APP_NAME, text, is_error=True)
+        notify(JOB_NAME, APP_NAME, text, is_error=True, bot="amazon")
         return
 
     ready_report_ids = {}
@@ -193,25 +395,36 @@ def main():
 
     if not ready_report_ids:
         text = f"Monthly update for {year}-{month:02d} FAILED - no report became ready: {'; '.join(poll_errors)}"
-        notify(JOB_NAME, APP_NAME, text, is_error=True)
+        notify(JOB_NAME, APP_NAME, text, is_error=True, bot="amazon")
         return
 
     try:
         result = run_update(ready_report_ids, start_date, end_date, month, year)
     except Exception as exc:
         text = f"Monthly update for {year}-{month:02d} FAILED at the write step: {exc}"
-        notify(JOB_NAME, APP_NAME, text, is_error=True)
+        notify(JOB_NAME, APP_NAME, text, is_error=True, bot="amazon")
         return
 
     marketplaces_used = ", ".join(sorted(ready_report_ids.keys()))
     warning_note = f" - {result.get('asinWarning')}" if result.get("asinWarning") else ""
     skipped_note = f" (skipped: {'; '.join(poll_errors)})" if poll_errors else ""
-    text = (
-        f"Monthly update for {year}-{month:02d} done ({marketplaces_used}) - "
-        f"{result.get('parsedOrderRows')} order rows, {result.get('dbRowsCount')} SKU rows, "
-        f"{result.get('countryRowsCount')} country rows written{warning_note}{skipped_note}"
-    )
-    notify(JOB_NAME, APP_NAME, text, is_error=bool(poll_errors and len(ready_report_ids) < 2))
+    try:
+        if not COMBINED_DIGEST:
+            raise RuntimeError("combined digest not enabled yet")
+        text = build_combined_digest_text(result, year, month, marketplaces_used)
+        if warning_note or skipped_note:
+            text += f"\n\n⚠️{_esc(warning_note + skipped_note)}"
+        parse_mode = "HTML"
+    except Exception as exc:  # fall back to the plain sales digest
+        text = build_sales_digest_text(result, year, month, marketplaces_used)
+        if COMBINED_DIGEST:
+            text += f"\n\n(combined table failed: {exc})"
+        if warning_note or skipped_note:
+            text += f"\n\n⚠️{warning_note}{skipped_note}"
+        parse_mode = None
+    # @baba_social_bot since 2026-10-21 (per the user, with the daily Ads digest).
+    notify(JOB_NAME, APP_NAME, text, is_error=bool(poll_errors and len(ready_report_ids) < len(report_ids) + len(request_errors)), bot="amazon",
+           parse_mode=parse_mode)
 
 
 if __name__ == "__main__":

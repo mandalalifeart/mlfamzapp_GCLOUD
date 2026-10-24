@@ -11,12 +11,43 @@ POCKETBASE_ADMIN_PASSWORD = os.environ.get("POCKETBASE_ADMIN_PASSWORD", "")
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 
 # Fallback policy when a job has no scheduled_jobs config row yet -
 # matches the standing "Telegram gets everything, email is alerts/errors
 # only" preference this whole project already follows by default.
+# @baba_social_bot (per the user 2026-10-21: the daily sales digest and the
+# daily Ads digest go there, everything else stays on @baba_update_bot).
+SOCIAL_TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
+SOCIAL_TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+# @baba_amz_bot (2026-10-22, per the user): all Amazon sales updates (hourly
+# sales, daily sales digest, daily Ads digest). Falls back to the social bot
+# if the new bot can't deliver (e.g. the chat wasn't started yet).
+AMZ_TELEGRAM_BOT_TOKEN = os.environ.get("AMZ_TELEGRAM_BOT_TOKEN", "")
+AMZ_TELEGRAM_CHAT_ID = os.environ.get("AMZ_TELEGRAM_CHAT_ID", "")
+
+
+def send_amz_telegram(method, data=None, json_body=None, files=None, timeout=30):
+    """Send via @baba_amz_bot, falling back to @baba_social_bot on failure."""
+    pairs = [(AMZ_TELEGRAM_BOT_TOKEN, AMZ_TELEGRAM_CHAT_ID), (SOCIAL_TELEGRAM_BOT_TOKEN, SOCIAL_TELEGRAM_CHAT_ID)]
+    resp = None
+    for token, chat_id in pairs:
+        if not token or not chat_id:
+            continue
+        if files:
+            for f in files.values():
+                f[1].seek(0)
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/{method}",
+            data={**(data or {}), "chat_id": chat_id} if data is not None or files else None,
+            json={**json_body, "chat_id": chat_id} if json_body is not None else None,
+            files=files, timeout=timeout,
+        )
+        if resp.ok:
+            return resp
+    return resp
+
 DEFAULT_CONFIG = {"notify_telegram": True, "notify_email_on_error": True, "notify_email_always": False}
 
 
@@ -50,12 +81,24 @@ def get_job_config(job_name, token=None):
     }
 
 
-def _send_telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def _send_telegram(text, bot="update", parse_mode=None):
+    if bot == "amazon":
+        body = {"text": text[:4000]}
+        if parse_mode:
+            body["parse_mode"] = parse_mode
+        resp = send_amz_telegram("sendMessage", json_body=body, timeout=15)
+        if parse_mode and resp is not None and not resp.ok:  # bad markup -> send as plain text
+            send_amz_telegram("sendMessage", json_body={"text": text[:4000]}, timeout=15)
+        return
+    token, chat_id = (
+        (SOCIAL_TELEGRAM_BOT_TOKEN, SOCIAL_TELEGRAM_CHAT_ID) if bot == "social"
+        else (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+    )
+    if not token or not chat_id:
         return
     requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]},
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": text[:4000]},
         timeout=15,
     )
 
@@ -94,12 +137,15 @@ def _log_run(token, job_name, app, status, summary, notified_telegram, notified_
         pass  # logging the run must never break the caller's real work
 
 
-def notify(job_name, app, text, is_error=False, subject=None, status=None):
+def notify(job_name, app, text, is_error=False, subject=None, status=None, telegram=True, bot="update", parse_mode=None):
     """Send text through whichever channels this job is configured for
     (falling back to the standing telegram-always/email-on-error-only
     policy if the job has no scheduled_jobs row yet), and record one
     job_runs entry either way. Returns nothing - notification/logging
-    failures are swallowed so they never break the caller's real work."""
+    failures are swallowed so they never break the caller's real work.
+    telegram=False lets a caller skip Telegram for an uneventful run even
+    when the job has Telegram enabled (e.g. Etsy jobs only message when
+    something actually happened - per the user 2026-10-02)."""
     status = status or ("error" if is_error else "success")
     try:
         token = pb_authenticate()
@@ -111,9 +157,9 @@ def notify(job_name, app, text, is_error=False, subject=None, status=None):
     sent_telegram = False
     sent_email = False
 
-    if config["notify_telegram"]:
+    if config["notify_telegram"] and telegram:
         try:
-            _send_telegram(text)
+            _send_telegram(text, bot, parse_mode)
             sent_telegram = True
         except Exception:
             pass
