@@ -250,8 +250,8 @@ def build_sales_digest_text(result, year, month, marketplaces_used):
     return "\n".join(parts)
 
 
-# Off until the user approves the preview (sent 2026-10-24).
-COMBINED_DIGEST = False
+# Approved by the user 2026-10-24 (replaces the separate Sales + Ads digests).
+COMBINED_DIGEST = True
 
 # --- Combined Sales + Ads digest (2026-10-24, per the user: "merge those
 # updates to a single update, with a clear view table, include both acos and
