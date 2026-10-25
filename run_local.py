@@ -57,6 +57,49 @@ class FakeRequest:
         return None
 
 
+class _CapturedResponse:
+    ok = True
+    status_code = 200
+    text = '{"ok": true, "result": {"message_id": 0}}'
+
+    def json(self):
+        return {"ok": True, "result": {"message_id": 0}}
+
+    def raise_for_status(self):
+        return None
+
+
+def install_telegram_capture(name, function_name):
+    """Combined Monday digest (2026-10-25, per the user): with
+    TELEGRAM_CAPTURE=<name> set (e.g. on the Monday cron lines), every Telegram
+    sendMessage this job makes is written to logs/digest/<name>/<date>/
+    <function>.txt instead of being sent; MondayDigest.py sends them later as
+    one message + a file. Files (sendDocument etc.) still go out normally."""
+    import json as _json
+    from datetime import date as _date
+    import requests
+
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "digest", name, _date.today().isoformat())
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{function_name}.txt")
+    real_post = requests.post
+
+    def post(url, *a, **kw):
+        if "api.telegram.org" in str(url) and str(url).endswith("/sendMessage"):
+            body = kw.get("json") or kw.get("data") or {}
+            if isinstance(body, (str, bytes)):
+                try:
+                    body = _json.loads(body)
+                except ValueError:
+                    body = {"text": str(body)}
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write((body.get("text") or "") + "\n\n")
+            return _CapturedResponse()
+        return real_post(url, *a, **kw)
+
+    requests.post = post
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 run_local.py <FunctionName> [key=value ...]")
@@ -71,6 +114,11 @@ def main():
     key_env = FUNCTION_KEY_ENV.get(function_name, "ADMIN_KEY")
     args.setdefault("key", os.environ.get(key_env, ""))
 
+    # PocketBase is on this machine - skip the public tunnel URL from .env
+    # (same reasoning as local_server.py).
+    os.environ["POCKETBASE_URL"] = os.environ.get("LOCAL_POCKETBASE_URL", "http://127.0.0.1:8090")
+    if os.environ.get("TELEGRAM_CAPTURE"):
+        install_telegram_capture(os.environ["TELEGRAM_CAPTURE"], function_name)
     import main as functions_module
 
     handler = getattr(functions_module, function_name, None)

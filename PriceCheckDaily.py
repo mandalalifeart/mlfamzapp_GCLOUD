@@ -94,7 +94,8 @@ def fetch_prices(mp):
             status = ((it.get("summaries") or [{}])[0].get("status")) or []
             price = next((o["price"]["amount"] for o in it.get("offers") or [] if o.get("offerType") == "B2C"), None)
             if price is not None:
-                prices[sku] = {"price": float(price), "buyable": "BUYABLE" in status}
+                prices[sku] = {"price": float(price), "buyable": "BUYABLE" in status,
+                               "asin": (it.get("summaries") or [{}])[0].get("asin")}
         token = resp.next_token
         if not token:
             return prices
@@ -113,7 +114,35 @@ def fx_rate(base, cur):
         return FALLBACK_RATES[(base, cur)]
 
 
-def run_check(fees_override=None):
+MP_CURRENCY = {"DE": "EUR", "FR": "EUR", "IT": "EUR", "ES": "EUR", "NL": "EUR", "BE": "EUR", "IE": "EUR",
+               "PL": "PLN", "SE": "SEK", "AE": "AED", "SA": "SAR", "UK": "GBP", "US": "USD", "CA": "CAD", "MX": "MXN"}
+
+
+def record_price_history(pb_token, all_prices, day):
+    """price_history keeps one row per price change (marketplace, sku, price,
+    since) - used by the weekly coupon check for Amazon's 30-day lowest-price
+    rule. Only writes when a price differs from the latest stored one."""
+    from AsinAnalytics import pb_list_all
+    latest = {}
+    for r in pb_list_all(pb_token, "price_history", 'since != ""', fields="marketplace,sku,price,since"):
+        k = (r["marketplace"], r["sku"])
+        if k not in latest or r["since"] > latest[k]["since"]:
+            latest[k] = r
+    base = os.environ.get("POCKETBASE_URL", "http://127.0.0.1:8090")
+    new = 0
+    for mp, prices in all_prices.items():
+        for sku, p in prices.items():
+            old = latest.get((mp, sku))
+            if old and abs((old.get("price") or 0) - p["price"]) < 0.005:
+                continue
+            requests.post(f"{base}/api/collections/price_history/records", headers={"Authorization": pb_token},
+                          json={"marketplace": mp, "sku": sku, "asin": p.get("asin") or "", "price": p["price"],
+                                "currency": MP_CURRENCY.get(mp, ""), "since": day}, timeout=15).raise_for_status()
+            new += 1
+    return new
+
+
+def run_check(fees_override=None, pb_token=None):
     fees_override = fees_override or {}
     cache = {}
 
@@ -152,6 +181,9 @@ def run_check(fees_override=None):
                 low.append({"sku": sku, "price": t["price"], "min": round(minimum, 2), "source": s["price"],
                             "fee": fee, "short_pct": round(100 * (1 - t["price"] / minimum), 1)})
         result["min"][mp] = {"checked": checked, "currency": cur, "source": src_mp, "low": sorted(low, key=lambda x: -x["short_pct"])}
+    if pb_token:
+        prices("UK")
+        result["historyRows"] = record_price_history(pb_token, cache, date.today().isoformat())
     return result
 
 
@@ -190,7 +222,7 @@ def SendPriceCheckDaily(request):
         args = getattr(request, "args", {}) or {}
         pb = pb_authenticate()
         override = json.loads(get_job_state(pb, "price_check_fees") or "{}")
-        result = run_check(override)
+        result = run_check(override, pb_token=pb)
         text = build_text(result, date.today().isoformat())
         os.makedirs("logs", exist_ok=True)
         with open("logs/price_check_last.json", "w") as fh:

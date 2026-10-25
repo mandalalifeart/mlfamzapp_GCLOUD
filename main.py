@@ -645,3 +645,63 @@ def SendOffAmazonWeekly(request):
 def SendPriceCheckDaily(request):
     from PriceCheckDaily import SendPriceCheckDaily as _impl
     return _impl(request)
+
+
+def SendMondayDigest(request):
+    from MondayDigest import SendMondayDigest as _impl
+    return _impl(request)
+
+
+def SendAccountHealthWeekly(request):
+    from WeeklyChecks import SendAccountHealthWeekly as _impl
+    return _impl(request)
+
+
+def SendListingHealthWeekly(request):
+    from WeeklyChecks import SendListingHealthWeekly as _impl
+    return _impl(request)
+
+
+def SendCouponHealthWeekly(request):
+    from WeeklyChecks import SendCouponHealthWeekly as _impl
+    return _impl(request)
+
+
+def SendOrganicRankWeekly(request):
+    from WeeklyChecks import SendOrganicRankWeekly as _impl
+    return _impl(request)
+
+
+def SendSearchTermHarvest(request):
+    from WeeklyChecks import SendSearchTermHarvest as _impl
+    return _impl(request)
+
+
+def SendMonthlyProfit(request):
+    from MonthlyChecks import SendMonthlyProfit as _impl
+    return _impl(request)
+
+
+def SendReimbursementCheck(request):
+    from MonthlyChecks import SendReimbursementCheck as _impl
+    return _impl(request)
+
+
+def SendStorageCheck(request):
+    from MonthlyChecks import SendStorageCheck as _impl
+    return _impl(request)
+
+
+def SendAccountingCheck(request):
+    from MonthlyChecks import SendAccountingCheck as _impl
+    return _impl(request)
+
+
+def SendCompetitorPriceCheck(request):
+    from MonthlyChecks import SendCompetitorPriceCheck as _impl
+    return _impl(request)
+
+
+def SendContentGapCheck(request):
+    from MonthlyChecks import SendContentGapCheck as _impl
+    return _impl(request)
