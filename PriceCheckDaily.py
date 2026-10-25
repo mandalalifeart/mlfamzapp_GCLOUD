@@ -8,17 +8,19 @@ Listings (BIL) from the source marketplace (DE for Europe/Middle East, US for
 Canada/Mexico). This job only REPORTS - it never changes a price, since a
 direct price edit in a target marketplace breaks the BIL sync.
 
-Rules (per the user "price should be amazon price + fee adjustment" and "we
-do not sell pareo there for less than 25 euro + the fba fee"):
-  * EUR marketplaces (FR/IT/ES/NL/BE/IE): price must equal the DE price.
-  * PL/SE (Pan-EU stock, local FBA fees like DE): price >= DE price x FX.
-  * AE/SA: not checked - BIL's fee-adjusted price from DE is correct (per the
-    user 2026-10-25).
-  * CA/MX (remote fulfilment from US stock): price >= source price
-    x FX + that marketplace's per-unit remote fulfilment fee (from real
-    orders: AE 31 AED pareo / 30 cover, MX 173 / 260 MXN, CA 10.62 / 16.4
-    CAD; SA has no orders yet, assumed like AE).
-  A price more than TOLERANCE below its minimum is flagged.
+Rules (per the user 2026-10-25 "always check the price makes sense vs de
+price, in all mp, except uk and au"):
+  * FR/IT/ES/NL/BE: price must equal the DE price.
+  * IE/PL/SE/AE/SA (FORMULA_TARGETS): BIL converts every DE price with one
+    formula per marketplace (FX + its fee adjustment), e.g. AE ~ DE x 3.0 +
+    27.5 AED. The check fits price = a + b x DE (Theil-Sen, per marketplace and
+    pareo/home) on all checked listings and flags a SKU more than
+    FORMULA_TOLERANCE away from it; the formula itself is flagged when its
+    price at a reference DE price moved more than FORMULA_JUMP since the last
+    run (job_state "price_check_formula") - BIL broken for a whole marketplace.
+  * CA/MX (from US stock, prices don't follow a formula): price >= US price x
+    FX + the per-unit remote fulfilment fee (real orders: MX 173 / 264 MXN,
+    CA 10.62 / 16.38 CAD); flagged when more than TOLERANCE below.
 Only active listings with stock are checked (per the user 2026-10-25 "check
 only active listings with positive inventory in eu"): BUYABLE in the target
 marketplace, and FBA fulfillable + FC transfer > 0 for its ASIN in the source
@@ -36,24 +38,23 @@ from sp_api.api import ListingsItems
 from sp_api.base import Marketplaces
 
 from AsinAnalytics import pb_authenticate
-from JobState import get_job_state
+from JobState import get_job_state, set_job_state
 from NotificationRouting import notify
 
 JOB_NAME = "price-check-daily"
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
 TOLERANCE = 0.03
 
-EUR_TARGETS = ["FR", "IT", "ES", "NL", "BE", "IE"]
+EUR_TARGETS = ["FR", "IT", "ES", "NL", "BE"]
+FORMULA_TARGETS = {"IE": "EUR", "PL": "PLN", "SE": "SEK", "AE": "AED", "SA": "SAR"}
+FORMULA_TOLERANCE = 0.10
+FORMULA_JUMP = 0.05
+FORMULA_REF = {"pareo": 25.0, "home": 60.0}  # DE price used to compare formulas day to day
 # target -> (source, currency, remote fulfilment fee per category in target currency)
 MIN_TARGETS = {
-    "PL": ("DE", "PLN", {"pareo": 0, "home": 0}),
-    "SE": ("DE", "SEK", {"pareo": 0, "home": 0}),
     "CA": ("US", "CAD", {"pareo": 10.62, "home": 16.38}),
     "MX": ("US", "MXN", {"pareo": 173.34, "home": 264.19}),
 }
-# AE/SA: BIL sets them from DE with its own fee adjustment (about DE x 2.9 +
-# 31 AED) - per the user 2026-10-25 that is correct, so they are not checked.
-BIL_FEE_ADJUSTED = ["AE", "SA"]
 USD_PEGS = {"AED": 3.6725, "SAR": 3.75}
 FALLBACK_RATES = {("EUR", "PLN"): 4.25, ("EUR", "SEK"): 11.0, ("EUR", "USD"): 1.12,
                   ("USD", "CAD"): 1.38, ("USD", "MXN"): 18.5}
@@ -149,7 +150,17 @@ def record_price_history(pb_token, all_prices, day):
     return new
 
 
-def run_check(fees_override=None, pb_token=None):
+def fit_line(points):
+    """Theil-Sen fit y = a + b*x over [(x, y)]: robust to a few wrong prices."""
+    import itertools
+    import statistics
+    slopes = [(y2 - y1) / (x2 - x1) for (x1, y1), (x2, y2) in itertools.combinations(points, 2) if abs(x2 - x1) > 0.5]
+    b = statistics.median(slopes) if slopes else 1.0
+    a = statistics.median(y - b * x for x, y in points)
+    return a, b
+
+
+def run_check(fees_override=None, pb_token=None, prev_formula=None):
     fees_override = fees_override or {}
     cache = {}
 
@@ -165,7 +176,8 @@ def run_check(fees_override=None, pb_token=None):
         s = stock[src_mp].get(t.get("asin")) or {}
         return t.get("buyable") and (s.get("fulfillable", 0) + s.get("transfer", 0)) > 0
 
-    result = {"eur": {}, "min": {}, "rates": {}}
+    prev_formula = prev_formula or {}
+    result = {"eur": {}, "formula": {}, "min": {}, "rates": {}}
     de = prices("DE")
     for mp in EUR_TARGETS:
         tgt = {k: v for k, v in prices(mp).items() if active(v, "DE")}
@@ -175,6 +187,29 @@ def run_check(fees_override=None, pb_token=None):
             if s and abs(t["price"] - s["price"]) > 0.01:
                 bad.append({"sku": sku, "price": t["price"], "source": s["price"]})
         result["eur"][mp] = {"checked": sum(1 for k in tgt if k in de), "bad": sorted(bad, key=lambda b: b["price"] - b["source"])}
+    for mp, cur in FORMULA_TARGETS.items():
+        tgt = {k: v for k, v in prices(mp).items() if active(v, "DE")}
+        r = {"currency": cur, "checked": 0, "cats": {}, "bad": []}
+        for cat in ("pareo", "home"):
+            rows = [(sku, de[sku]["price"], t["price"]) for sku, t in tgt.items() if sku in de and category(sku) == cat]
+            r["checked"] += len(rows)
+            if len(rows) < 5:
+                continue
+            a, b = fit_line([(x, y) for _, x, y in rows])
+            ref = a + b * FORMULA_REF[cat]
+            old = (prev_formula.get(mp) or {}).get(cat)
+            jump = None
+            if old:
+                old_ref = old["a"] + old["b"] * FORMULA_REF[cat]
+                jump = round(100 * (ref / old_ref - 1), 1) if old_ref else None
+            r["cats"][cat] = {"a": round(a, 3), "b": round(b, 4), "n": len(rows), "jump_pct": jump}
+            for sku, x, y in rows:
+                exp = a + b * x
+                if exp > 0 and abs(y / exp - 1) > FORMULA_TOLERANCE:
+                    r["bad"].append({"sku": sku, "price": y, "source": x, "expected": round(exp, 2),
+                                     "diff_pct": round(100 * (y / exp - 1), 1)})
+        r["bad"].sort(key=lambda x: -abs(x["diff_pct"]))
+        result["formula"][mp] = r
     for mp, (src_mp, cur, fees) in MIN_TARGETS.items():
         fees = {**fees, **(fees_override.get(mp) or {})}
         src = prices(src_mp)
@@ -214,7 +249,25 @@ def build_text(result, day, max_lines=8):
             lines.append(f"   {b['sku']}: €{b['price']:.2f} (DE €{b['source']:.2f})")
         if len(r["bad"]) > max_lines:
             lines.append(f"   … +{len(r['bad']) - max_lines} more")
-    lines.append("\nOther currencies, minimum = source price × FX + remote fulfilment fee:")
+    lines.append(f"\nIE/PL/SE/AE/SA = BIL formula from DE (flag > {FORMULA_TOLERANCE:.0%} off):")
+    for mp, r in result.get("formula", {}).items():
+        cur = r["currency"]
+        forms = []
+        for cat, f in r["cats"].items():
+            sign = "+" if f["a"] >= 0 else "−"
+            forms.append(f"{cat} DE×{f['b']:.3g}" + (f" {sign} {abs(f['a']):.1f}" if abs(f["a"]) >= 0.5 else ""))
+            if f["jump_pct"] is not None and abs(f["jump_pct"]) > FORMULA_JUMP * 100:
+                lines.append(f"🔴 {mp} {cat}: formula moved {f['jump_pct']:+.0f}% since last check - BIL change for the whole marketplace?")
+        head = f"{mp}: {r['checked']} SKUs ({'; '.join(forms)} {cur})"
+        if not r["bad"]:
+            lines.append(f"✅ {head}")
+            continue
+        lines.append(f"⚠️ {head}, {len(r['bad'])} off")
+        for x in r["bad"][:max_lines]:
+            lines.append(f"   {x['sku']}: {x['price']:.2f} vs ~{x['expected']:.2f} {cur} (DE €{x['source']:.2f}, {x['diff_pct']:+.0f}%)")
+        if len(r["bad"]) > max_lines:
+            lines.append(f"   … +{len(r['bad']) - max_lines} more")
+    lines.append("\nCA/MX, minimum = US price × FX + remote fulfilment fee:")
     for mp, r in result["min"].items():
         cur = r["currency"]
         src_cur = "€" if r["source"] == "DE" else "$"
@@ -229,7 +282,6 @@ def build_text(result, day, max_lines=8):
                          f"({r['source']} {src_cur}{x['source']:.2f}{fee}, −{x['short_pct']:.0f}%)")
         if len(r["low"]) > max_lines:
             lines.append(f"   … +{len(r['low']) - max_lines} more")
-    lines.append(f"ℹ️ {'/'.join(BIL_FEE_ADJUSTED)}: not checked - BIL sets them from DE with its fee adjustment")
     return "\n".join(lines)
 
 
@@ -238,7 +290,11 @@ def SendPriceCheckDaily(request):
         args = getattr(request, "args", {}) or {}
         pb = pb_authenticate()
         override = json.loads(get_job_state(pb, "price_check_fees") or "{}")
-        result = run_check(override, pb_token=pb)
+        prev = json.loads(get_job_state(pb, "price_check_formula") or "{}")
+        result = run_check(override, pb_token=pb, prev_formula=prev)
+        if args.get("dry") != "1":
+            set_job_state(pb, "price_check_formula", json.dumps(
+                {mp: r["cats"] for mp, r in result["formula"].items()}))
         text = build_text(result, date.today().isoformat())
         os.makedirs("logs", exist_ok=True)
         with open("logs/price_check_last.json", "w") as fh:
