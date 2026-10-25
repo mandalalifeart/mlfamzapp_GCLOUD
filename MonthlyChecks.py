@@ -302,8 +302,13 @@ def SendStorageCheck(request):
 
 
 # --------------------------------------------------------------- accounting
-# Known filing rhythms (per the user / VAT page); others still to confirm.
+# Filing rhythms per the user (2026-10-25): DE, FR, EE monthly; NL, UK
+# quarterly; IT, ES, PL, CZ, IE are filed by Taxually - not tracked here.
+# DE UStVA is due the 10th (later if a Dauerfristverlaengerung is set), FR
+# CA3 for non-established companies around the 19th.
 VAT_CALENDAR = [
+    ("DE UStVA (Germany, monthly)", "monthly", 10),
+    ("FR CA3 (France, monthly)", "monthly", 19),
     ("EE KMD (Estonia, monthly)", "monthly", 20),
     ("OSS return (via Estonia, quarterly)", "quarterly_end", None),
     ("NL VAT (quarterly)", "quarterly_end", None),
@@ -361,7 +366,7 @@ def accounting_text(pb, today=None):
     due = vat_due_this_month(today)
     if due:
         out.append("📅 VAT returns this month:\n   " + "\n   ".join(due))
-    out.append("   (DE/FR/IT/ES/PL/CZ/IE filing dates aren't set up yet - tell me their rhythm and I'll add them)")
+    out.append("   (IT, ES, PL, CZ, IE are filed by Taxually)")
     sup = json.loads(main.GetWiseSupplierBalances(FakeRequest({}))[0]).get("suppliers") or []
     lines = []
     for s in sup:
@@ -545,11 +550,11 @@ def _aplus(ap, marketplace_id, asin):
     return None
 
 
-def content_gap_text(pb):
+def content_gap_text(pb, marketplaces=("US", "UK", "DE", "FR", "IT", "ES")):
     stats = {r["sku"]: r for r in pb_list_all(pb, "sku_statistics", 'sku != ""')}
     videos = video_asins()
     out = ["🖼 Content gaps – products with stock but missing A+ / video / images (<6)"]
-    for mp in ("US", "UK", "DE", "FR", "IT", "ES"):
+    for mp in marketplaces:
         lst = listings(mp, "summaries")
         cred, _ = creds(mp)
         m = getattr(Marketplaces, mp)
@@ -588,7 +593,8 @@ def content_gap_text(pb):
 def SendContentGapCheck(request):
     args = getattr(request, "args", {}) or {}
     try:
-        return _send("content-gap-check", content_gap_text(pb_authenticate()), args)
+        mps = tuple(args["mp"].split(",")) if args.get("mp") else ("US", "UK", "DE", "FR", "IT", "ES")
+        return _send("content-gap-check", content_gap_text(pb_authenticate(), mps), args)
     except Exception as exc:
         notify("content-gap-check", "amzbot", f"🚨 Content gap check failed: {exc}", is_error=True)
         return _json({"error": str(exc)}, 500)
