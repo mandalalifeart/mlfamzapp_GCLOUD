@@ -8,6 +8,11 @@ def UpdateSkuSalesMonth(request):
     return _impl(request)
 
 
+def GetSkuSalesByDateRange(request):
+    from GetSalesDepartmentReport import GetSkuSalesByDateRange as _impl
+    return _impl(request)
+
+
 def GetSalesDepartmentReport(request):
     from GetSalesDepartmentReport import GetSalesDepartmentReport as _impl
     return _impl(request)
@@ -55,6 +60,11 @@ def SetEndOfLife(request):
 
 def GetProductDetail(request):
     from GetProductDetail import GetProductDetail as _impl
+    return _impl(request)
+
+
+def GetDaysOfSupplyBySku(request):
+    from GetDaysOfSupplyBySku import GetDaysOfSupplyBySku as _impl
     return _impl(request)
 
 
@@ -313,6 +323,16 @@ def GetReturnStatsByMonth(request):
     return _impl(request)
 
 
+def GetPromotionSales(request):
+    from GetPromotionSales import GetPromotionSales as _impl
+    return _impl(request)
+
+
+def GetPromotionNames(request):
+    from GetPromotionSales import GetPromotionNames as _impl
+    return _impl(request)
+
+
 def GetReturnStatsByAsin(request):
     from AmazonReturns import GetReturnStatsByAsin as _impl
     return _impl(request)
@@ -325,6 +345,81 @@ def UpdateWiseFinances(request):
 
 def GetWiseFinancesSummary(request):
     from WiseFinances import GetWiseFinancesSummary as _impl
+    return _impl(request)
+
+
+def GetWiseLedger(request):
+    from WiseLedger import GetWiseLedger as _impl
+    return _impl(request)
+
+
+def ImportWiseStatement(request):
+    from WiseLedger import ImportWiseStatement as _impl
+    return _impl(request)
+
+
+def SetWiseClassificationRule(request):
+    from WiseLedger import SetWiseClassificationRule as _impl
+    return _impl(request)
+
+
+def UploadWiseInvoice(request):
+    from WiseLedger import UploadWiseInvoice as _impl
+    return _impl(request)
+
+
+def DeleteWiseDocument(request):
+    from WiseLedger import DeleteWiseDocument as _impl
+    return _impl(request)
+
+
+def GetWiseDocument(request):
+    from WiseLedger import GetWiseDocument as _impl
+    return _impl(request)
+
+
+def AutoMatchWiseInvoice(request):
+    from WiseLedger import AutoMatchWiseInvoice as _impl
+    return _impl(request)
+
+
+def GetWiseSupplierBalances(request):
+    from WiseLedger import GetWiseSupplierBalances as _impl
+    return _impl(request)
+
+
+def SetWiseSupplierOpening(request):
+    from WiseLedger import SetWiseSupplierOpening as _impl
+    return _impl(request)
+
+
+def SetWiseDocumentCoverage(request):
+    from WiseLedger import SetWiseDocumentCoverage as _impl
+    return _impl(request)
+
+
+def VatReportSummary(request):
+    from VatReport import VatReportSummary as _impl
+    return _impl(request)
+
+
+def UploadVatReport(request):
+    from VatReport import UploadVatReport as _impl
+    return _impl(request)
+
+
+def EeKmdXml(request):
+    from VatReport import EeKmdXml as _impl
+    return _impl(request)
+
+
+def OssReturnCsv(request):
+    from VatReport import OssReturnCsv as _impl
+    return _impl(request)
+
+
+def EeKmdInvoicesXlsx(request):
+    from VatReport import EeKmdInvoicesXlsx as _impl
     return _impl(request)
 
 try:
@@ -444,4 +539,109 @@ def SendRecentSalesDigest(request):
 
 def GetCountryPpcDaily(request):
     from UpdateCountryPpcDaily import GetCountryPpcDaily as _impl
+    return _impl(request)
+
+
+def UpdateAsinAnalytics(request):
+    from AsinAnalytics import UpdateAsinAnalytics as _impl
+    return _impl(request)
+
+
+def GetAsinAnalyticsList(request):
+    from AsinAnalytics import GetAsinAnalyticsList as _impl
+    return _impl(request)
+
+
+def GetAsinAnalytics(request):
+    from AsinAnalytics import GetAsinAnalytics as _impl
+    return _impl(request)
+
+
+def RunAdsStockGuard(request):
+    from AdsStockGuard import RunAdsStockGuard as _impl
+    return _impl(request)
+
+
+def SendCampaignWatchDigest(request):
+    from CampaignWatchDigest import SendCampaignWatchDigest as _impl
+    return _impl(request)
+
+
+def SendWeeklyBidChangeSummary(request):
+    from WeeklyBidChangeSummary import SendWeeklyBidChangeSummary as _impl
+    return _impl(request)
+
+
+def UpdateStockDays(request):
+    from StockDays import UpdateStockDays as _impl
+    return _impl(request)
+
+
+def SendArcherWeekly(request):
+    from ArcherAffiliates import SendArcherWeekly as _impl
+    return _impl(request)
+
+
+def GetArcherDashboard(request):
+    from ArcherAffiliates import GetArcherDashboard as _impl
+    return _impl(request)
+
+
+def SetVatManualEntry(request):
+    from VatReport import SetVatManualEntry as _impl
+    return _impl(request)
+
+
+def SetWiseNoDocument(request):
+    from WiseLedger import SetWiseNoDocument as _impl
+    return _impl(request)
+
+
+def SendInventoryWarning(request):
+    from InventoryWarning import SendInventoryWarning as _impl
+    return _impl(request)
+
+
+def AddNextOrderToMalaniOrder(request):
+    from UpdateNextOrderField import AddNextOrderToMalaniOrder as _impl
+    return _impl(request)
+
+
+def GetPublicProductCard(request):
+    from PublicProductCard import GetPublicProductCard as _impl
+    return _impl(request)
+
+
+def SendWeeklyChangesReview(request):
+    from WeeklyChangesReview import SendWeeklyChangesReview as _impl
+    return _impl(request)
+
+
+def SendFbaShipmentsWeekly(request):
+    from FbaShipmentsWeekly import SendFbaShipmentsWeekly as _impl
+    return _impl(request)
+
+
+def UpdateFbaShipments(request):
+    from FbaShipmentsWeekly import UpdateFbaShipments as _impl
+    return _impl(request)
+
+
+def GetFbaShipments(request):
+    from FbaShipmentsWeekly import GetFbaShipments as _impl
+    return _impl(request)
+
+
+def GetAdsReviews(request):
+    from AdsReviews import GetAdsReviews as _impl
+    return _impl(request)
+
+
+def SendOffAmazonWeekly(request):
+    from OffAmazonWeekly import SendOffAmazonWeekly as _impl
+    return _impl(request)
+
+
+def SendPriceCheckDaily(request):
+    from PriceCheckDaily import SendPriceCheckDaily as _impl
     return _impl(request)

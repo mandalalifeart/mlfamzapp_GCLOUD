@@ -1,0 +1,203 @@
+"""Daily cross-marketplace price check (2026-10-25, per the user: "a daily
+check in all non eur usd marketplaces that prices are correct, same prices
+across all eur marketplaces, pln, sek, aed, sar, mex, ca prices are not too
+small").
+
+Prices in the target marketplaces are set by Amazon's Build International
+Listings (BIL) from the source marketplace (DE for Europe/Middle East, US for
+Canada/Mexico). This job only REPORTS - it never changes a price, since a
+direct price edit in a target marketplace breaks the BIL sync.
+
+Rules (per the user "price should be amazon price + fee adjustment" and "we
+do not sell pareo there for less than 25 euro + the fba fee"):
+  * EUR marketplaces (FR/IT/ES/NL/BE/IE): price must equal the DE price.
+  * PL/SE (Pan-EU stock, local FBA fees like DE): price >= DE price x FX.
+  * AE/SA/CA/MX (remote fulfilment from DE/US stock): price >= source price
+    x FX + that marketplace's per-unit remote fulfilment fee (from real
+    orders: AE 31 AED pareo / 30 cover, MX 173 / 260 MXN, CA 10.62 / 16.4
+    CAD; SA has no orders yet, assumed like AE).
+  A price more than TOLERANCE below its minimum is flagged.
+Fees can be overridden via job_state key "price_check_fees"
+({"AE": {"pareo": 31, "home": 30}, ...}).
+"""
+import json
+import os
+import time
+from datetime import date
+
+import requests
+from sp_api.api import ListingsItems
+from sp_api.base import Marketplaces
+
+from AsinAnalytics import pb_authenticate
+from JobState import get_job_state
+from NotificationRouting import notify
+
+JOB_NAME = "price-check-daily"
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app")
+TOLERANCE = 0.03
+
+EUR_TARGETS = ["FR", "IT", "ES", "NL", "BE", "IE"]
+# target -> (source, currency, remote fulfilment fee per category in target currency)
+MIN_TARGETS = {
+    "PL": ("DE", "PLN", {"pareo": 0, "home": 0}),
+    "SE": ("DE", "SEK", {"pareo": 0, "home": 0}),
+    "AE": ("DE", "AED", {"pareo": 31.05, "home": 29.63}),
+    "SA": ("DE", "SAR", {"pareo": 31.05, "home": 29.63}),
+    "CA": ("US", "CAD", {"pareo": 10.62, "home": 16.38}),
+    "MX": ("US", "MXN", {"pareo": 173.34, "home": 264.19}),
+}
+USD_PEGS = {"AED": 3.6725, "SAR": 3.75}
+FALLBACK_RATES = {("EUR", "PLN"): 4.25, ("EUR", "SEK"): 11.0, ("EUR", "USD"): 1.12,
+                  ("USD", "CAD"): 1.38, ("USD", "MXN"): 18.5}
+
+
+def _json(body, status=200):
+    return json.dumps(body), status, {"Access-Control-Allow-Origin": ALLOWED_ORIGIN, "Content-Type": "application/json"}
+
+
+def _creds(region):
+    if region == "EU":
+        return dict(refresh_token=os.environ["REFRESH_TOKEN_EU"], lwa_app_id=os.environ["CLIENT_ID_EU"],
+                    lwa_client_secret=os.environ["CLIENT_SECRET_EU"]), os.environ["AMAZON_SELLER_ID_EU"]
+    return dict(refresh_token=os.environ["REFRESH_TOKEN_USA"], lwa_app_id=os.environ["CLIENT_ID_USA"],
+                lwa_client_secret=os.environ["CLIENT_SECRET_USA"]), os.environ["AMAZON_SELLER_ID"]
+
+
+def category(sku):
+    s = sku.upper()
+    return "pareo" if ("PAREO" in s or "SARONG" in s) else "home"
+
+
+def fetch_prices(mp):
+    """{sku: price} for every B2C offer we have in marketplace `mp`."""
+    m = getattr(Marketplaces, mp)
+    cred, seller = _creds("US" if mp in ("US", "CA", "MX") else "EU")
+    li = ListingsItems(credentials=cred, marketplace=m, version="2021-08-01")
+    prices, token = {}, None
+    while True:
+        kw = dict(marketplaceIds=m.marketplace_id, includedData="summaries,offers", pageSize=20)
+        if token:
+            kw["pageToken"] = token
+        for attempt in range(4):
+            try:
+                resp = li.search_listings_items(seller, **kw)
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                time.sleep(3 * (attempt + 1))
+        for it in resp.payload.get("items", []):
+            sku = it["sku"]
+            if sku.startswith("amzn.gr."):
+                continue
+            status = ((it.get("summaries") or [{}])[0].get("status")) or []
+            price = next((o["price"]["amount"] for o in it.get("offers") or [] if o.get("offerType") == "B2C"), None)
+            if price is not None:
+                prices[sku] = {"price": float(price), "buyable": "BUYABLE" in status}
+        token = resp.next_token
+        if not token:
+            return prices
+        time.sleep(0.25)
+
+
+def fx_rate(base, cur):
+    """Units of `cur` per 1 `base`; AED/SAR via their USD peg."""
+    if cur in USD_PEGS:
+        return (1.0 if base == "USD" else fx_rate(base, "USD")) * USD_PEGS[cur]
+    try:
+        r = requests.get(f"https://api.frankfurter.dev/v1/latest?from={base}&to={cur}", timeout=15)
+        r.raise_for_status()
+        return float(r.json()["rates"][cur])
+    except Exception:
+        return FALLBACK_RATES[(base, cur)]
+
+
+def run_check(fees_override=None):
+    fees_override = fees_override or {}
+    cache = {}
+
+    def prices(mp):
+        if mp not in cache:
+            cache[mp] = fetch_prices(mp)
+        return cache[mp]
+
+    result = {"eur": {}, "min": {}, "rates": {}}
+    de = prices("DE")
+    for mp in EUR_TARGETS:
+        tgt = prices(mp)
+        bad = []
+        for sku, t in tgt.items():
+            s = de.get(sku)
+            if s and abs(t["price"] - s["price"]) > 0.01:
+                bad.append({"sku": sku, "price": t["price"], "source": s["price"]})
+        result["eur"][mp] = {"checked": sum(1 for k in tgt if k in de), "bad": sorted(bad, key=lambda b: b["price"] - b["source"])}
+    for mp, (src_mp, cur, fees) in MIN_TARGETS.items():
+        fees = {**fees, **(fees_override.get(mp) or {})}
+        src = prices(src_mp)
+        tgt = prices(mp)
+        base = "EUR" if src_mp == "DE" else "USD"
+        rate = fx_rate(base, cur)
+        result["rates"][mp] = rate
+        low = []
+        checked = 0
+        for sku, t in tgt.items():
+            s = src.get(sku)
+            if not s:
+                continue
+            checked += 1
+            fee = fees[category(sku)]
+            minimum = s["price"] * rate + fee
+            if t["price"] < minimum * (1 - TOLERANCE):
+                low.append({"sku": sku, "price": t["price"], "min": round(minimum, 2), "source": s["price"],
+                            "fee": fee, "short_pct": round(100 * (1 - t["price"] / minimum), 1)})
+        result["min"][mp] = {"checked": checked, "currency": cur, "source": src_mp, "low": sorted(low, key=lambda x: -x["short_pct"])}
+    return result
+
+
+def build_text(result, day, max_lines=8):
+    lines = [f"💲 Daily price check {day}", "(report only - prices come from BIL; fix them in BIL, not by hand)"]
+    lines.append("\nEUR marketplaces = DE price:")
+    for mp, r in result["eur"].items():
+        if not r["bad"]:
+            lines.append(f"✅ {mp}: {r['checked']} SKUs, all equal to DE")
+            continue
+        lines.append(f"⚠️ {mp}: {len(r['bad'])} of {r['checked']} differ from DE")
+        for b in r["bad"][:max_lines]:
+            lines.append(f"   {b['sku']}: €{b['price']:.2f} (DE €{b['source']:.2f})")
+        if len(r["bad"]) > max_lines:
+            lines.append(f"   … +{len(r['bad']) - max_lines} more")
+    lines.append("\nOther currencies, minimum = source price × FX + remote fulfilment fee:")
+    for mp, r in result["min"].items():
+        cur = r["currency"]
+        src_cur = "€" if r["source"] == "DE" else "$"
+        rate = result["rates"][mp]
+        if not r["low"]:
+            lines.append(f"✅ {mp}: {r['checked']} SKUs OK (1{src_cur} = {rate:.2f} {cur})")
+            continue
+        lines.append(f"🔴 {mp}: {len(r['low'])} of {r['checked']} too low (1{src_cur} = {rate:.2f} {cur})")
+        for x in r["low"][:max_lines]:
+            fee = f" + fee {x['fee']:.0f}" if x["fee"] else ""
+            lines.append(f"   {x['sku']}: {x['price']:.2f} < min {x['min']:.2f} {cur} "
+                         f"({r['source']} {src_cur}{x['source']:.2f}{fee}, −{x['short_pct']:.0f}%)")
+        if len(r["low"]) > max_lines:
+            lines.append(f"   … +{len(r['low']) - max_lines} more")
+    return "\n".join(lines)
+
+
+def SendPriceCheckDaily(request):
+    try:
+        args = getattr(request, "args", {}) or {}
+        pb = pb_authenticate()
+        override = json.loads(get_job_state(pb, "price_check_fees") or "{}")
+        result = run_check(override)
+        text = build_text(result, date.today().isoformat())
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/price_check_last.json", "w") as fh:
+            json.dump(result, fh, indent=1)
+        if args.get("dry") != "1":
+            notify(JOB_NAME, "amzbot", text[:4000])
+        return _json({"text": text, "result": result})
+    except Exception as exc:
+        notify(JOB_NAME, "amzbot", f"🚨 Daily price check failed: {exc}", is_error=True)
+        return _json({"error": str(exc), "type": exc.__class__.__name__}, 500)
