@@ -12,7 +12,9 @@ Rules (per the user "price should be amazon price + fee adjustment" and "we
 do not sell pareo there for less than 25 euro + the fba fee"):
   * EUR marketplaces (FR/IT/ES/NL/BE/IE): price must equal the DE price.
   * PL/SE (Pan-EU stock, local FBA fees like DE): price >= DE price x FX.
-  * AE/SA/CA/MX (remote fulfilment from DE/US stock): price >= source price
+  * AE/SA: not checked - BIL's fee-adjusted price from DE is correct (per the
+    user 2026-10-25).
+  * CA/MX (remote fulfilment from US stock): price >= source price
     x FX + that marketplace's per-unit remote fulfilment fee (from real
     orders: AE 31 AED pareo / 30 cover, MX 173 / 260 MXN, CA 10.62 / 16.4
     CAD; SA has no orders yet, assumed like AE).
@@ -46,11 +48,12 @@ EUR_TARGETS = ["FR", "IT", "ES", "NL", "BE", "IE"]
 MIN_TARGETS = {
     "PL": ("DE", "PLN", {"pareo": 0, "home": 0}),
     "SE": ("DE", "SEK", {"pareo": 0, "home": 0}),
-    "AE": ("DE", "AED", {"pareo": 31.05, "home": 29.63}),
-    "SA": ("DE", "SAR", {"pareo": 31.05, "home": 29.63}),
     "CA": ("US", "CAD", {"pareo": 10.62, "home": 16.38}),
     "MX": ("US", "MXN", {"pareo": 173.34, "home": 264.19}),
 }
+# AE/SA: BIL sets them from DE with its own fee adjustment (about DE x 2.9 +
+# 31 AED) - per the user 2026-10-25 that is correct, so they are not checked.
+BIL_FEE_ADJUSTED = ["AE", "SA"]
 USD_PEGS = {"AED": 3.6725, "SAR": 3.75}
 FALLBACK_RATES = {("EUR", "PLN"): 4.25, ("EUR", "SEK"): 11.0, ("EUR", "USD"): 1.12,
                   ("USD", "CAD"): 1.38, ("USD", "MXN"): 18.5}
@@ -226,6 +229,7 @@ def build_text(result, day, max_lines=8):
                          f"({r['source']} {src_cur}{x['source']:.2f}{fee}, −{x['short_pct']:.0f}%)")
         if len(r["low"]) > max_lines:
             lines.append(f"   … +{len(r['low']) - max_lines} more")
+    lines.append(f"ℹ️ {'/'.join(BIL_FEE_ADJUSTED)}: not checked - BIL sets them from DE with its fee adjustment")
     return "\n".join(lines)
 
 
