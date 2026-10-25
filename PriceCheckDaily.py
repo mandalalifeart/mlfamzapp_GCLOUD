@@ -17,6 +17,10 @@ do not sell pareo there for less than 25 euro + the fba fee"):
     orders: AE 31 AED pareo / 30 cover, MX 173 / 260 MXN, CA 10.62 / 16.4
     CAD; SA has no orders yet, assumed like AE).
   A price more than TOLERANCE below its minimum is flagged.
+Only active listings with stock are checked (per the user 2026-10-25 "check
+only active listings with positive inventory in eu"): BUYABLE in the target
+marketplace, and FBA fulfillable + FC transfer > 0 for its ASIN in the source
+region's pool (Pan-EU via DE for Europe/Middle East, US for CA/MX).
 Fees can be overridden via job_state key "price_check_fees"
 ({"AE": {"pareo": 31, "home": 30}, ...}).
 """
@@ -151,10 +155,17 @@ def run_check(fees_override=None, pb_token=None):
             cache[mp] = fetch_prices(mp)
         return cache[mp]
 
+    from InventoryWarning import fetch_fba_by_asin
+    stock = {"DE": fetch_fba_by_asin("de"), "US": fetch_fba_by_asin("usa")}
+
+    def active(t, src_mp):
+        s = stock[src_mp].get(t.get("asin")) or {}
+        return t.get("buyable") and (s.get("fulfillable", 0) + s.get("transfer", 0)) > 0
+
     result = {"eur": {}, "min": {}, "rates": {}}
     de = prices("DE")
     for mp in EUR_TARGETS:
-        tgt = prices(mp)
+        tgt = {k: v for k, v in prices(mp).items() if active(v, "DE")}
         bad = []
         for sku, t in tgt.items():
             s = de.get(sku)
@@ -164,7 +175,7 @@ def run_check(fees_override=None, pb_token=None):
     for mp, (src_mp, cur, fees) in MIN_TARGETS.items():
         fees = {**fees, **(fees_override.get(mp) or {})}
         src = prices(src_mp)
-        tgt = prices(mp)
+        tgt = {k: v for k, v in prices(mp).items() if active(v, src_mp)}
         base = "EUR" if src_mp == "DE" else "USD"
         rate = fx_rate(base, cur)
         result["rates"][mp] = rate
@@ -188,7 +199,8 @@ def run_check(fees_override=None, pb_token=None):
 
 
 def build_text(result, day, max_lines=8):
-    lines = [f"💲 Daily price check {day}", "(report only - prices come from BIL; fix them in BIL, not by hand)"]
+    lines = [f"💲 Daily price check {day}", "(report only - prices come from BIL; fix them in BIL, not by hand)",
+             "(active listings with FBA stock only)"]
     lines.append("\nEUR marketplaces = DE price:")
     for mp, r in result["eur"].items():
         if not r["bad"]:
