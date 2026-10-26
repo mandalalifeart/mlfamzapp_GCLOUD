@@ -257,6 +257,12 @@ def upsert_ledger_rows(token, rows, existing_by_key):
                 continue
             if field == "amount" and row["source"] != "statement" and existing.get("fee_checked") and not row.get("fee_checked"):
                 continue
+            # A statement line that doesn't carry the converted amount (PDF and
+            # older xlsx statements) must not wipe the one the API recorded
+            # (e.g. EUR sent -> USD the supplier received).
+            if field in ("exchange_currency", "exchange_amount") and not row.get("exchange_amount") \
+                    and (existing.get("exchange_amount") or 0) > 0:
+                continue
             if not _same(existing.get(field), new):
                 patch[field] = new
         if patch:
