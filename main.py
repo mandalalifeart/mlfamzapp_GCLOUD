@@ -705,3 +705,18 @@ def SendCompetitorPriceCheck(request):
 def SendContentGapCheck(request):
     from MonthlyChecks import SendContentGapCheck as _impl
     return _impl(request)
+
+
+def GetImportShipments(request):
+    from ImportShipments import GetImportShipments as _impl
+    return _impl(request)
+
+
+def UploadShipmentDocument(request):
+    from ImportShipments import UploadShipmentDocument as _impl
+    return _impl(request)
+
+
+def SetImportShipmentRole(request):
+    from ImportShipments import SetImportShipmentRole as _impl
+    return _impl(request)

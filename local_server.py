@@ -15,6 +15,13 @@ import threading
 
 from flask import Flask, request
 
+# PocketBase runs on this same machine - talk to it directly instead of via
+# the public Cloudflare tunnel URL in .env (POCKETBASE_URL is that public URL
+# because the GCP-hosted copies need it). Measured 2026-10-02: 20k
+# ads_keyword_stats rows took 16.9s through the tunnel vs ~3s locally, which
+# made /ads-keywords' 5 parallel period loads time out.
+os.environ["POCKETBASE_URL"] = os.environ.get("LOCAL_POCKETBASE_URL", "http://127.0.0.1:8090")
+
 import main as functions_module
 
 PORT = int(os.environ.get("LOCAL_SERVER_PORT", "8092"))
@@ -64,13 +71,21 @@ class RequestSnapshot:
 # PocketBase dependency, negligible GCP cost, and shouldn't depend on this
 # mini PC's uptime) - see CLAUDE.md "AmzBot: local job runner".
 ROUTED_FUNCTIONS = [
+    # Also served locally since 2026-10-19 for Amazon.com.au only (the GCP
+    # copies don't have the AU app); usa/de keep using GCP.
+    "MlfReportReq",
+    "MlfReportGet",
     "AssignSkuGroup",
     "SetEndOfLife",
     "GetMarketplaceSalesSummary",
     "GetNextOrderData",
     "GetProductDetail",
+    "GetDaysOfSupplyBySku",
     "GetSalesDepartmentReport",
+    "GetSkuSalesByDateRange",
     "UpdateNextOrderField",
+    "AddNextOrderToMalaniOrder",
+    "GetPublicProductCard",
     "UpdateNextShipmentDate",
     "UpdateSkuSalesMonth",
     "GetUkInventory",
@@ -139,10 +154,41 @@ ROUTED_FUNCTIONS = [
     "GetPaymentsExpensesSummary",
     "UpdateWiseFinances",
     "GetWiseFinancesSummary",
+    "GetWiseLedger",
+    "ImportWiseStatement",
+    "SetWiseClassificationRule",
+    "UploadWiseInvoice",
+    "DeleteWiseDocument",
+    "GetWiseDocument",
+    "AutoMatchWiseInvoice",
+    "GetWiseSupplierBalances",
+    "SetWiseSupplierOpening",
+    "SetWiseDocumentCoverage",
+    "SetWiseNoDocument",
+    "VatReportSummary",
+    "UploadVatReport",
+    "EeKmdXml",
+    "OssReturnCsv",
+    "EeKmdInvoicesXlsx",
+    "SetVatManualEntry",
     "UpdateAmazonReturns",
     "GetReturnStats",
     "GetReturnStatsByMonth",
     "GetReturnStatsByAsin",
+    "GetPromotionSales",
+    "GetPromotionNames",
+    "UpdateAsinAnalytics",
+    "GetArcherDashboard",
+    "GetAsinAnalyticsList",
+    "GetAsinAnalytics",
+    "UpdateFbaShipments",
+    "GetFbaShipments",
+    "GetImportShipments",
+    "UploadShipmentDocument",
+    "SetImportShipmentRole",
+    "GetAdsReviews",
+    "SendWeeklyChangesReview",
+    "SendWeeklyBidChangeSummary",
 ]
 
 app = Flask(__name__)
