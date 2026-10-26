@@ -155,7 +155,7 @@ def GetImportShipments(request):
             out.append({
                 "id": r["id"], "code": r.get("code"), "supplier": r.get("supplier"), "destination": r.get("destination"),
                 "mode": r.get("mode"), "route": r.get("route"), "routeLabel": ROUTES.get(r.get("route"), r.get("route")),
-                "shipDate": r.get("ship_date"), "status": r.get("status"), "packages": r.get("packages"),
+                "shipDate": r.get("ship_date"), "status": r.get("status"), "remark": r.get("remark") or "", "packages": r.get("packages"),
                 "weightKg": r.get("weight_kg"), "cbm": r.get("cbm"), "units": units,
                 "supplierInvoices": r.get("supplier_invoices") or [], "forwarderFile": r.get("forwarder_file") or "",
                 "bl": r.get("bl") or "", "amazonRefs": r.get("amazon_refs") or [], "docs": entries,
@@ -223,7 +223,8 @@ def UploadShipmentDocument(request):
 def SetImportShipmentRole(request):
     """POST {shipmentId, role, notNeeded: bool} (+ key) - marks a required
     document as not needed for this shipment (or needed again). Also
-    {shipmentId, unlinkDocId} removes a document link (the file stays on /wise)."""
+    {shipmentId, unlinkDocId} removes a document link (the file stays on /wise),
+    {shipmentId, remark} sets the row's remark."""
     if request.method == "OPTIONS":
         return "", 204, cors_headers()
     body = request.get_json(silent=True) or {}
@@ -233,6 +234,8 @@ def SetImportShipmentRole(request):
         token = pb_authenticate()
         ship = _get_shipment(token, body.get("shipmentId"))
         patch = {}
+        if "remark" in body:  # free-text remark shown in the shipment's row (per the user)
+            patch["remark"] = str(body.get("remark") or "")[:500]
         if body.get("unlinkDocId"):
             patch["docs"] = [d for d in ship.get("docs") or [] if d["doc_id"] != body["unlinkDocId"]]
         if body.get("role"):
