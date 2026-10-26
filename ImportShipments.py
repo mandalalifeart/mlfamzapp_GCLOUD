@@ -38,14 +38,16 @@ ROLES = {
 }
 ROUTES = {
     "unicargo": "Unicargo (sea)",
-    "amazon_agl": "Amazon Global Logistics (Xhipment)",
+    "amazon_agl": "Amazon Global Logistics (Xhipment), billed by Amazon",
     "supplier_courier": "Supplier courier, DDP",
     "supplier_air_cif": "Supplier air freight (CIF)",
     "unknown": "Route unknown",
 }
 REQUIRED_ROLES = {
     "unicargo": ["supplier_invoice", "bill_of_lading", "freight_invoice", "customs_invoice", "customs_declaration"],
-    "amazon_agl": ["supplier_invoice", "freight_invoice", "customs_invoice", "customs_declaration"],
+    # Xhipment sends no invoices to us (per the user 2026-10-26) - the bill is the
+    # Amazon settlement charge; only the customs release paper (7501) is tracked.
+    "amazon_agl": ["supplier_invoice", "customs_declaration"],
     "supplier_courier": ["supplier_invoice", "duty_recharge"],
     "supplier_air_cif": ["supplier_invoice", "bill_of_lading", "customs_invoice", "customs_declaration"],
     "unknown": ["supplier_invoice", "freight_invoice", "customs_invoice", "customs_declaration"],
