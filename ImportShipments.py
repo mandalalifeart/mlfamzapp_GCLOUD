@@ -146,7 +146,7 @@ def GetImportShipments(request):
                 cost["importVat"] += e.get("vatUsd") or 0
             for c in r.get("amazon_charges") or []:
                 if c.get("counted"):
-                    cost["duty" if "Duty" in c.get("category", "") else "freight"] += abs(c.get("amount") or 0)
+                    cost["duty" if "duty" in c.get("category", "").lower() else "freight"] += abs(c.get("amount") or 0)
             units = r.get("units") or 0
             out.append({
                 "id": r["id"], "code": r.get("code"), "supplier": r.get("supplier"), "destination": r.get("destination"),
