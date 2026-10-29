@@ -24,7 +24,7 @@ from WiseLedger import (DOCUMENTS_COLLECTION, MAX_DOCUMENT_BYTES, SHEET_EXTENSIO
                         spreadsheet_to_text, store_document)
 
 COLLECTION = "import_shipments"
-AI_MODEL = os.environ.get("SHIPMENT_AI_MODEL", "claude-opus-5-5")
+AI_MODEL = os.environ.get("SHIPMENT_AI_MODEL", "claude-sonnet-5-5")
 
 ROLES = {
     "supplier_invoice": "Supplier invoice",
@@ -94,7 +94,7 @@ def extract_shipment_doc(filename, data):
     else:
         return None
     response = anthropic.Anthropic().beta.messages.create(
-        model=AI_MODEL, max_tokens=4000, thinking={"type": "adaptive"},
+        model=AI_MODEL, max_tokens=4000,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SHIPMENT_DOC_SCHEMA}},
         messages=[{"role": "user", "content": [block, {"type": "text", "text": (
             f"File: {filename}\nA document of an import shipment of textiles from India for Mandala Life ART OÜ "

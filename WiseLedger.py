@@ -1553,7 +1553,7 @@ INVOICE_SCHEMA = {
 
 # Per the user (2026-10-01): cheaper model for invoice/statement reading after
 # the shared Anthropic credit ran out (~2.5x cheaper than Opus 5).
-WISE_AI_MODEL = os.environ.get("WISE_AI_MODEL", "claude-sonnet-5")
+WISE_AI_MODEL = os.environ.get("WISE_AI_MODEL", "claude-sonnet-5-5")
 
 _MEDIA_TYPES = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                 ".webp": "image/webp", ".gif": "image/gif"}
