@@ -284,7 +284,7 @@ def money_str(s):
     """'<positive>+ 1,810.28 EUR</positive>' -> (1810.28, 'EUR', True)"""
     text = _HTML_TAG_RE.sub("", s or "").strip()
     positive = text.startswith("+") or "<positive>" in (s or "")
-    m = re.search(r"(-?[\d,]+(?:\.\d+)?)\s*([A-Z]{3})", text)
+    m = re.search(r"(-?\d[\d,]*(?:\.\d+)?)\s*([A-Z]{3})", text)
     if not m:
         return None, None, positive
     return float(m.group(1).replace(",", "")), m.group(2), positive
