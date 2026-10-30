@@ -51,10 +51,29 @@ MAX_POLL_ATTEMPTS = 14  # ~140s, safely under the function's timeout
 REGIONS = {
     "uk": {"marketplace": Marketplaces.UK, "fba_field": "uk_balance_fba", "balance_field": "uk_balance"},
     "de": {"marketplace": Marketplaces.DE, "fba_field": "de_balance_fba", "balance_field": "de_balance"},
+    # Amazon.com.au (added 2026-10-19): separate Far East app. au_balance =
+    # FBA fulfillable, au_on_the_way = FBA inbound (working + shipped +
+    # receiving) - no AWD/LG there, and no manual OTW import for AU.
+    "au": {"marketplace": Marketplaces.AU, "fba_field": "au_balance", "balance_field": "au_balance"},
+    # Amazon.co.jp (added 2026-10-30): the USA app authorized in Seller
+    # Central JP (Far East token REFRESH_TOKEN_JP). Same live-API path as AU.
+    "jp": {"marketplace": Marketplaces.JP, "fba_field": "jp_balance", "balance_field": "jp_balance"},
 }
 
 
-def credentials():
+def credentials(region=None):
+    if region == "jp":
+        return {
+            "refresh_token": os.environ["REFRESH_TOKEN_JP"],
+            "lwa_app_id": os.environ["CLIENT_ID_USA"],
+            "lwa_client_secret": os.environ["CLIENT_SECRET_USA"],
+        }
+    if region == "au":
+        return {
+            "refresh_token": os.environ["REFRESH_TOKEN_AU"],
+            "lwa_app_id": os.environ["CLIENT_ID_AU"],
+            "lwa_client_secret": os.environ["CLIENT_SECRET_AU"],
+        }
     return {
         "refresh_token": REFRESH_TOKEN_EU,
         "lwa_app_id": CLIENT_ID_EU,
@@ -67,8 +86,8 @@ def parse_tsv(text):
     return list(reader)
 
 
-def fetch_fba_rows(marketplace):
-    reports_api = Reports(credentials=credentials(), marketplace=marketplace)
+def fetch_fba_rows(marketplace, region=None):
+    reports_api = Reports(credentials=credentials(region), marketplace=marketplace)
 
     create_resp = reports_api.create_report(
         reportType=FBA_REPORT_TYPE,
@@ -103,11 +122,44 @@ def fetch_fba_rows(marketplace):
     return parse_tsv(text)
 
 
+def fetch_au_rows(region="au"):
+    """AU stock from the live FBA Inventory API instead of the MYI report:
+    the report comes back FATAL when requested again within ~30 min, the API
+    doesn't. Returned in the report's column names so the code below is shared."""
+    from sp_api.api import Inventories
+    marketplace = REGIONS[region]["marketplace"]
+    api = Inventories(credentials=credentials(region), marketplace=marketplace)
+    rows, token = [], None
+    while True:
+        kw = {"details": True, "marketplaceIds": [marketplace.marketplace_id]}
+        if token:
+            kw["nextToken"] = token
+        for attempt in range(6):
+            try:
+                resp = api.get_inventory_summary_marketplace(**kw)
+                break
+            except Exception as exc:  # QuotaExceeded: back off and retry
+                if "Quota" not in str(exc) and "Throttl" not in str(exc) or attempt == 5:
+                    raise
+                time.sleep(5 * (attempt + 1))
+        for x in (resp.payload or {}).get("inventorySummaries", []):
+            d = x.get("inventoryDetails") or {}
+            rows.append({"sku": x.get("sellerSku") or "", "asin": x.get("asin") or "",
+                         "afn-fulfillable-quantity": d.get("fulfillableQuantity") or 0,
+                         "afn-inbound-working-quantity": d.get("inboundWorkingQuantity") or 0,
+                         "afn-inbound-shipped-quantity": d.get("inboundShippedQuantity") or 0,
+                         "afn-inbound-receiving-quantity": d.get("inboundReceivingQuantity") or 0})
+        token = resp.next_token
+        if not token:
+            return rows
+        time.sleep(0.6)
+
+
 def sync_eu_inventory(region):
     if region not in REGIONS:
         raise ValueError(f"region must be one of {sorted(REGIONS)}")
     cfg = REGIONS[region]
-    fba_rows = fetch_fba_rows(cfg["marketplace"])
+    fba_rows = fetch_au_rows(region) if region in ("au", "jp") else fetch_fba_rows(cfg["marketplace"], region)
 
     token = pb_authenticate()
     sku_to_asin, asin_to_first_sku = load_mapping(token)
@@ -115,6 +167,7 @@ def sync_eu_inventory(region):
     stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
 
     fba_by_asin = {}
+    inbound_by_asin = {}
     unmapped = []
     for row in fba_rows:
         sku = (row.get("sku") or "").strip()
@@ -122,11 +175,22 @@ def sync_eu_inventory(region):
             continue
         asin = (row.get("asin") or "").strip() or sku_to_asin.get(sku)
         qty = int(float(row.get("afn-fulfillable-quantity") or 0))
+        inbound = sum(int(float(row.get(c) or 0)) for c in (
+            "afn-inbound-working-quantity", "afn-inbound-shipped-quantity", "afn-inbound-receiving-quantity"))
         if not asin:
             if qty:
                 unmapped.append(sku)
             continue
-        fba_by_asin[asin] = fba_by_asin.get(asin, 0) + qty
+        if region in ("au", "jp"):
+            # AU has several seller SKUs on one ASIN (e.g. Pareo5Blue + Pareo5Blue502)
+            # and Amazon reports the same units on each of them - summing doubled
+            # the inbound (checked 2026-10-19 against shipment FBA15GK3TGQD), so
+            # take the max per ASIN there.
+            fba_by_asin[asin] = max(fba_by_asin.get(asin, 0), qty)
+            inbound_by_asin[asin] = max(inbound_by_asin.get(asin, 0), inbound)
+        else:
+            fba_by_asin[asin] = fba_by_asin.get(asin, 0) + qty
+            inbound_by_asin[asin] = inbound_by_asin.get(asin, 0) + inbound
 
     written = []
     for asin, fba_qty in fba_by_asin.items():
@@ -135,13 +199,17 @@ def sync_eu_inventory(region):
             continue
 
         body = {cfg["fba_field"]: fba_qty}
-        if region == "de":
-            # Never overwrite the manually-maintained LG number - just fold
-            # whatever is already stored into the new combined total.
+        # Per the user (2026-10-03): DE balance = FBA + AWD + LG, UK balance =
+        # FBA + AWD. AWD/LG are never written here - whatever is stored is
+        # folded into the new combined total.
+        existing_awd = (record or {}).get(f"{region}_balance_awd") or 0
+        if region in ("au", "jp"):
+            body[f"{region}_on_the_way"] = inbound_by_asin.get(asin, 0)
+        elif region == "de":
             existing_lg = (record or {}).get("de_balance_lg") or 0
-            body["de_balance"] = fba_qty + existing_lg
+            body["de_balance"] = fba_qty + existing_awd + existing_lg
         else:
-            body[cfg["balance_field"]] = fba_qty
+            body[cfg["balance_field"]] = fba_qty + existing_awd
 
         if record:
             resp = requests.patch(
