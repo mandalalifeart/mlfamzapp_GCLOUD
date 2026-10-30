@@ -12,7 +12,7 @@ ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://mlfamzappfire.web.app
 
 # Only the columns the NextOrder page lets a user edit - everything else in
 # sku_statistics is written by the import pipelines, not from the browser.
-EDITABLE_FIELDS = {"uk_next_shipment", "de_next_shipment", "usa_next_shipment", "next_order"}
+EDITABLE_FIELDS = {"uk_next_shipment", "de_next_shipment", "usa_next_shipment", "au_next_shipment", "jp_next_shipment", "next_order"}
 
 
 def cors_headers():
@@ -152,5 +152,45 @@ def UpdateNextOrderField(request):
 
         return json_response({"status": "success", "record": response.json()})
 
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def AddNextOrderToMalaniOrder(request):
+    """Per the user (2026-10-06): one button on /next-order that moves every
+    item's Next Order into its Malani Order (malani_order += next_order,
+    next_order = 0 - so pressing it twice can't double-order). Body
+    {skus: [...]} = the items shown on the page; records are resolved by
+    sku / shared ASIN like UpdateNextOrderField."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if request.method != "POST":
+        return json_response({"error": "Method not allowed"}, 405)
+    try:
+        skus = [s.strip() for s in ((request.get_json(silent=True) or {}).get("skus") or []) if s and s.strip()]
+        token = pb_authenticate()
+        sku_to_asin = load_sku_to_asin(token)
+        records = fetch_all_stats(token)
+        by_sku = {r.get("sku"): r for r in records if r.get("sku")}
+        by_asin = {}
+        for r in records:
+            asin = sku_to_asin.get(r.get("sku") or "")
+            if asin:
+                by_asin.setdefault(asin, r)
+        changed, seen = [], set()
+        for sku in skus:
+            rec = by_sku.get(sku) or by_asin.get(sku_to_asin.get(sku, ""))
+            if not rec or rec["id"] in seen or not (rec.get("next_order") or 0) > 0:
+                continue
+            seen.add(rec["id"])
+            new_order = (rec.get("malani_order") or 0) + rec["next_order"]
+            resp = requests.patch(f"{POCKETBASE_URL}/api/collections/{POCKETBASE_STATS_COLLECTION}/records/{rec['id']}",
+                                  headers={"Authorization": token}, json={"malani_order": new_order, "next_order": 0},
+                                  timeout=30)
+            if resp.status_code != 200:
+                raise RuntimeError(f"PocketBase write failed for {sku}: HTTP {resp.status_code} - {resp.text}")
+            changed.append({"sku": sku, "added": rec["next_order"], "malani_order": new_order})
+        return json_response({"status": "success", "changed": changed,
+                              "totalAdded": sum(c["added"] for c in changed)})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

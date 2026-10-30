@@ -22,12 +22,13 @@ STATS_FIELDS = [
     "de_balance", "de_on_the_way", "de_next_shipment",
     "usa_balance", "usa_on_the_way", "usa_next_shipment",
     "au_balance", "au_on_the_way", "au_next_shipment",
+    "jp_balance", "jp_on_the_way", "jp_next_shipment",
     "malani_balance", "malani_order", "next_order",
 ]
 
 # AU (2026-10-20) has FBA only - au_balance is written directly by
 # UpdateEuInventory, there are no au_balance_<part> fields.
-BALANCE_PARTS = {"usa": ("fba", "awd"), "uk": ("fba", "awd"), "de": ("fba", "awd", "lg"), "au": ("fba",)}
+BALANCE_PARTS = {"usa": ("fba", "awd"), "uk": ("fba", "awd"), "de": ("fba", "awd", "lg"), "au": ("fba",), "jp": ("fba",)}
 
 # USA Recommendation to Order - see compute_usa_recommendation for the full
 # formula. Canada/Mexico sales are folded into "usa" everywhere sales are
@@ -84,6 +85,9 @@ REGION_RECO_CONFIGS = {
     "de": {"balance": "de_balance", "otw": "de_on_the_way", "next": "de_next_shipment", "sales_marketplaces": ("de",)},
     # Added 2026-10-20 per the user; the page hides AU while AU has no sellable stock.
     "au": {"balance": "au_balance", "otw": "au_on_the_way", "next": "au_next_shipment", "sales_marketplaces": ("au",)},
+    # Added 2026-10-30 per the user; collapsed by default on the page. JP
+    # stock is entered by hand (no JP SP-API connection yet).
+    "jp": {"balance": "jp_balance", "otw": "jp_on_the_way", "next": "jp_next_shipment", "sales_marketplaces": ("jp",)},
 }
 
 
@@ -394,11 +398,11 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
 # Ads countries per Next Order region - same scope as each region's sales
 # marketplaces in REGION_RECO_CONFIGS (USA folds in CA/MX; DE and UK are
 # single marketplaces). Added 2026-10-03 per the user (ACOS per product).
-REGION_ADS_COUNTRIES = {"usa": ("US", "CA", "MX"), "de": ("DE",), "uk": ("UK", "GB"), "au": ("AU",)}
+REGION_ADS_COUNTRIES = {"usa": ("US", "CA", "MX"), "de": ("DE",), "uk": ("UK", "GB"), "au": ("AU",), "jp": ("JP",)}
 # Only used to put CA/MX spend+sales on the USD scale before taking the
 # spend/sales ratio - ACOS itself is unit-free, so an approximate rate only
 # shifts the weighting of these tiny marketplaces, never a single-currency ACOS.
-APPROX_TO_USD = {"USD": 1.0, "CAD": 0.73, "MXN": 0.055, "EUR": 1.0, "GBP": 1.0, "AUD": 1.0}
+APPROX_TO_USD = {"USD": 1.0, "CAD": 0.73, "MXN": 0.055, "EUR": 1.0, "GBP": 1.0, "AUD": 1.0, "JPY": 1.0}
 
 
 def fetch_ads_acos_by_region_asin(token, year, recent_since):
@@ -449,7 +453,7 @@ def fetch_ads_acos_by_region_asin(token, year, recent_since):
     return out
 
 
-REGION_TRAFFIC_MARKETPLACES = {"usa": ("us", "ca", "mx"), "de": ("de",), "uk": ("uk",), "au": ("au",)}
+REGION_TRAFFIC_MARKETPLACES = {"usa": ("us", "ca", "mx"), "de": ("de",), "uk": ("uk",), "au": ("au",), "jp": ("jp",)}
 
 
 def fetch_total_sales_by_region_asin(token, year):
