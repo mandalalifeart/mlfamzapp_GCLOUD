@@ -374,6 +374,22 @@ def RunProductResearch(request):
         return _json({"error": str(exc)}, 500)
 
 
+def idea_score(r):
+    """Ranking score 0-100 (formula proposed to the user 2026-10-31): demand 35
+    (on-theme competitors outselling our best pouf, 20+ = full), strong sellers
+    20 (on-theme under #100k, 10+ = full), price 25 (share of priced results at
+    $20+), our proof 20 (our ad orders on these searches in 90 days, 20+ = full)."""
+    if not r:
+        return None
+    parts = {
+        "demand": min(r.get("onThemeBetterThanOurBest") or 0, 20) / 20 * 35,
+        "strong": min(r.get("onThemeUnder100k") or 0, 10) / 10 * 20,
+        "price": (r.get("pricedAtLeast20") or 0) / (r.get("priced") or 1) * 25 if r.get("priced") else 0,
+        "ours": min((r.get("ourSearches") or {}).get("orders") or 0, 20) / 20 * 20,
+    }
+    return {"score": round(sum(parts.values())), **{k: round(v, 1) for k, v in parts.items()}}
+
+
 def GetProductResearch(request):
     try:
         token = pb_authenticate()
@@ -381,9 +397,13 @@ def GetProductResearch(request):
         status = _load(token, "product_research_status")
         ideas = []
         for idea in IDEAS:
-            ideas.append({**idea, "research": (data.get("results") or {}).get(idea["id"]),
+            research = (data.get("results") or {}).get(idea["id"])
+            ideas.append({**idea, "research": research, "score": idea_score(research),
                           "status": (status.get(idea["id"]) or {}).get("status", "idea"),
                           "userNotes": (status.get(idea["id"]) or {}).get("notes", "")})
+        ideas.sort(key=lambda i: -((i["score"] or {}).get("score") or -1))
+        for n, i in enumerate(ideas, 1):
+            i["rank"] = n
         return _json({"ranAt": data.get("ranAt"), "benchmark": data.get("benchmark"), "ideas": ideas,
                       "statuses": STATUSES})
     except Exception as exc:
