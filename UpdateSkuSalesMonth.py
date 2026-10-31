@@ -27,7 +27,7 @@ EU_MARKETPLACE_CURRENCY = {
 # fix (see CLAUDE.md) started surfacing real data for these countries too.
 ADS_COUNTRY_TO_MARKETPLACE = {
     "US": "usa", "UK": "uk", "DE": "de", "FR": "fr", "IT": "it", "ES": "es",
-    "CA": "ca", "MX": "mex", "JP": "jp",
+    "CA": "ca", "MX": "mex", "JP": "jp", "AU": "au",
     "NL": "nl", "SE": "se", "PL": "pl", "BE": "be", "IE": "ie",
 }
 
@@ -59,6 +59,7 @@ def get_fx_rate_to_eur(currency, month, year):
     return rate
 
 API_BASE = os.environ.get("API_BASE", "https://us-central1-mlfamzapp.cloudfunctions.net")
+LOCAL_REPORT_API_BASE = os.environ.get("LOCAL_REPORT_API_BASE", "http://127.0.0.1:8092")
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
 POCKETBASE_ADMIN_PASSWORD = os.environ["POCKETBASE_ADMIN_PASSWORD"]
@@ -144,8 +145,10 @@ def fetch_report_payload(marketplace, report_req_id, timeout_sec=180):
     if not report_req_id:
         raise ValueError(f"Missing report request ID for marketplace={marketplace}")
 
+    # AU reports exist only on the local server (added 2026-10-19).
+    base = LOCAL_REPORT_API_BASE if marketplace == "au" else API_BASE
     response = requests.post(
-        f"{API_BASE}/MlfReportGet",
+        f"{base}/MlfReportGet",
         json={"marketplace": marketplace, "report_req_id": report_req_id},
         timeout=timeout_sec,
     )
@@ -172,6 +175,28 @@ def fetch_report_payload(marketplace, report_req_id, timeout_sec=180):
     return payload
 
 
+def parse_item_promotions(order_item):
+    """Coupons/promotions applied to one order item (added 2026-10-21 for the
+    Coupons & Promotions views): [(promotion_id, item_discount)]. Amazon puts
+    the ids comma-joined in one <PromotionIDs> with one combined discount when
+    several apply - the discount is split evenly between them (rare). Coupons
+    show up as "PLM-<uuid>" ids, seller promotions by their internal
+    description (e.g. "Percentage Off 2025/11/29"). Shipping-only promotions
+    (no item discount) are skipped."""
+    out = []
+    for promo in order_item.findall("Promotion"):
+        ids = [i.strip() for i in safe_strip(promo.findtext("PromotionIDs")).split(",") if i.strip()]
+        try:
+            discount = abs(float(safe_strip(promo.findtext("ItemPromotionDiscount")) or 0))
+        except ValueError:
+            discount = 0.0
+        if not ids or discount <= 0:
+            continue
+        for pid in ids:
+            out.append((pid, discount / len(ids)))
+    return out
+
+
 def parse_orders_from_xml(xml_payload):
     try:
         root = ET.fromstring(xml_payload)
@@ -183,6 +208,18 @@ def parse_orders_from_xml(xml_payload):
         sales_channel = safe_strip(order.findtext("SalesChannel"))
         if should_ignore_sales_channel(sales_channel):
             continue
+
+        # LA-local calendar date of the order, for the per-day breakdown in
+        # build_daily_country_totals (month boundaries are LA-time everywhere
+        # in this app, so day boundaries follow the same convention).
+        is_business = safe_strip(order.findtext("IsBusinessOrder")).lower() == "true"
+        purchase_date = ""
+        purchase_raw = safe_strip(order.findtext("PurchaseDate"))
+        if purchase_raw:
+            try:
+                purchase_date = parse_input_datetime(purchase_raw).strftime("%Y-%m-%d")
+            except ValueError:
+                purchase_date = ""
 
         for order_item in order.findall(".//OrderItem"):
             sku = safe_strip(order_item.findtext("SKU"))
@@ -221,6 +258,10 @@ def parse_orders_from_xml(xml_payload):
                 "qty": qty,
                 "amount": amount,
                 "sales_channel": sales_channel.lower(),
+                "purchase_date": purchase_date,
+                "order_id": safe_strip(order.findtext("AmazonOrderID")),
+                "promotions": parse_item_promotions(order_item),
+                "is_business": is_business,
             })
 
     return rows
@@ -260,6 +301,36 @@ def build_db_rows(order_rows, month, year):
             add_row(row["sku"], asin, "eu", qty, amount * rate_to_eur)
 
     return sorted(totals.values(), key=lambda item: (item["MARKETPLACE"], item["SKU"]))
+
+
+def build_daily_country_totals(order_rows, month, year):
+    """{"YYYY-MM-DD": {marketplace: {"QUANTITY", "AMOUNT"}}} per LA-local
+    order date, same marketplace tagging and local-currency amounts as
+    build_country_rows, plus the same EUR-converted combined "eu" entry.
+    Used by run_daily_monthly_update.py's Telegram "yesterday" section."""
+    daily = {}
+
+    def add(date, marketplace_code, qty, amount):
+        bucket = daily.setdefault(date, {}).setdefault(marketplace_code, {"QUANTITY": 0, "AMOUNT": 0.0})
+        bucket["QUANTITY"] += qty
+        bucket["AMOUNT"] += amount
+
+    for row in order_rows:
+        date = row.get("purchase_date")
+        marketplace_code = DB_MARKETPLACE_MAP.get(row["sales_channel"])
+        if not date or not marketplace_code:
+            continue
+        qty = int(row["qty"])
+        amount = float(row.get("amount", 0.0))
+        add(date, marketplace_code, qty, amount)
+        if marketplace_code in EU_MARKETPLACES:
+            currency = EU_MARKETPLACE_CURRENCY.get(marketplace_code, "EUR")
+            add(date, "eu", qty, amount * get_fx_rate_to_eur(currency, month, year))
+
+    for per_marketplace in daily.values():
+        for bucket in per_marketplace.values():
+            bucket["AMOUNT"] = round(bucket["AMOUNT"], 2)
+    return daily
 
 
 def find_missing_asin_skus(db_rows):
@@ -427,15 +498,16 @@ def pb_authenticate():
     return token
 
 
-def pb_list_ids(token, collection, month, year):
+def pb_list_ids(token, collection, month, year, keep_marketplaces=()):
     ids = []
+    extra = "".join(f'&&marketplace!="{mp}"' for mp in keep_marketplaces)
     page = 1
     while True:
         response = requests.get(
             f"{POCKETBASE_URL}/api/collections/{collection}/records",
             headers={"Authorization": token},
             params={
-                "filter": f"(month={month}&&year={year})",
+                "filter": f"(month={month}&&year={year}{extra})",
                 "fields": "id",
                 "perPage": 200,
                 "page": page,
@@ -499,11 +571,11 @@ def country_row_to_body(row):
     }
 
 
-def write_month_data(db_rows, country_rows, month, year):
+def write_month_data(db_rows, country_rows, month, year, keep_marketplaces=()):
     token = pb_authenticate()
 
-    existing_sku_ids = pb_list_ids(token, POCKETBASE_SKU_COLLECTION, month, year)
-    existing_country_ids = pb_list_ids(token, POCKETBASE_COUNTRY_COLLECTION, month, year)
+    existing_sku_ids = pb_list_ids(token, POCKETBASE_SKU_COLLECTION, month, year, keep_marketplaces)
+    existing_country_ids = pb_list_ids(token, POCKETBASE_COUNTRY_COLLECTION, month, year, keep_marketplaces)
 
     ops = (
         [
@@ -544,6 +616,147 @@ def write_month_data(db_rows, country_rows, month, year):
         "deletedCountryRows": len(existing_country_ids),
         "insertedCountryRows": len(country_rows),
     }
+
+
+POCKETBASE_SKU_DAILY_COLLECTION = "sku_sales_daily"
+
+
+def build_daily_sku_rows(order_rows, month, year):
+    """One row per (LA order date, SKU, ASIN, marketplace) - per-country
+    codes only, no duplicate combined "eu" row (the Sales page's
+    short-range rankings sum what they need at read time). Quantity only,
+    same as sku_sales."""
+    totals = {}
+    for row in order_rows:
+        date = row.get("purchase_date")
+        marketplace_code = DB_MARKETPLACE_MAP.get(row["sales_channel"])
+        if not date or not marketplace_code:
+            continue
+        key = (date, row["sku"], row.get("asin", ""), marketplace_code)
+        totals[key] = totals.get(key, 0) + int(row["qty"])
+    return [
+        {"sku": sku, "ASIN": asin, "marketplace": mp, "date": date, "month": month, "year": year, "quantity": qty}
+        for (date, sku, asin, mp), qty in sorted(totals.items())
+    ]
+
+
+def write_daily_sku_data(daily_rows, month, year, keep_marketplaces=()):
+    """Delete-then-insert this month's sku_sales_daily rows (added
+    2026-09-30 for the Sales page's "Last week" ranking - sku_sales is
+    monthly-only). Kept separate from write_month_data so a failure here
+    never affects the main monthly write."""
+    token = pb_authenticate()
+    existing_ids = pb_list_ids(token, POCKETBASE_SKU_DAILY_COLLECTION, month, year, keep_marketplaces)
+    ops = [
+        {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_SKU_DAILY_COLLECTION}/records/{rid}"}
+        for rid in existing_ids
+    ] + [
+        {"method": "POST", "url": f"/api/collections/{POCKETBASE_SKU_DAILY_COLLECTION}/records", "body": body}
+        for body in daily_rows
+    ]
+    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+        pb_batch(token, ops[i:i + POCKETBASE_BATCH_SIZE])
+    return {"deletedDailyRows": len(existing_ids), "insertedDailyRows": len(daily_rows)}
+
+
+POCKETBASE_PROMO_COLLECTION = "promo_sales_monthly"
+PROMO_MARKETPLACE_CURRENCY = {
+    "usa": "USD", "ca": "CAD", "mex": "MXN", "uk": "GBP", "de": "EUR", "fr": "EUR",
+    "it": "EUR", "es": "EUR", "nl": "EUR", "be": "EUR", "ie": "EUR", "se": "SEK",
+    "pl": "PLN", "jp": "JPY", "au": "AUD",
+}
+
+
+def promotion_kind(promotion_id):
+    return "coupon" if promotion_id.upper().startswith("PLM-") else "promotion"
+
+
+def build_promo_rows(order_rows, month, year):
+    """One row per (marketplace, promotion id, ASIN) for the month: orders,
+    units, sales (item principal, local currency) and the discount given.
+    Per-country codes only (no combined "eu" row)."""
+    totals = {}
+    for row in order_rows:
+        mp = DB_MARKETPLACE_MAP.get(row["sales_channel"])
+        if not mp:
+            continue
+        for pid, discount in row.get("promotions") or []:
+            key = (mp, pid, row.get("asin", ""))
+            t = totals.setdefault(key, {"sku": row["sku"], "orders": set(), "units": 0, "sales": 0.0, "discount": 0.0})
+            t["orders"].add(row.get("order_id") or id(row))
+            t["units"] += int(row["qty"])
+            t["sales"] += float(row["amount"])
+            t["discount"] += discount
+    return [
+        {
+            "marketplace": mp, "year": year, "month": month, "promotion_id": pid,
+            "kind": promotion_kind(pid), "asin": asin, "sku": t["sku"],
+            "orders": len(t["orders"]), "units": t["units"],
+            "sales": round(t["sales"], 2), "discount": round(t["discount"], 2),
+            "currency": PROMO_MARKETPLACE_CURRENCY.get(mp, ""),
+        }
+        for (mp, pid, asin), t in sorted(totals.items())
+    ]
+
+
+def build_daily_promo_totals(order_rows):
+    """{date: [{marketplace, promotion_id, kind, units, sales, discount}]} -
+    for the daily Telegram digest (yesterday's coupon/promotion use)."""
+    totals = {}
+    for row in order_rows:
+        mp = DB_MARKETPLACE_MAP.get(row["sales_channel"])
+        date = row.get("purchase_date")
+        if not mp or not date:
+            continue
+        for pid, discount in row.get("promotions") or []:
+            t = totals.setdefault((date, mp, pid), {"units": 0, "sales": 0.0, "discount": 0.0})
+            t["units"] += int(row["qty"])
+            t["sales"] += float(row["amount"])
+            t["discount"] += discount
+    out = {}
+    for (date, mp, pid), t in sorted(totals.items()):
+        out.setdefault(date, []).append({
+            "marketplace": mp, "promotion_id": pid, "kind": promotion_kind(pid), "units": t["units"],
+            "sales": round(t["sales"], 2), "discount": round(t["discount"], 2),
+        })
+    return out
+
+
+def build_business_totals(order_rows):
+    """Amazon Business (B2B) orders, per the user 2026-10-31 - for the daily
+    digest: {"daily": {date: {mp: {orders, units, sales}}}, "month": {mp: {...}}}.
+    sales = Principal before tax, local currency (same as country_sales)."""
+    daily, month, seen_day, seen_month = {}, {}, set(), set()
+    for row in order_rows:
+        mp = DB_MARKETPLACE_MAP.get(row["sales_channel"])
+        if not row.get("is_business") or not mp:
+            continue
+        date = row.get("purchase_date") or ""
+        for bucket, seen, key in ((month.setdefault(mp, {"orders": 0, "units": 0, "sales": 0.0}), seen_month, (mp,)),
+                                  (daily.setdefault(date, {}).setdefault(mp, {"orders": 0, "units": 0, "sales": 0.0}), seen_day, (date, mp))):
+            if (key, row["order_id"]) not in seen:
+                seen.add((key, row["order_id"]))
+                bucket["orders"] += 1
+            bucket["units"] += int(row["qty"])
+            bucket["sales"] = round(bucket["sales"] + float(row["amount"]), 2)
+    return {"daily": daily, "month": month}
+
+
+def write_promo_data(promo_rows, month, year, keep_marketplaces=()):
+    """Delete-then-insert this month's promo_sales_monthly rows. Kept separate
+    from write_month_data so a failure here never affects the main write."""
+    token = pb_authenticate()
+    existing_ids = pb_list_ids(token, POCKETBASE_PROMO_COLLECTION, month, year, keep_marketplaces)
+    ops = [
+        {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_PROMO_COLLECTION}/records/{rid}"}
+        for rid in existing_ids
+    ] + [
+        {"method": "POST", "url": f"/api/collections/{POCKETBASE_PROMO_COLLECTION}/records", "body": body}
+        for body in promo_rows
+    ]
+    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+        pb_batch(token, ops[i:i + POCKETBASE_BATCH_SIZE])
+    return {"deletedPromoRows": len(existing_ids), "insertedPromoRows": len(promo_rows)}
 
 
 def UpdateSkuSalesMonth(request):
@@ -635,13 +848,31 @@ def UpdateSkuSalesMonth(request):
                     "aggregatedByMarketplace": build_dry_run_summary(db_rows),
                     "preview": db_rows,
                     "countryPreview": country_rows,
+                    "dailyCountryTotals": build_daily_country_totals(order_rows, start_month, start_year),
                     "asinWarning": asin_warning,
                     "missingAsinSkus": missing_asin_skus,
                 },
                 200,
             )
 
-        write_result = write_month_data(db_rows, country_rows, start_month, start_year)
+        # Amazon.com.au is its own report (added 2026-10-19). The manual
+        # /update and /batch-update pages only request usa+de, so when no "au"
+        # report is in this run, keep the month's stored AU rows instead of
+        # deleting them.
+        keep = () if "au" in report_ids else ("au",)
+        write_result = write_month_data(db_rows, country_rows, start_month, start_year, keep)
+        try:
+            write_result.update(
+                write_daily_sku_data(build_daily_sku_rows(order_rows, start_month, start_year), start_month, start_year, keep)
+            )
+        except Exception as exc:
+            write_result["dailyWriteError"] = str(exc)
+        try:
+            write_result.update(
+                write_promo_data(build_promo_rows(order_rows, start_month, start_year), start_month, start_year, keep)
+            )
+        except Exception as exc:
+            write_result["promoWriteError"] = str(exc)
 
         return json_response(
             {
@@ -656,6 +887,10 @@ def UpdateSkuSalesMonth(request):
                 "missingAsinSkus": missing_asin_skus,
                 "updatedRows": db_rows,
                 "updatedCountryRows": country_rows,
+                "dailyCountryTotals": build_daily_country_totals(order_rows, start_month, start_year),
+                "promoRows": build_promo_rows(order_rows, start_month, start_year),
+                "dailyPromoTotals": build_daily_promo_totals(order_rows),
+                "businessTotals": build_business_totals(order_rows),
                 **write_result,
             },
             200,

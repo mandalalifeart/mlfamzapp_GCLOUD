@@ -216,6 +216,19 @@ def format_promo_section(title, rows, names):
     return "\n".join(lines)
 
 
+def format_business_section(title, by_mp):
+    """by_mp: {mp: {orders, units, sales}} - Amazon Business (B2B) orders."""
+    lines = [title]
+    real = {k: v for k, v in (by_mp or {}).items() if v.get("units")}
+    if not real:
+        lines.append("  (none)")
+        return "\n".join(lines)
+    for mp, v in sorted(real.items(), key=lambda kv: -kv[1]["units"]):
+        label, currency = MARKETPLACE_LABELS.get(mp, (mp.upper(), ""))
+        lines.append(f"  🏢 {label}: {v['orders']} orders, {v['units']} units, {currency} {v['sales']:,.2f}")
+    return "\n".join(lines)
+
+
 def build_sales_digest_text(result, year, month, marketplaces_used):
     """Same shape as the Ads Daily Digest (DailyAdsPerformanceDigest.py):
     latest day + month-to-date, per marketplace. This job runs just after
@@ -343,6 +356,10 @@ def build_combined_digest_text(result, year, month, marketplaces_used):
     promo = [format_promo_section(f"Yesterday:", (result.get("dailyPromoTotals") or {}).get(yesterday, []), names),
              format_promo_section("Month to date:" if not is_closed_month else "Month:", result.get("promoRows") or [], names)]
     parts += ["", "<b>Coupons &amp; promotions</b>", _esc("\n".join(promo))]
+    biz = result.get("businessTotals") or {}
+    parts += ["", "<b>Business (Amazon Business) orders</b>",
+              _esc("\n".join([format_business_section("Yesterday:", (biz.get("daily") or {}).get(yesterday)),
+                               format_business_section("Month to date:" if not is_closed_month else "Month:", biz.get("month"))]))]
     parts.append(f"<i>reports: {_esc(marketplaces_used)}</i>")
     return "\n".join(parts)
 
