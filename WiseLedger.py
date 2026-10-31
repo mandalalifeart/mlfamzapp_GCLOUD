@@ -2115,10 +2115,14 @@ def match_income_group_invoice(token, fields, filename=""):
         month = f"{local_parts(row['occurred_at']):%Y-%m}"
         signed = (row.get("amount") or 0) * (1 if row.get("direction") == "in" else -1)
         totals[month] = totals.get(month, 0) + signed
-    # Per the user (2026-10-01): invoices they issue are ALWAYS for the previous
+    # Per the user (2026-10-01): invoices they issue are for the previous
     # month - an invoice dated in September covers August's payouts.
     try:
         inv_day = datetime.strptime(fields.get("invoice_date") or "", "%Y-%m-%d")
+        # An invoice dated on the LAST day of a month covers that same month
+        # (2026-10-31: MA2600035 dated 31.10 is the October invoice).
+        if (inv_day + timedelta(days=1)).month != inv_day.month:
+            return f"{prefix}|{cur}", inv_day.strftime("%Y-%m")
         return f"{prefix}|{cur}", (inv_day.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     except ValueError:
         pass
