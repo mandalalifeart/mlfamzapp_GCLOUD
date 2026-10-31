@@ -181,6 +181,8 @@ ROUTED_FUNCTIONS = [
     "GetArcherDashboard",
     "RunProductResearch",
     "GetProductResearch",
+    "UpdateBsrDaily",
+    "GetBsrHistory",
     "SetProductResearchStatus",
     "GetAsinAnalyticsList",
     "GetAsinAnalytics",

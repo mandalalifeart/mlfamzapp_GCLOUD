@@ -735,3 +735,13 @@ def GetProductResearch(request):
 def SetProductResearchStatus(request):
     from ProductResearch import SetProductResearchStatus as _impl
     return _impl(request)
+
+
+def UpdateBsrDaily(request):
+    from BsrTracking import UpdateBsrDaily as _impl
+    return _impl(request)
+
+
+def GetBsrHistory(request):
+    from BsrTracking import GetBsrHistory as _impl
+    return _impl(request)
