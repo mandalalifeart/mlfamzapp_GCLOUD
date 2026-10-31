@@ -25,6 +25,10 @@ Only active listings with stock are checked (per the user 2026-10-25 "check
 only active listings with positive inventory in eu"): BUYABLE in the target
 marketplace, and FBA fulfillable + FC transfer > 0 for its ASIN in the source
 region's pool (Pan-EU via DE for Europe/Middle East, US for CA/MX).
+Business price (2026-10-31, per the user): in US/CA/MX/UK/DE/FR/IT/ES every
+buyable pouf/pareo listing must have a business (B2B) price equal to its
+normal price - quantity discounts for business buyers sit on top of it
+(set by business_prices_all_mp_2026_10_31.py). Missing/different is flagged.
 Fees can be overridden via job_state key "price_check_fees"
 ({"AE": {"pareo": 31, "home": 30}, ...}).
 """
@@ -37,7 +41,7 @@ import requests
 from sp_api.api import ListingsItems
 from sp_api.base import Marketplaces
 
-from AsinAnalytics import pb_authenticate
+from AsinAnalytics import pb_authenticate, pb_list_all
 from JobState import get_job_state, set_job_state
 from NotificationRouting import notify
 
@@ -56,6 +60,8 @@ MIN_TARGETS = {
     "MX": ("US", "MXN", {"pareo": 173.34, "home": 264.19}),
 }
 USD_PEGS = {"AED": 3.6725, "SAR": 3.75}
+BUSINESS_GROUPS = {"VELVET", "COVER_BOHO", "COVER_VINTAGE", "STUFFED"}  # + every PAREO_* group
+BUSINESS_MPS = ["US", "CA", "MX", "UK", "DE", "FR", "IT", "ES"]  # NL/BE/PL/SE/IE/JP reject B2B offers
 FALLBACK_RATES = {("EUR", "PLN"): 4.25, ("EUR", "SEK"): 11.0, ("EUR", "USD"): 1.12,
                   ("USD", "CAD"): 1.38, ("USD", "MXN"): 18.5}
 
@@ -101,8 +107,10 @@ def fetch_prices(mp):
                 continue
             status = ((it.get("summaries") or [{}])[0].get("status")) or []
             price = next((o["price"]["amount"] for o in it.get("offers") or [] if o.get("offerType") == "B2C"), None)
+            b2b = next((o["price"]["amount"] for o in it.get("offers") or [] if o.get("offerType") == "B2B"), None)
             if price is not None:
                 prices[sku] = {"price": float(price), "buyable": "BUYABLE" in status,
+                               "b2b": float(b2b) if b2b is not None else None,
                                "asin": (it.get("summaries") or [{}])[0].get("asin")}
         token = resp.next_token
         if not token:
@@ -230,6 +238,20 @@ def run_check(fees_override=None, pb_token=None, prev_formula=None):
                 low.append({"sku": sku, "price": t["price"], "min": round(minimum, 2), "source": s["price"],
                             "fee": fee, "short_pct": round(100 * (1 - t["price"] / minimum), 1)})
         result["min"][mp] = {"checked": checked, "currency": cur, "source": src_mp, "low": sorted(low, key=lambda x: -x["short_pct"])}
+    # Business price = normal price (per the user 2026-10-31; quantity discounts
+    # sit on top of it). Only marketplaces where Amazon Business runs for us.
+    result["business"] = {}
+    groups = {}
+    if pb_token:
+        for r in pb_list_all(pb_token, "asin_group_mapping", ""):
+            groups.setdefault(r.get("asin"), r.get("group") or "")
+    ours = {a for a, g in groups.items() if g in BUSINESS_GROUPS or g.startswith("PAREO")}
+    for mp in BUSINESS_MPS if ours else []:
+        rows = {k: v for k, v in prices(mp).items() if v.get("buyable") and v.get("asin") in ours}
+        missing = sorted(k for k, v in rows.items() if v.get("b2b") is None)
+        differ = sorted(({"sku": k, "price": v["price"], "b2b": v["b2b"]} for k, v in rows.items()
+                         if v.get("b2b") is not None and abs(v["b2b"] - v["price"]) > 0.005), key=lambda x: x["sku"])
+        result["business"][mp] = {"checked": len(rows), "missing": missing, "differ": differ}
     if pb_token:
         prices("UK")
         result["historyRows"] = record_price_history(pb_token, cache, date.today().isoformat())
@@ -282,6 +304,16 @@ def build_text(result, day, max_lines=8):
                          f"({r['source']} {src_cur}{x['source']:.2f}{fee}, −{x['short_pct']:.0f}%)")
         if len(r["low"]) > max_lines:
             lines.append(f"   … +{len(r['low']) - max_lines} more")
+    lines.append("\nBusiness price = normal price (buyable listings):")
+    for mp, r in (result.get("business") or {}).items():
+        if not r["missing"] and not r["differ"]:
+            lines.append(f"✅ {mp}: {r['checked']} SKUs OK")
+            continue
+        lines.append(f"⚠️ {mp}: {len(r['differ'])} differ, {len(r['missing'])} without business price (of {r['checked']})")
+        for x in r["differ"][:max_lines]:
+            lines.append(f"   {x['sku']}: business {x['b2b']:.2f} vs normal {x['price']:.2f}")
+        if r["missing"]:
+            lines.append("   no business price: " + ", ".join(r["missing"][:max_lines]) + (" …" if len(r["missing"]) > max_lines else ""))
     return "\n".join(lines)
 
 
