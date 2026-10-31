@@ -720,3 +720,18 @@ def UploadShipmentDocument(request):
 def SetImportShipmentRole(request):
     from ImportShipments import SetImportShipmentRole as _impl
     return _impl(request)
+
+
+def RunProductResearch(request):
+    from ProductResearch import RunProductResearch as _impl
+    return _impl(request)
+
+
+def GetProductResearch(request):
+    from ProductResearch import GetProductResearch as _impl
+    return _impl(request)
+
+
+def SetProductResearchStatus(request):
+    from ProductResearch import SetProductResearchStatus as _impl
+    return _impl(request)
