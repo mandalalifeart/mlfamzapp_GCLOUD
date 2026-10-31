@@ -125,6 +125,86 @@ IDEAS = [
      "keywords": ["cottagecore pillow covers"], "match": ["cottagecore"],
      "price": "$22-26", "bundle": "Set of 2",
      "notes": "Flowers + mushrooms + butterflies - same artwork family."},
+    # Beyond mushroom (2026-10-31, per the user "yes"). "theme" = title words
+    # that make a result count as on-theme for that idea.
+    {"id": "kantha-quilt", "name": "Kantha quilt / throw (vintage sari cotton)",
+     "keywords": ["kantha quilt", "kantha throw blanket"], "match": ["kantha"], "theme": ["kantha"],
+     "price": "$49-89", "bundle": "Quilt + 2 kantha pillow covers",
+     "notes": "Hand-stitched layered cotton; every piece unique - a natural Indian-made premium product."},
+    {"id": "block-print-bedding", "name": "Hand block print quilt / duvet cover",
+     "keywords": ["block print quilt", "block print duvet cover"], "match": ["block", "print"],
+     "theme": ["block print", "block-print", "hand block", "blockprint"],
+     "price": "$69-120", "bundle": "Quilt / duvet + 2 shams",
+     "notes": "Same block-print craft as our PAREO_B pareos, on bedding."},
+    {"id": "velvet-pillow-covers", "name": "Embroidered velvet pillow covers matching each pouf colour",
+     "keywords": ["velvet embroidered pillow cover", "boho velvet pillow covers"], "match": ["velvet", "pillow"],
+     "theme": ["velvet", "embroider"],
+     "price": "$22-26 single", "bundle": "Set of 2 $39-44; pouf + 2 covers in the same colour",
+     "notes": "Same fabric/embroidery as our velvet poufs (V251/V256/V257/VPlain...), cross-sell on every pouf page."},
+    {"id": "suzani", "name": "Suzani embroidered pillow covers / throws",
+     "keywords": ["suzani pillow cover", "suzani throw"], "match": ["suzani"], "theme": ["suzani"],
+     "price": "$29-69", "bundle": "Pillow cover set; throw + covers",
+     "notes": "Bold circular embroidery, fits the mandala look of our poufs."},
+    {"id": "boho-throw-blanket", "name": "Boho cotton throw blanket with tassels",
+     "keywords": ["boho throw blanket", "cotton throw blanket with tassels"], "match": ["boho", "blanket"],
+     "theme": ["boho", "bohemian", "tassel", "fringe", "woven"],
+     "price": "$35-45", "bundle": "Throw + pillow covers",
+     "notes": "Woven cotton jacquard, India is the main origin for this style."},
+    {"id": "boho-curtains", "name": "Boho tassel curtains (cotton, pair)",
+     "keywords": ["boho curtains", "boho curtains with tassels"], "match": ["boho", "curtain"],
+     "theme": ["boho", "bohemian", "tassel", "fringe", "macrame"],
+     "price": "$35-49 pair", "bundle": "Curtains + pillow covers",
+     "notes": "Cotton slub / tufted / tassel designs."},
+    {"id": "block-print-tablecloth", "name": "Hand block print tablecloth",
+     "keywords": ["block print tablecloth"], "match": ["tablecloth"],
+     "theme": ["block print", "block-print", "hand block", "hand printed", "indian"],
+     "price": "$29-45", "bundle": "Tablecloth + 6 napkins",
+     "notes": "Same craft as block-print pareos; sizes for 4/6/8 seats."},
+    {"id": "zafu-cushion", "name": "Zafu meditation cushion (cover + buckwheat or cover only)",
+     "keywords": ["zafu meditation cushion", "meditation cushion"], "match": ["meditation"],
+     "theme": ["zafu", "meditation", "yoga"],
+     "price": "$35-55", "bundle": "Zafu + zabuton mat",
+     "notes": "Our covers already sell on 'meditation cushion' searches; a real zafu is the next step."},
+    {"id": "boho-bean-bag", "name": "Boho bean bag cover (embroidered / velvet)",
+     "keywords": ["boho bean bag cover", "bean bag cover"], "match": ["bean", "bag"],
+     "theme": ["boho", "bohemian", "velvet", "embroider", "moroccan"],
+     "price": "$49-79", "bundle": "Bean bag + pouf",
+     "notes": "Cover-only like our poufs - same packing/shipping model."},
+    {"id": "macrame-hammock-chair", "name": "Cotton macrame hammock chair",
+     "keywords": ["macrame hammock chair", "hammock chair"], "match": ["hammock"],
+     "theme": ["macrame", "boho", "cotton rope", "tassel"],
+     "price": "$45-79", "bundle": "Hammock chair + cushion",
+     "notes": "Hand-knotted cotton; heavier to ship."},
+    {"id": "boho-beach-bag", "name": "Boho beach bag (embroidered / block print cotton)",
+     "keywords": ["boho beach bag", "beach tote bag"], "match": ["beach", "bag"],
+     "theme": ["boho", "bohemian", "embroider", "block print", "macrame", "tassel"],
+     "price": "$22-32", "bundle": "Beach bag + pareo",
+     "notes": "Natural add-on to our pareo bundles (like PAREO_ACA_5Blue_SET)."},
+    # Bundles of cheaper items (2026-10-31, per the user "3 cheaper products
+    # together"): items that sell under $20 alone, packed 3 together so the
+    # order is $20+.
+    {"id": "bundle-mushroom-gift", "kind": "bundle", "name": "Mushroom gift set: 3 small items (e.g. pillow cover + tea towel + pouch)",
+     "keywords": ["mushroom gifts for women", "mushroom gift set"], "match": ["mushroom", "gift"],
+     "price": "$29-39 for 3", "bundle": "3 different mushroom items in one gift box",
+     "notes": "Q4 gift demand; small cheap items that alone would be under $20."},
+    {"id": "bundle-mushroom-pillow-3", "kind": "bundle", "name": "Set of 3 mushroom pillow covers (3 designs)",
+     "keywords": ["mushroom pillow covers set", "mushroom throw pillow covers set of 2"], "match": ["mushroom", "pillow"],
+     "price": "$45-55 for 3", "bundle": "3 embroidered covers, mixed designs",
+     "notes": "Market sells singles at ~$16-19 - a mixed 3-pack gets the order over $20 and stands apart."},
+    {"id": "bundle-mushroom-kitchen", "kind": "bundle", "name": "Mushroom kitchen set: 3 tea towels / towel + runner + napkins",
+     "keywords": ["mushroom kitchen towels", "mushroom dish towels"], "match": ["mushroom", "towel"],
+     "price": "$22-29 for 3", "bundle": "3 block-print cotton tea towels",
+     "notes": "Single tea towels sell well under $20 - only as a 3-pack."},
+    {"id": "bundle-pareo-3", "kind": "bundle", "name": "3 pareos pack (our cheaper pareos, mixed colours)",
+     "keywords": ["sarong pack", "beach sarong set of 3"], "match": ["sarong"],
+     "theme": ["pack", "set", "3 pcs", "3pcs", "pieces"],
+     "price": "$35-45 for 3", "bundle": "3 pareos from our own stock (no new production)",
+     "notes": "Uses stock we already have - zero supplier risk; good for slow colours."},
+    {"id": "bundle-boho-pillow-4", "kind": "bundle", "name": "Boho pillow covers set of 4 (block print / embroidered cotton)",
+     "keywords": ["boho pillow covers set of 4"], "match": ["pillow", "set"],
+     "theme": ["boho", "bohemian", "block print", "embroider", "tassel"],
+     "price": "$39-49 for 4", "bundle": "4 covers, mixed designs",
+     "notes": "Sets of 4 are how the market sells cheap covers."},
 ]
 
 
@@ -218,7 +298,10 @@ def research_idea(idea, ci, pr, bench, demand):
         c["price"] = prices.get(a)
         c["ours"] = c["brand"].lower().startswith(OUR_BRANDS)
         t = c["title"].lower()
-        c["onTheme"] = any(w in t for w in THEME_WORDS) and not (COLOUR_RE.search(t) and "mushroom" not in COLOUR_RE.sub("", t))
+        if idea.get("theme"):
+            c["onTheme"] = any(w in t for w in idea["theme"])
+        else:
+            c["onTheme"] = any(w in t for w in THEME_WORDS) and not (COLOUR_RE.search(t) and "mushroom" not in COLOUR_RE.sub("", t))
         comps.append(c)
     others = [c for c in comps if not c["ours"]]
     hk = sorted(c["rank"] for c in others if c["rank"] and c["rankCategory"] == "Home & Kitchen")
