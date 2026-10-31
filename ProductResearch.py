@@ -183,6 +183,27 @@ IDEAS = [
     # Bundles of cheaper items (2026-10-31, per the user "3 cheaper products
     # together"): items that sell under $20 alone, packed 3 together so the
     # order is $20+.
+    # Added 2026-10-31 per the user: chair pads, IKEA sofa covers, entry rug, bathroom rug.
+    {"id": "chair-pads", "name": "Boho chair pads / seat cushions (cotton, with ties)",
+     "keywords": ["boho chair cushions", "chair pads for dining chairs", "cotton chair pads with ties"], "match": ["chair pad"],
+     "theme": ["boho", "bohemian", "tassel", "tufted", "woven", "cotton", "mandala", "block print", "farmhouse"],
+     "price": "$25-39 set of 2/4", "bundle": "Set of 4 chair pads + table runner",
+     "notes": "Sold in sets of 2/4/6 - a set gets over $20 easily."},
+    {"id": "ikea-sofa-covers", "name": "IKEA sofa / armchair covers (Ektorp, Kivik, Poang...)",
+     "keywords": ["ikea ektorp cover", "ikea kivik sofa cover", "ikea poang cushion cover", "ikea sofa cover"], "match": ["ikea"],
+     "theme": ["ikea", "ektorp", "kivik", "karlstad", "poang", "poäng", "friheten", "vimle", "klippan", "soderhamn", "söderhamn"],
+     "price": "$49-129", "bundle": "Sofa cover + matching pillow covers",
+     "notes": "Fitted covers for exact IKEA models; needs precise patterns per model. Say 'fits IKEA ...', not the brand as ours."},
+    {"id": "entry-rug", "name": "Boho entry / door rug (cotton, washable)",
+     "keywords": ["boho entryway rug", "washable cotton door mat indoor", "boho rug 2x3"], "match": ["entry"],
+     "theme": ["boho", "bohemian", "tassel", "fringe", "woven", "cotton", "chindi", "moroccan", "mandala", "tufted"],
+     "price": "$22-39", "bundle": "Entry rug + runner",
+     "notes": "Indian flat-woven / tufted cotton is a classic export product."},
+    {"id": "bath-rug", "name": "Boho bathroom rug / bath mat (tufted cotton)",
+     "keywords": ["boho bath mat", "boho bathroom rug", "tufted cotton bath mat"], "match": ["bath mat"],
+     "theme": ["boho", "bohemian", "tassel", "fringe", "tufted", "woven", "cotton", "moroccan", "mandala"],
+     "price": "$22-35", "bundle": "Set of 2 bath mats / bath mat + shower curtain",
+     "notes": "Tufted cotton bath mats are an Indian speciality."},
     {"id": "bundle-mushroom-gift", "kind": "bundle", "name": "Mushroom gift set: 3 small items (e.g. pillow cover + tea towel + pouch)",
      "keywords": ["mushroom gifts for women", "mushroom gift set"], "match": ["mushroom", "gift"],
      "price": "$29-39 for 3", "bundle": "3 different mushroom items in one gift box",
