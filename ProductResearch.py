@@ -421,7 +421,8 @@ def GetProductResearch(request):
             research = (data.get("results") or {}).get(idea["id"])
             ideas.append({**idea, "research": research, "score": idea_score(research),
                           "status": (status.get(idea["id"]) or {}).get("status", "idea"),
-                          "userNotes": (status.get(idea["id"]) or {}).get("notes", "")})
+                          "userNotes": (status.get(idea["id"]) or {}).get("notes", ""),
+                          "pool": (status.get(idea["id"]) or {}).get("pool") or default_pool(idea)})
         ideas.sort(key=lambda i: -((i["score"] or {}).get("score") or -1))
         for n, i in enumerate(ideas, 1):
             i["rank"] = n
@@ -431,13 +432,25 @@ def GetProductResearch(request):
         return _json({"error": str(exc)}, 500)
 
 
+POOLS = ("main", "option", "ready")
+
+
+def default_pool(idea):
+    return "ready" if idea.get("kind") == "bundle" else "main"
+
+
 def SetProductResearchStatus(request):
+    if getattr(request, "method", "POST") == "OPTIONS":
+        return "", 204, {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS",
+                         "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Max-Age": "3600"}
     body = request.get_json(silent=True) or {}
     idea_id = body.get("id")
     if idea_id not in {i["id"] for i in IDEAS}:
         return _json({"error": "unknown idea"}, 400)
     if body.get("status") is not None and body["status"] not in STATUSES:
         return _json({"error": "bad status"}, 400)
+    if body.get("pool") is not None and body["pool"] not in POOLS:
+        return _json({"error": "bad pool"}, 400)
     try:
         token = pb_authenticate()
         status = _load(token, "product_research_status")
@@ -446,6 +459,8 @@ def SetProductResearchStatus(request):
             cur["status"] = body["status"]
         if body.get("notes") is not None:
             cur["notes"] = str(body["notes"])[:2000]
+        if body.get("pool") is not None:
+            cur["pool"] = body["pool"]
         status[idea_id] = cur
         set_job_state(token, "product_research_status", json.dumps(status))
         return _json({"ok": True, "id": idea_id, **cur})
