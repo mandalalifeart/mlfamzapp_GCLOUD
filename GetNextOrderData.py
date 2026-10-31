@@ -167,6 +167,26 @@ def load_mapping(token):
     return rows, sku_to_asin
 
 
+def unique_product_rows(rows, stats_by_sku):
+    """One row per product (2026-10-31, per the user: "only unique UPC" on
+    /next-order). Several SKU spellings of one product (e.g. CoverPillowPBlue56A
+    / CoverPillowPlue56A) share an ASIN/UPC and used to show twice with the
+    same stats. Key = UPC, else ASIN; keep the spelling that has its own
+    sku_statistics record (that's where Next/Malani edits are stored), then
+    the one with a supplier SKU, then the first."""
+    best = {}
+    order = []
+    for row in rows:
+        key = row["upc"] or row["asin"] or row["sku"]
+        rank = (row["sku"] in stats_by_sku, bool(row["supplier_sku"]))
+        if key not in best:
+            order.append(key)
+            best[key] = (rank, row)
+        elif rank > best[key][0]:
+            best[key] = (rank, row)
+    return [best[k][1] for k in order]
+
+
 def pb_authenticate():
     response = requests.post(
         f"{POCKETBASE_URL}/api/collections/_superusers/auth-with-password",
@@ -534,7 +554,7 @@ def GetNextOrderData(request):
         total_sales_by_region = fetch_total_sales_by_region_asin(token, today.year)
 
         groups = defaultdict(list)
-        for row in mapping_rows:
+        for row in unique_product_rows(mapping_rows, stats_by_sku):
             stats = stats_by_sku.get(row["sku"]) or stats_by_asin.get(row["asin"]) or {}
             item = {"sku": row["sku"], "asin": row["asin"], "upc": row["upc"], "supplier_sku": row["supplier_sku"]}
             for field in STATS_FIELDS:
