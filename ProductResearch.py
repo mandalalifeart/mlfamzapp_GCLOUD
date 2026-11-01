@@ -239,12 +239,13 @@ IDEAS = [
     # Bundle components (2026-11-01, per the user "add wall hangers and door
     # knobs to research in bundle component part"): cheap add-ons to combine
     # with our covers/pareos - they start in the "Options for bundles" pool.
-    {"id": "wall-hanging", "pool": "option", "name": "Boho wall hanging (macrame / woven / embroidered fabric)",
-     "keywords": ["boho wall hanging", "macrame wall hanging", "woven wall hanging boho", "mushroom wall hanging"],
-     "match": ["wall", "hanging"],
-     "theme": ["boho", "bohemian", "macrame", "woven", "tassel", "fringe", "embroider", "mushroom", "cotton"],
-     "price": "$15-35", "bundle": "Wall hanging + pouf cover / pillow cover in the same colours",
-     "notes": "Bundle component - matching wall decor for a room set."},
+    {"id": "wall-hooks", "pool": "option", "name": "Decorative wall hooks / coat & key hanger (ceramic / brass / wood)",
+     "keywords": ["decorative wall hooks for coats", "key holder for wall", "boho wall hooks", "ceramic wall hooks",
+                  "mushroom wall hooks"],
+     "match": ["hook"],
+     "theme": ["boho", "bohemian", "ceramic", "brass", "wood", "vintage", "mushroom", "hand painted", "moroccan", "decorative"],
+     "price": "$15-30", "bundle": "Hook set / key rack + matching knobs or an entry rug (entryway set)",
+     "notes": "Bundle component (per the user: hangers for coats and keys, not macrame) - may need another supplier."},
     {"id": "door-knobs", "pool": "option", "name": "Decorative door / drawer knobs (ceramic / brass, set of 6-8)",
      "keywords": ["boho drawer knobs", "ceramic drawer knobs", "mushroom drawer knobs", "decorative cabinet knobs"],
      "match": ["knob"],
