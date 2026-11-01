@@ -185,6 +185,7 @@ ROUTED_FUNCTIONS = [
     "GetBsrHistory",
     "GetProductCost",
     "GetProductCostPeriod",
+    "GetProductCostScenarios",
     "SetProductResearchStatus",
     "GetAsinAnalyticsList",
     "GetAsinAnalytics",

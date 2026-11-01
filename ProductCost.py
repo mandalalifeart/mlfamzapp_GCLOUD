@@ -192,6 +192,34 @@ def amazon_fees(mp, cred, asin, price, cur):
     return _cached(f"fees|{mp}|{asin}|{price}", 24, get)
 
 
+def amazon_fees_many(mp, cred, asin, prices, cur):
+    """Fees at several prices in ONE batch call (getMyFeesEstimates) - the
+    single-item endpoint throttles after a few calls. -> {price: fees}."""
+    todo = [p for p in prices if f"fees|{mp}|{asin}|{p}" not in _mem]
+    if todo:
+        c = dict(refresh_token=os.environ[f"REFRESH_TOKEN_{cred}"], lwa_app_id=os.environ[f"CLIENT_ID_{cred}"],
+                 lwa_client_secret=os.environ[f"CLIENT_SECRET_{cred}"])
+        reqs = [{"price": p, "currency": cur, "is_fba": True, "id_type": "ASIN", "id_value": asin,
+                 "identifier": f"{asin}-{p}"} for p in todo]
+        for attempt in range(5):
+            try:
+                res = ProductFees(credentials=c, marketplace=getattr(Marketplaces, mp)).get_product_fees_estimate(reqs).payload
+                break
+            except Exception as exc:
+                if "QuotaExceeded" not in str(exc) or attempt == 4:
+                    raise
+                time.sleep(5 * (attempt + 1))
+        for r in res:
+            p = float(r["FeesEstimateIdentifier"]["PriceToEstimateFees"]["ListingPrice"]["Amount"])
+            if r.get("Status") != "Success":
+                continue
+            fees = {f["FeeType"]: f["FinalFee"]["Amount"] for f in r["FeesEstimate"]["FeeDetailList"]}
+            _mem[f"fees|{mp}|{asin}|{p}"] = (time.time(), {
+                "referral": fees.get("ReferralFee", 0) + fees.get("VariableClosingFee", 0) + fees.get("PerItemFee", 0),
+                "fba": fees.get("FBAFees", 0)})
+    return {p: _mem[f"fees|{mp}|{asin}|{p}"][1] for p in prices if f"fees|{mp}|{asin}|{p}" in _mem}
+
+
 # ---------- TACOS ----------
 
 def last_full_months(n=3):
@@ -445,6 +473,62 @@ def GetProductCostPeriod(request):
         if period not in PERIODS:
             return _json({"error": f"period must be one of {list(PERIODS)}"}, 400)
         res = period_totals((args.get("sku") or "").strip(), (args.get("asin") or "").strip(), period)
+        return _json(res, 404 if "error" in res else 200)
+    except Exception as exc:
+        return _json({"error": str(exc)}, 500)
+
+
+# ---------- price scenarios (per the user 2026-11-01) ----------
+# Click a price on the product page -> the same per-unit lines at -20/-10/0/+10/+20%.
+# Fees are re-estimated by Amazon at each price; the AD COST PER UNIT stays at
+# today's level (current TACOS x current price) - we can't know how sales
+# respond to the price, so ads are not scaled with it.
+SCENARIO_STEPS = (-20, -10, 0, 10, 20)
+
+
+def price_scenarios(sku, mp):
+    base = product_cost(sku=sku)
+    if "error" in base:
+        return base
+    m = next((x for x in base["markets"] if x["mp"] == mp.upper()), None)
+    if not m:
+        return {"error": f"no current price for {sku} in {mp}"}
+    cfg = next(c for c in MARKETS if c[0] == mp.upper())
+    _mp, _t, _a, vat, cur, cred = cfg
+    out = []
+    prices = [round(m["price"] * (1 + step / 100), 2) for step in SCENARIO_STEPS]
+    try:
+        fees = amazon_fees_many(mp.upper(), cred, base["asin"], prices, cur)
+        fee_error = ""
+    except Exception as exc:
+        fees, fee_error = {}, str(exc)[:200]
+    for step, price in zip(SCENARIO_STEPS, prices):
+        row = {"step": step, "price": price, "netPrice": round(price / (1 + vat), 2)}
+        row["vat"] = round(price - row["netPrice"], 2)
+        if price in fees:
+            row.update(fees[price])
+        else:
+            row["feesError"] = fee_error or "no fee estimate"
+        if m.get("landed") is None or "referral" not in row:
+            out.append(row)
+            continue
+        before = row["netPrice"] - row["referral"] - row["fba"] - m["landed"]
+        row["profitBeforeAds"] = round(before, 2)
+        for key in ("productTacos", "deptTacos"):
+            ad = m[key].get("adCost")
+            if ad is None:
+                continue
+            row[key] = {"adCost": ad, "profit": round(before - ad, 2),
+                        "margin": round((before - ad) / row["netPrice"] * 100, 1) if row["netPrice"] else None}
+        out.append(row)
+    return {"sku": base["sku"], "mp": mp.upper(), "currency": cur, "landed": m.get("landed"),
+            "productTacosPct": m["productTacos"]["pct"], "deptTacosPct": m["deptTacos"]["pct"], "rows": out}
+
+
+def GetProductCostScenarios(request):
+    args = getattr(request, "args", {}) or {}
+    try:
+        res = price_scenarios((args.get("sku") or "").strip(), (args.get("mp") or "").strip())
         return _json(res, 404 if "error" in res else 200)
     except Exception as exc:
         return _json({"error": str(exc)}, 500)

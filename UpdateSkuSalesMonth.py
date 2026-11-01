@@ -814,9 +814,11 @@ def UpdateSkuSalesMonth(request):
 
         order_rows = []
         fetched_reports = []
+        raw_payloads = {}
 
         for marketplace, report_req_id in sorted(report_ids.items()):
             xml_payload = fetch_report_payload(marketplace, report_req_id)
+            raw_payloads[marketplace] = xml_payload
             parsed_rows = parse_orders_from_xml(xml_payload)
             order_rows.extend(parsed_rows)
             fetched_reports.append({
@@ -873,6 +875,15 @@ def UpdateSkuSalesMonth(request):
             )
         except Exception as exc:
             write_result["promoWriteError"] = str(exc)
+        # Every order line (2026-11-01) - its own collection, never blocks the above.
+        try:
+            from OrderItems import parse_order_items, write_order_items
+            write_result["orderItems"] = {
+                region: write_order_items(parse_order_items(xml, region), region, start_year, start_month)
+                for region, xml in raw_payloads.items()
+            }
+        except Exception as exc:
+            write_result["orderItemsWriteError"] = str(exc)
 
         return json_response(
             {
