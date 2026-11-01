@@ -236,6 +236,21 @@ IDEAS = [
      "theme": ["boho", "bohemian", "block print", "embroider", "tassel"],
      "price": "$39-49 for 4", "bundle": "4 covers, mixed designs",
      "notes": "Sets of 4 are how the market sells cheap covers."},
+    # Bundle components (2026-11-01, per the user "add wall hangers and door
+    # knobs to research in bundle component part"): cheap add-ons to combine
+    # with our covers/pareos - they start in the "Options for bundles" pool.
+    {"id": "wall-hanging", "pool": "option", "name": "Boho wall hanging (macrame / woven / embroidered fabric)",
+     "keywords": ["boho wall hanging", "macrame wall hanging", "woven wall hanging boho", "mushroom wall hanging"],
+     "match": ["wall", "hanging"],
+     "theme": ["boho", "bohemian", "macrame", "woven", "tassel", "fringe", "embroider", "mushroom", "cotton"],
+     "price": "$15-35", "bundle": "Wall hanging + pouf cover / pillow cover in the same colours",
+     "notes": "Bundle component - matching wall decor for a room set."},
+    {"id": "door-knobs", "pool": "option", "name": "Decorative door / drawer knobs (ceramic / brass, set of 6-8)",
+     "keywords": ["boho drawer knobs", "ceramic drawer knobs", "mushroom drawer knobs", "decorative cabinet knobs"],
+     "match": ["knob"],
+     "theme": ["boho", "bohemian", "ceramic", "brass", "mushroom", "hand painted", "vintage", "moroccan", "floral"],
+     "price": "$15-25 set", "bundle": "Knob set as a gift add-on (e.g. mushroom knobs + mushroom pouf cover)",
+     "notes": "Bundle component - Indian ceramic / brass knobs; not fabric, may need another supplier."},
 ]
 
 
@@ -446,7 +461,7 @@ POOLS = ("main", "option", "ready")
 
 
 def default_pool(idea):
-    return "ready" if idea.get("kind") == "bundle" else "main"
+    return idea.get("pool") or ("ready" if idea.get("kind") == "bundle" else "main")
 
 
 def SetProductResearchStatus(request):
