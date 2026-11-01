@@ -532,3 +532,162 @@ def GetProductCostScenarios(request):
         return _json(res, 404 if "error" in res else 200)
     except Exception as exc:
         return _json({"error": str(exc)}, 500)
+
+
+# ---------- Best & Worst sellers by profit / ACOS / TACOS (per the user 2026-11-01) ----------
+# Any date range, from order_items (real price paid after promotions) and the
+# daily ads_advertised_product_stats. Per ASIN, in USD at today's rate:
+#   sales      = net_amount of non-cancelled order lines (incl. VAT in EU/UK/MX)
+#   net sales  = sales / (1 + VAT)
+#   fees       = referral % x sales + FBA fee x units (today's estimate per
+#                marketplace; CA/MX borrow US, other EU borrow DE)
+#   cost       = units x landed cost
+#   profit     = net sales - fees - cost - ad spend;  margin = profit / net sales
+#   ACOS       = ad spend / ad-attributed sales;  TACOS = ad spend / sales
+ATOMIC = {  # order_items marketplace -> (fees market, ads country, VAT)
+    "usa": ("US", "US", 0.0), "ca": ("US", "CA", 0.0), "mex": ("US", "MX", 0.16), "uk": ("UK", "UK", 0.20),
+    "de": ("DE", "DE", 0.19), "fr": ("FR", "FR", 0.20), "it": ("IT", "IT", 0.22), "es": ("ES", "ES", 0.21),
+    "nl": ("DE", "NL", 0.21), "be": ("DE", "BE", 0.21), "ie": ("DE", "IE", 0.23), "se": ("DE", "SE", 0.25),
+    "pl": ("DE", "PL", 0.23),
+}
+FEE_CACHE = os.path.join(HERE, "logs", "fee_estimates.json")
+FEE_CACHE_DAYS = 7
+
+
+def fee_table(token, asins):
+    """(fees market, asin) -> {referralPct, fbaUsd}, from batch fee estimates at
+    each ASIN's current price; cached on disk for FEE_CACHE_DAYS."""
+    try:
+        cache = json.load(open(FEE_CACHE))
+    except (OSError, ValueError):
+        cache = {}
+    now = time.time()
+    latest = {}
+    need = defaultdict(list)
+    for r in pb_list_all(token, "price_history", "", fields="marketplace,asin,price,since"):
+        k = (r["marketplace"], r["asin"])
+        if k not in latest or r["since"] >= latest[k]["since"]:
+            latest[k] = r
+    for mp, _t, _a, _v, cur, cred in MARKETS:
+        for asin in asins:
+            key = f"{mp}|{asin}"
+            pr = latest.get((mp, asin))
+            if not pr:
+                continue
+            hit = cache.get(key)
+            if hit and hit.get("price") == pr["price"] and now - hit["at"] < FEE_CACHE_DAYS * 86400:
+                continue
+            need[(mp, cur, cred)].append((asin, pr["price"]))
+    for (mp, cur, cred), items in need.items():
+        c = dict(refresh_token=os.environ[f"REFRESH_TOKEN_{cred}"], lwa_app_id=os.environ[f"CLIENT_ID_{cred}"],
+                 lwa_client_secret=os.environ[f"CLIENT_SECRET_{cred}"])
+        client = ProductFees(credentials=c, marketplace=getattr(Marketplaces, mp))
+        for i in range(0, len(items), 20):
+            chunk = items[i:i + 20]
+            reqs = [{"price": p, "currency": cur, "is_fba": True, "id_type": "ASIN", "id_value": a,
+                     "identifier": f"{a}|{p}"} for a, p in chunk]
+            res = None
+            for attempt in range(6):
+                try:
+                    res = client.get_product_fees_estimate(reqs).payload
+                    break
+                except Exception as exc:
+                    if "QuotaExceeded" not in str(exc) or attempt == 5:
+                        break
+                    time.sleep(5 * (attempt + 1))
+            for r in res or []:
+                if r.get("Status") != "Success":
+                    continue
+                a, p = r["FeesEstimateIdentifier"]["SellerInputIdentifier"].split("|")
+                fees = {f["FeeType"]: f["FinalFee"]["Amount"] for f in r["FeesEstimate"]["FeeDetailList"]}
+                ref = fees.get("ReferralFee", 0) + fees.get("VariableClosingFee", 0) + fees.get("PerItemFee", 0)
+                cache[f"{mp}|{a}"] = {"price": float(p), "at": now, "referralPct": ref / float(p) if float(p) else 0.15,
+                                      "fbaUsd": usd(fees.get("FBAFees", 0), cur)}
+            time.sleep(2.1)
+    if need:
+        os.makedirs(os.path.dirname(FEE_CACHE), exist_ok=True)
+        json.dump(cache, open(FEE_CACHE, "w"))
+    return {tuple(k.split("|")): v for k, v in cache.items()}
+
+
+def product_ranking(start_date, end_date, marketplaces=None):
+    from GetSalesDepartmentReport import expand_marketplaces
+    token = pb_authenticate()
+    atomic = expand_marketplaces(marketplaces or [])
+    mapping = {r["asin"]: r for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,sku,ean,group")}
+    mp_filter = " || ".join(f'marketplace = "{m}"' for m in sorted(atomic) if m in ATOMIC)
+    if not mp_filter:
+        return {"byAsin": {}}
+    lines = pb_list_all(token, "order_items",
+                        f'purchase_date >= "{start_date}" && purchase_date <= "{end_date}" && ({mp_filter}) '
+                        f'&& order_status != "Cancelled"',
+                        fields="asin,marketplace,qty,net_amount,currency")
+    fees = fee_table(token, sorted({l["asin"] for l in lines if l.get("asin")}))
+    landed_by_ean = {}
+    agg = defaultdict(lambda: defaultdict(float))
+    for l in lines:
+        asin, mp = l.get("asin"), l["marketplace"]
+        if not asin or not l.get("qty"):
+            continue
+        fmk, _ads, vat = ATOMIC[mp]
+        sales = usd(l.get("net_amount") or 0, l.get("currency") or "USD")
+        f = fees.get((fmk, asin)) or {"referralPct": 0.15, "fbaUsd": 0.0}
+        a = agg[asin]
+        a["units"] += l["qty"]
+        a["sales"] += sales
+        a["netSales"] += sales / (1 + vat)
+        a["fees"] += f["referralPct"] * sales + f["fbaUsd"] * l["qty"]
+        if f is fees.get((fmk, asin)) and not f["fbaUsd"]:
+            a["missingFees"] = 1
+    countries = {ATOMIC[m][1] for m in atomic if m in ATOMIC}
+    best = {}
+    for r in pb_list_all(token, "ads_advertised_product_stats", f'date >= "{start_date}" && date <= "{end_date}"',
+                         fields="asin,campaign_id,ad_group_id,date,country_code,profile_id,spend,sales,currency_code"):
+        if r["country_code"].upper() not in countries:
+            continue
+        k = (r["campaign_id"], r["ad_group_id"], r["date"], r["asin"])
+        if k not in best or r["profile_id"] < best[k]["profile_id"]:
+            best[k] = r
+    for r in best.values():
+        a = agg[r["asin"]]
+        a["ads"] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
+        a["adSales"] += usd(r.get("sales") or 0, r.get("currency_code") or "USD")
+    out = {}
+    for asin, a in agg.items():
+        m = mapping.get(asin) or {}
+        ean = m.get("ean")
+        if ean not in landed_by_ean:
+            landed_by_ean[ean] = landed_cost(token, ean).get("landed") if ean else None
+        landed = landed_by_ean[ean]
+        cost = (landed or 0) * a["units"]
+        profit = a["netSales"] - a["fees"] - cost - a["ads"]
+        out[asin] = {
+            "units": a["units"], "sales": round(a["sales"], 2), "netSales": round(a["netSales"], 2),
+            "fees": round(a["fees"], 2), "productCost": round(cost, 2), "landed": landed,
+            "ads": round(a["ads"], 2), "adSales": round(a["adSales"], 2),
+            "profit": round(profit, 2) if landed else None,
+            "margin": round(profit / a["netSales"] * 100, 1) if landed and a["netSales"] else None,
+            "acos": round(a["ads"] / a["adSales"] * 100, 1) if a["adSales"] else None,
+            "tacos": round(a["ads"] / a["sales"] * 100, 1) if a["sales"] else None,
+        }
+    return {"start": start_date, "end": end_date, "byAsin": out}
+
+
+def GetProductRanking(request):
+    if getattr(request, "method", "GET") == "OPTIONS":
+        return "", 204, {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS",
+                         "Access-Control-Allow-Headers": "Content-Type"}
+    body = {}
+    try:
+        body = request.get_json(silent=True) or {}
+    except Exception:
+        pass
+    args = getattr(request, "args", {}) or {}
+    start = body.get("start_date") or args.get("start_date")
+    end = body.get("end_date") or args.get("end_date")
+    if not start or not end:
+        return _json({"error": "start_date and end_date required"}, 400)
+    try:
+        return _json(product_ranking(start, end, body.get("marketplaces")))
+    except Exception as exc:
+        return _json({"error": str(exc)}, 500)

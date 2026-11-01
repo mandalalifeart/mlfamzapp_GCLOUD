@@ -760,3 +760,8 @@ def GetProductCostPeriod(request):
 def GetProductCostScenarios(request):
     from ProductCost import GetProductCostScenarios as handler
     return handler(request)
+
+
+def GetProductRanking(request):
+    from ProductCost import GetProductRanking as handler
+    return handler(request)
