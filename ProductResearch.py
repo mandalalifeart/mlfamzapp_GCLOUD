@@ -239,14 +239,14 @@ IDEAS = [
     # Bundle components (2026-11-01, per the user "add wall hangers and door
     # knobs to research in bundle component part"): cheap add-ons to combine
     # with our covers/pareos - they start in the "Options for bundles" pool.
-    {"id": "wall-hooks", "pool": "option", "name": "Decorative wall hooks / coat & key hanger (ceramic / brass / wood)",
+    {"id": "wall-hooks", "pool": "addon", "name": "Decorative wall hooks / coat & key hanger (ceramic / brass / wood)",
      "keywords": ["decorative wall hooks for coats", "key holder for wall", "boho wall hooks", "ceramic wall hooks",
                   "mushroom wall hooks"],
      "match": ["hook"],
      "theme": ["boho", "bohemian", "ceramic", "brass", "wood", "vintage", "mushroom", "hand painted", "moroccan", "decorative"],
      "price": "$15-30", "bundle": "Hook set / key rack + matching knobs or an entry rug (entryway set)",
      "notes": "Bundle component (per the user: hangers for coats and keys, not macrame) - may need another supplier."},
-    {"id": "door-knobs", "pool": "option", "name": "Decorative door / drawer knobs (ceramic / brass, set of 6-8)",
+    {"id": "door-knobs", "pool": "addon", "name": "Decorative door / drawer knobs (ceramic / brass, set of 6-8)",
      "keywords": ["boho drawer knobs", "ceramic drawer knobs", "mushroom drawer knobs", "decorative cabinet knobs"],
      "match": ["knob"],
      "theme": ["boho", "bohemian", "ceramic", "brass", "mushroom", "hand painted", "vintage", "moroccan", "floral"],
@@ -458,7 +458,7 @@ def GetProductResearch(request):
         return _json({"error": str(exc)}, 500)
 
 
-POOLS = ("main", "option", "ready")
+POOLS = ("main", "option", "addon", "ready")
 
 
 def default_pool(idea):
