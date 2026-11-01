@@ -765,3 +765,8 @@ def GetProductCostScenarios(request):
 def GetProductRanking(request):
     from ProductCost import GetProductRanking as handler
     return handler(request)
+
+
+def UpdateFbaStorageFees(request):
+    from StorageFees import UpdateFbaStorageFees as handler
+    return handler(request)

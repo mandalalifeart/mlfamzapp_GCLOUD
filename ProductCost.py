@@ -22,6 +22,7 @@ Per marketplace (US/UK/DE/FR/IT/ES), at the current price (price_history):
   margin     = profit / net price
 
 Endpoint: GetProductCost?sku=<SKU> (or asin=) - local server, read only."""
+import calendar
 import csv
 import io
 import json
@@ -296,6 +297,32 @@ def product_cost(sku="", asin=""):
     p_spend, p_sales = product_tacos(token, asin, months)
     d_spend, d_sales = department_tacos(token, months)
     prices = current_prices(token, asin)
+    # Returns / FBA storage / AWD per unit sold, last 3 full months, per marketplace (USD).
+    from ProductExtraCosts import extra_costs
+    first, last = min(months), max(months)
+    x_start = f"{first[0]:04d}-{first[1]:02d}-01"
+    x_end = f"{last[0]:04d}-{last[1]:02d}-{calendar.monthrange(*last)[1]:02d}"
+    fees_now = {}
+    for mp_, tcode_, _a, _v, cur_, cred_ in MARKETS:
+        pr_ = prices.get(mp_)
+        if pr_:
+            try:
+                f_ = amazon_fees(mp_, cred_, asin, pr_["price"], cur_)
+                fees_now[tcode_] = {"referralPct": f_["referral"] / pr_["price"], "fbaUsd": usd(f_["fba"], cur_)}
+            except Exception:
+                pass
+    to_traffic = {"usa": "us", "mex": "mx"}
+    extra = extra_costs(token, x_start, x_end, set(ATOMIC),
+                        lambda mp_, _a: fees_now.get(to_traffic.get(mp_, mp_)) or fees_now.get("de") or {"referralPct": 0.15, "fbaUsd": 0},
+                        lambda _a: cost.get("landed"), usd, lambda mp_: ATOMIC.get(mp_, (None, None, 0.2))[2], by_mp=True)
+    extra_mp = defaultdict(lambda: defaultdict(float))
+    for (a, mp_), x in extra.items():
+        if a == asin:
+            for k, v in x.items():
+                extra_mp[to_traffic.get(mp_, mp_)][k] += v
+    units_mp = defaultdict(float)
+    for r in pb_list_all(token, "asin_traffic_monthly", f'asin = "{asin}" && {_month_filter(months)}', fields="marketplace,units"):
+        units_mp[r["marketplace"]] += r.get("units") or 0
     markets = []
     for mp, tcode, acode, vat, cur, cred in MARKETS:
         pr = prices.get(mp)
@@ -317,9 +344,14 @@ def product_cost(sku="", asin=""):
                              "pct": round(ps / psales * 100, 1) if psales else None}
         m["deptTacos"] = {"spend": round(ds, 2), "sales": round(dsales, 2),
                           "pct": round(ds / dsales * 100, 1) if dsales else None}
+        ex, u = extra_mp.get(tcode, {}), units_mp.get(tcode, 0)
+        per = lambda k: round(ex.get(k, 0) / u * fx, 2) if u else 0.0  # noqa: E731
+        m["returnsPerUnit"], m["storagePerUnit"], m["awdPerUnit"] = per("returnsCost"), per("storage"), per("awd")
+        m["returnRate"] = round(ex.get("returnedUnits", 0) / u * 100, 1) if u else None
+        m["extraPerUnit"] = round(m["returnsPerUnit"] + m["storagePerUnit"] + m["awdPerUnit"], 2)
         base = None
         if m["landed"] is not None and "referral" in m:
-            base = m["netPrice"] - m["referral"] - m["fba"] - m["landed"]
+            base = m["netPrice"] - m["referral"] - m["fba"] - m["landed"] - m["extraPerUnit"]
             m["profitBeforeAds"] = round(base, 2)
         for key in ("productTacos", "deptTacos"):
             pct = m[key]["pct"]
@@ -431,29 +463,51 @@ def period_totals(sku="", asin="", period="last_3m"):
             rows[mp]["ads"] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
     d_spend, d_sales = department_tacos(token, months)
 
+    # Returns / FBA storage / AWD per marketplace (ProductExtraCosts).
+    from ProductExtraCosts import extra_costs
+    first, last = min(months), max(months)
+    start = f"{first[0]:04d}-{first[1]:02d}-01"
+    end = min(f"{last[0]:04d}-{last[1]:02d}-{calendar.monthrange(*last)[1]:02d}", date.today().isoformat())
+    to_traffic = {"usa": "us", "mex": "mx"}
+
+    def fee_lookup(mp, _asin):
+        t = to_traffic.get(mp, mp)
+        return fees.get(t) or fees.get((FEE_PROXY.get(t) or "").lower()) or {"referralPct": 0.15, "fbaUsd": 0}
+    extra = extra_costs(token, start, end, set(ATOMIC), fee_lookup, lambda _a: landed, usd,
+                        lambda mp: ATOMIC.get(mp, (None, None, 0.2))[2], by_mp=True)
+    for (a, mp), x in extra.items():
+        if a == asin:
+            r = rows[to_traffic.get(mp, mp)]
+            for k in ("returnedUnits", "returnsCost", "storage", "awd"):
+                r[k] += x.get(k, 0)
+
     out, tot = [], defaultdict(float)
     for mp, x in rows.items():
-        if not (x["units"] or x["ads"]):
+        if not (x["units"] or x["ads"] or x["storage"] or x["returnsCost"]):
             continue
         f = fees.get(mp) or fees.get((FEE_PROXY.get(mp) or "").lower()) or {"referralPct": 0.15, "fbaUsd": 0}
         v = vat.get(mp, 0.2)
         net = x["sales"] / (1 + v)
         fee = f["referralPct"] * x["sales"] + f["fbaUsd"] * x["units"]
         cost = (landed or 0) * x["units"]
-        profit = net - fee - cost - x["ads"]
+        extras = x["returnsCost"] + x["storage"] + x["awd"]
+        profit = net - fee - cost - x["ads"] - extras
         ds, dsl = d_spend.get((ADS_CODE.get(mp, ""), dept), 0), d_sales.get((mp, dept), 0)
         dept_tacos = ds / dsl if dsl else None
-        dept_profit = net - fee - cost - dept_tacos * x["sales"] if dept_tacos is not None else None
+        dept_profit = net - fee - cost - extras - dept_tacos * x["sales"] if dept_tacos is not None else None
         line = {"mp": mp.upper(), "units": x["units"], "refunded": x["refunded"], "sales": round(x["sales"], 2),
                 "vat": round(x["sales"] - net, 2), "netSales": round(net, 2), "fees": round(fee, 2),
                 "productCost": round(cost, 2), "ads": round(x["ads"], 2),
+                "returnedUnits": x["returnedUnits"], "returns": round(x["returnsCost"], 2),
+                "storage": round(x["storage"], 2), "awd": round(x["awd"], 2),
                 "tacos": round(x["ads"] / x["sales"] * 100, 1) if x["sales"] else None,
                 "profit": round(profit, 2), "margin": round(profit / net * 100, 1) if net else None,
                 "profitPerUnit": round(profit / x["units"], 2) if x["units"] else None,
                 "deptTacos": round(dept_tacos * 100, 1) if dept_tacos is not None else None,
                 "deptProfit": round(dept_profit, 2) if dept_profit is not None else None}
         out.append(line)
-        for k in ("units", "refunded", "sales", "vat", "netSales", "fees", "productCost", "ads", "profit"):
+        for k in ("units", "refunded", "returnedUnits", "sales", "vat", "netSales", "fees", "productCost", "ads",
+                  "returns", "storage", "awd", "profit"):
             tot[k] += line[k]
         tot["deptProfit"] += line["deptProfit"] if line["deptProfit"] is not None else line["profit"]
     out.sort(key=lambda r: -r["sales"])
@@ -610,6 +664,17 @@ def fee_table(token, asins):
     return {tuple(k.split("|")): v for k, v in cache.items()}
 
 
+def extra_costs_for(token, start, end, atomic, fees, landed_of, by_mp=False):
+    """Returns / FBA storage / AWD per ASIN (ProductExtraCosts) with this module's fee table."""
+    from ProductExtraCosts import extra_costs
+
+    def fee_lookup(mp, asin):
+        fmk = ATOMIC.get(mp, ("DE",))[0]
+        return fees.get((fmk, asin)) or {"referralPct": 0.15, "fbaUsd": 0.0}
+    return extra_costs(token, start, end, set(atomic), fee_lookup, landed_of, usd,
+                       lambda mp: ATOMIC.get(mp, (None, None, 0.2))[2], by_mp=by_mp)
+
+
 def product_ranking(start_date, end_date, marketplaces=None):
     from GetSalesDepartmentReport import expand_marketplaces
     token = pb_authenticate()
@@ -652,19 +717,27 @@ def product_ranking(start_date, end_date, marketplaces=None):
         a = agg[r["asin"]]
         a["ads"] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
         a["adSales"] += usd(r.get("sales") or 0, r.get("currency_code") or "USD")
-    out = {}
-    for asin, a in agg.items():
-        m = mapping.get(asin) or {}
-        ean = m.get("ean")
+    def landed_of(asin):
+        ean = (mapping.get(asin) or {}).get("ean")
         if ean not in landed_by_ean:
             landed_by_ean[ean] = landed_cost(token, ean).get("landed") if ean else None
-        landed = landed_by_ean[ean]
+        return landed_by_ean[ean]
+
+    extra = extra_costs_for(token, start_date, end_date, atomic, fees, landed_of)
+    out = {}
+    for asin, a in agg.items():
+        landed = landed_of(asin)
         cost = (landed or 0) * a["units"]
-        profit = a["netSales"] - a["fees"] - cost - a["ads"]
+        x = extra.get(asin, {})
+        returns, storage, awd = x.get("returnsCost", 0), x.get("storage", 0), x.get("awd", 0)
+        profit = a["netSales"] - a["fees"] - cost - a["ads"] - returns - storage - awd
         out[asin] = {
             "units": a["units"], "sales": round(a["sales"], 2), "netSales": round(a["netSales"], 2),
             "fees": round(a["fees"], 2), "productCost": round(cost, 2), "landed": landed,
             "ads": round(a["ads"], 2), "adSales": round(a["adSales"], 2),
+            "returnedUnits": x.get("returnedUnits", 0), "returns": round(returns, 2),
+            "returnsPct": round(x.get("returnedUnits", 0) / a["units"] * 100, 1) if a["units"] else None,
+            "storage": round(storage, 2), "awd": round(awd, 2),
             "profit": round(profit, 2) if landed else None,
             "margin": round(profit / a["netSales"] * 100, 1) if landed and a["netSales"] else None,
             "acos": round(a["ads"] / a["adSales"] * 100, 1) if a["adSales"] else None,

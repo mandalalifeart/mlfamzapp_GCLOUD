@@ -187,6 +187,7 @@ ROUTED_FUNCTIONS = [
     "GetProductCostPeriod",
     "GetProductCostScenarios",
     "GetProductRanking",
+    "UpdateFbaStorageFees",
     "SetProductResearchStatus",
     "GetAsinAnalyticsList",
     "GetAsinAnalytics",
