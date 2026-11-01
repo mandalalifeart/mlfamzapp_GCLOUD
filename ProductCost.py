@@ -171,7 +171,7 @@ def fx_to(cur):
     try:
         return _cached(f"fx|{cur}", 12, get)
     except Exception:
-        return {"EUR": 0.92, "GBP": 0.78}.get(cur, 1.0)
+        return {"EUR": 0.92, "GBP": 0.78, "CAD": 1.38, "MXN": 18.5, "SEK": 10.6, "PLN": 3.95}.get(cur, 1.0)
 
 
 def amazon_fees(mp, cred, asin, price, cur):
@@ -316,6 +316,135 @@ def GetProductCost(request):
     args = getattr(request, "args", {}) or {}
     try:
         res = product_cost((args.get("sku") or "").strip(), (args.get("asin") or "").strip())
+        return _json(res, 404 if "error" in res else 200)
+    except Exception as exc:
+        return _json({"error": str(exc)}, 500)
+
+
+# ---------- totals per period (per the user 2026-11-01, formula OK'd) ----------
+# Sales/units from asin_traffic_monthly (calendar months), everything in USD at
+# today's ECB rate. Fees = referral % x sales + FBA fee x units at today's
+# fee estimate (marketplaces without their own estimate borrow US for CA/MX and
+# DE for the other EU ones). Ads = the product's real SP+SD spend; the extra
+# "dept" profit uses the department TACOS of the same months instead.
+OTHER_VAT = {"nl": 0.21, "be": 0.21, "ie": 0.23, "se": 0.25, "pl": 0.23, "ca": 0.0, "mx": 0.16}
+FEE_PROXY = {"ca": "US", "mx": "US", "nl": "DE", "be": "DE", "ie": "DE", "se": "DE", "pl": "DE"}
+ADS_CODE = {"us": "US", "uk": "UK", "de": "DE", "fr": "FR", "it": "IT", "es": "ES", "nl": "NL", "be": "BE",
+            "se": "SE", "pl": "PL", "ie": "IE", "ca": "CA", "mx": "MX"}
+PERIODS = {"last_month": "Last month", "last_3m": "Last 3 months", "ytd": "This year",
+           "last_12m": "Last 12 months", "last_year": "Last year"}
+
+
+def period_months(period):
+    today = date.today()
+    if period == "last_month":
+        return last_full_months(1)
+    if period == "last_3m":
+        return last_full_months(3)
+    if period == "last_12m":
+        return last_full_months(12)
+    if period == "last_year":
+        return [(today.year - 1, m) for m in range(1, 13)]
+    return [(today.year, m) for m in range(1, today.month + 1)]  # ytd incl. this month so far
+
+
+def usd(amount, cur):
+    return amount / fx_to(cur) if amount else 0.0
+
+
+def fee_rates(token, asin):
+    """mp code (lower) -> {referralPct, fbaUsd} from today's fee estimate at the current price."""
+    prices = current_prices(token, asin)
+    out = {}
+    for mp, tcode, _a, _v, cur, cred in MARKETS:
+        pr = prices.get(mp)
+        if not pr:
+            continue
+        try:
+            f = amazon_fees(mp, cred, asin, pr["price"], cur)
+        except Exception:
+            continue
+        out[tcode] = {"referralPct": f["referral"] / pr["price"] if pr["price"] else 0.15,
+                      "fbaUsd": usd(f["fba"], cur)}
+    return out
+
+
+def period_totals(sku="", asin="", period="last_3m"):
+    token = pb_authenticate()
+    mapping = pb_list_all(token, "asin_group_mapping", f"sku = {json.dumps(sku)}" if sku else f"asin = {json.dumps(asin)}")
+    if not mapping:
+        return {"error": f"{sku or asin} not in asin_group_mapping"}
+    row = mapping[0]
+    asin = row["asin"]
+    dept = "pareo" if "PAREO" in (row.get("group") or "").upper() else "home"
+    landed = landed_cost(token, row.get("ean")).get("landed")
+    months = period_months(period)
+    fees = fee_rates(token, asin)
+    vat = {t: v for _m, t, _a, v, _c, _cr in MARKETS} | OTHER_VAT
+
+    rows = defaultdict(lambda: defaultdict(float))
+    for r in pb_list_all(token, "asin_traffic_monthly", f'asin = "{asin}" && {_month_filter(months)}',
+                         fields="marketplace,units,sales,units_refunded,currency"):
+        x = rows[r["marketplace"]]
+        x["units"] += r.get("units") or 0
+        x["refunded"] += r.get("units_refunded") or 0
+        x["sales"] += usd(r.get("sales") or 0, r.get("currency") or "USD")
+        x["salesLocal"] += r.get("sales") or 0
+    best = {}
+    for r in pb_list_all(token, "ads_advertised_product_stats", f'asin = "{asin}" && {_month_filter(months)}',
+                         fields="campaign_id,ad_group_id,date,country_code,profile_id,spend,currency_code"):
+        k = (r["campaign_id"], r["ad_group_id"], r["date"])
+        if k not in best or r["profile_id"] < best[k]["profile_id"]:
+            best[k] = r
+    code_to_mp = {v: k for k, v in ADS_CODE.items()}
+    for r in best.values():
+        mp = code_to_mp.get(r["country_code"].upper())
+        if mp:
+            rows[mp]["ads"] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
+    d_spend, d_sales = department_tacos(token, months)
+
+    out, tot = [], defaultdict(float)
+    for mp, x in rows.items():
+        if not (x["units"] or x["ads"]):
+            continue
+        f = fees.get(mp) or fees.get((FEE_PROXY.get(mp) or "").lower()) or {"referralPct": 0.15, "fbaUsd": 0}
+        v = vat.get(mp, 0.2)
+        net = x["sales"] / (1 + v)
+        fee = f["referralPct"] * x["sales"] + f["fbaUsd"] * x["units"]
+        cost = (landed or 0) * x["units"]
+        profit = net - fee - cost - x["ads"]
+        ds, dsl = d_spend.get((ADS_CODE.get(mp, ""), dept), 0), d_sales.get((mp, dept), 0)
+        dept_tacos = ds / dsl if dsl else None
+        dept_profit = net - fee - cost - dept_tacos * x["sales"] if dept_tacos is not None else None
+        line = {"mp": mp.upper(), "units": x["units"], "refunded": x["refunded"], "sales": round(x["sales"], 2),
+                "vat": round(x["sales"] - net, 2), "netSales": round(net, 2), "fees": round(fee, 2),
+                "productCost": round(cost, 2), "ads": round(x["ads"], 2),
+                "tacos": round(x["ads"] / x["sales"] * 100, 1) if x["sales"] else None,
+                "profit": round(profit, 2), "margin": round(profit / net * 100, 1) if net else None,
+                "profitPerUnit": round(profit / x["units"], 2) if x["units"] else None,
+                "deptTacos": round(dept_tacos * 100, 1) if dept_tacos is not None else None,
+                "deptProfit": round(dept_profit, 2) if dept_profit is not None else None}
+        out.append(line)
+        for k in ("units", "refunded", "sales", "vat", "netSales", "fees", "productCost", "ads", "profit"):
+            tot[k] += line[k]
+        tot["deptProfit"] += line["deptProfit"] if line["deptProfit"] is not None else line["profit"]
+    out.sort(key=lambda r: -r["sales"])
+    total = {k: round(v, 2) for k, v in tot.items()}
+    if out:
+        total.update(mp="TOTAL", tacos=round(tot["ads"] / tot["sales"] * 100, 1) if tot["sales"] else None,
+                     margin=round(tot["profit"] / tot["netSales"] * 100, 1) if tot["netSales"] else None,
+                     profitPerUnit=round(tot["profit"] / tot["units"], 2) if tot["units"] else None)
+    return {"sku": row["sku"], "asin": asin, "period": period, "periods": PERIODS, "landed": landed,
+            "months": [f"{y}-{m:02d}" for y, m in sorted(months)], "rows": out, "total": total if out else None}
+
+
+def GetProductCostPeriod(request):
+    args = getattr(request, "args", {}) or {}
+    try:
+        period = args.get("period") or "last_3m"
+        if period not in PERIODS:
+            return _json({"error": f"period must be one of {list(PERIODS)}"}, 400)
+        res = period_totals((args.get("sku") or "").strip(), (args.get("asin") or "").strip(), period)
         return _json(res, 404 if "error" in res else 200)
     except Exception as exc:
         return _json({"error": str(exc)}, 500)

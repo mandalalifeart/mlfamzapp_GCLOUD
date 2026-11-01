@@ -184,6 +184,7 @@ ROUTED_FUNCTIONS = [
     "UpdateBsrDaily",
     "GetBsrHistory",
     "GetProductCost",
+    "GetProductCostPeriod",
     "SetProductResearchStatus",
     "GetAsinAnalyticsList",
     "GetAsinAnalytics",

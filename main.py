@@ -750,3 +750,8 @@ def GetBsrHistory(request):
 def GetProductCost(request):
     from ProductCost import GetProductCost as handler
     return handler(request)
+
+
+def GetProductCostPeriod(request):
+    from ProductCost import GetProductCostPeriod as handler
+    return handler(request)
