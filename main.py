@@ -745,3 +745,8 @@ def UpdateBsrDaily(request):
 def GetBsrHistory(request):
     from BsrTracking import GetBsrHistory as _impl
     return _impl(request)
+
+
+def GetProductCost(request):
+    from ProductCost import GetProductCost as handler
+    return handler(request)
