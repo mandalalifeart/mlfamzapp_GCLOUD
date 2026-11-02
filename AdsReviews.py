@@ -59,9 +59,11 @@ CHECKLISTS = {
         "Lost exposure: good keywords that lost impressions -> raise bid",
         "Off-Amazon: any 🔴 campaign -> Minimize spend",
         "Stock: no ads on products with low FBA stock (stock guard + low-inventory warning)",
-        "Every 2nd week: search-term harvest -> add exact keywords / negatives",
+        "Keyword harvest (every week) + bid raises (every 2nd week): tick the proposals on /checks",
         "New or changed campaigns are on the watch list",
         "Every 2nd week: products losing money (💸 in the review) -> 🔴 approve ad pauses, 🟠 decide price / coupon",
+        "▶️ Coming back: tick the paused product ads / bid cuts that are due",
+        "Listing health: Buy Box lost on products with stock -> to-do list",
     ],
     "monthly": [
         "Last month per marketplace: spend, ad sales, ACOS, TACOS vs the month before and last year",
@@ -74,7 +76,9 @@ CHECKLISTS = {
         "Competitors and prices: monthly competitor price check, coupons and promotions ending",
         "New products without ads + products with stock but no campaign",
         "USA home-decor ads plan: next step",
-        "Returns check (↩️ on the 3rd): 🔴 products with too many returns -> fix listing (cover only / size / colour photos) or check the batch with the supplier",
+        "Returns check (↩️ on the 2nd): 🔴 products with too many returns -> fix listing (cover only / size / colour photos) or check the batch with the supplier",
+        "Monthly profit by order date (EU per country) + coupons & promotions: margin per marketplace, discounts vs last month",
+        "Automatic ads review on /checks: tick bid raises, keyword harvest, losing products, keyword clean-up",
     ],
 }
 CHECKLIST_KEY = "ads_checklists"
