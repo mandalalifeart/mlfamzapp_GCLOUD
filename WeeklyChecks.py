@@ -219,6 +219,26 @@ def offers_batch(mp, asins):
     return out
 
 
+def fba_fulfillable(mp):
+    """{asin: fulfillable FBA units} live from the FBA Inventory API (Listings API has no FBA quantity)."""
+    from sp_api.api import Inventories
+    cred, _ = creds(mp)
+    m = getattr(Marketplaces, mp)
+    api = Inventories(credentials=cred, marketplace=m)
+    out, token = defaultdict(int), None
+    while True:
+        kw = {"details": True, "marketplaceIds": [m.marketplace_id]}
+        if token:
+            kw["nextToken"] = token
+        resp = api.get_inventory_summary_marketplace(**kw)
+        for x in resp.payload.get("inventorySummaries", []):
+            out[x.get("asin")] += (x.get("inventoryDetails") or {}).get("fulfillableQuantity") or 0
+        token = getattr(resp, "next_token", None) or (resp.pagination or {}).get("nextToken")
+        if not token:
+            return out
+        time.sleep(0.6)
+
+
 def listing_health_text(pb):
     stats = {r["sku"]: r for r in pb_list_all(pb, "sku_statistics", 'sku != ""')}
     out = ["🛒 Listing health – stock vs buyable, Buy Box, other sellers"]
@@ -226,6 +246,13 @@ def listing_health_text(pb):
     for mp, field in STOCK_FIELD.items():
         lst = listings(mp, "summaries,offers")
         _, my_id = creds(mp)
+        # live sellable FBA units per ASIN (per the user 2026-11-02: no Buy Box
+        # alert when we have no stock there; DE = the Pan-EU pool)
+        try:
+            live_qty = fba_fulfillable(mp)
+        except Exception as exc:
+            print("fba_fulfillable failed", mp, exc)
+            live_qty = {}
         not_buyable, with_stock = [], {}
         for sku, l in lst.items():
             stock = (stats.get(sku) or {}).get(field) or 0
@@ -243,7 +270,7 @@ def listing_health_text(pb):
             offs = body.get("Offers") or []
             mine = [o for o in offs if o.get("SellerId") == my_id]
             winner = next((o for o in offs if o.get("IsBuyBoxWinner")), None)
-            if mine and not (winner and winner.get("SellerId") == my_id):
+            if mine and not (winner and winner.get("SellerId") == my_id) and live_qty.get(asin, 1) > 0:
                 lost.append(f"{sku}: Buy Box {'with another seller' if winner else 'not shown (suppressed?)'}"
                             f" – our price {sym(mp)}{(mine[0].get('ListingPrice') or {}).get('Amount')}")
             foreign = [o for o in offs if o.get("SellerId") != my_id]
