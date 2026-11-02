@@ -37,11 +37,13 @@ def flags_of(text):
     return {m: n for m in MARKERS if (n := sum(1 for ln in lines if ln.startswith(m)))}
 
 
-def save_report(kind, period, job, label, text, token=None, proposals=None):
+def save_report(kind, period, job, label, text, token=None, proposals=None, tables=None):
     """proposals: [{id, section, title, detail, action?, status}] - on a re-run,
     a proposal with the same title keeps the status the user already gave it."""
     token = token or pb_authenticate()
-    old = pb_list_all(token, COLLECTION, f'kind = "{kind}" && period = "{period}" && job = "{job}"', fields="id,proposals")
+    old = pb_list_all(token, COLLECTION, f'kind = "{kind}" && period = "{period}" && job = "{job}"', fields="id,proposals,tables")
+    if tables is None and old and old[0].get("tables"):
+        tables = old[0]["tables"]
     if proposals is not None:
         before = {p["title"]: p for r in old for p in (r.get("proposals") or [])}
         for p in proposals:
@@ -54,7 +56,7 @@ def save_report(kind, period, job, label, text, token=None, proposals=None):
     ops.append({"method": "POST", "url": f"/api/collections/{COLLECTION}/records",
                 "body": {"kind": kind, "period": period, "job": job, "label": label, "text": text,
                          "flags": flags_of(text), "ran_at": datetime.now().isoformat(timespec="seconds"),
-                         "proposals": proposals or []}})
+                         "proposals": proposals or [], "tables": tables or []}})
     pb_batch(token, ops)
 
 
@@ -77,13 +79,13 @@ def GetCheckReports(request):
         kind = args.get("kind") or "weekly"
         period = args.get("period") or (periods[kind][0] if periods.get(kind) else "")
         reports = pb_list_all(token, COLLECTION, f'kind = "{kind}" && period = "{period}"',
-                              fields="id,job,label,text,flags,ran_at,proposals") if period else []
+                              fields="id,job,label,text,flags,ran_at,proposals,tables") if period else []
         for r in reports:  # the page doesn't need the executable payloads
             for p in r.get("proposals") or []:
                 p["hasAction"] = bool(p.pop("action", None))
         from MondayDigest import LABELS
         order = {name: i for i, (name, _l) in enumerate(LABELS)}
-        order.update({j: i for i, j in enumerate(list(MANUAL_MONTHLY) + list(MONTHLY_JOBS))})
+        order.update({j: i for i, j in enumerate(dict.fromkeys(["monthly-profit"] + list(MANUAL_MONTHLY) + list(MONTHLY_JOBS)))})
         reports.sort(key=lambda r: (order.get(r["job"], 99), r["label"]))
         return json.dumps({"kind": kind, "period": period, "periods": periods, "reports": reports}), 200, \
             {"Access-Control-Allow-Origin": "*", "Content-Type": "application/json"}

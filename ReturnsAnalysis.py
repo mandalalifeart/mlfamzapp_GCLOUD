@@ -214,7 +214,7 @@ def _translate(comments):
         return comments
 
 
-def monthly_text(today=None):
+def monthly_text(today=None, with_tables=False):
     today = today or date.today()
     end = today.replace(day=1) - timedelta(days=1)
     start = end - timedelta(days=89)
@@ -272,7 +272,20 @@ def monthly_text(today=None):
     for r in orange[:10]:
         lines.append(f"🟠 {r['region']} {r['sku']}: {r['prevRate']}% → {r['rate']}% ({r['returned']:.0f} returns, top: {r['topTheme']})")
     lines.append("\nDetails: https://mlfamzappfire.web.app/returns")
-    return "\n".join(lines)
+    if not with_tables:
+        return "\n".join(lines)
+    tables = [
+        {"title": "Return rate per region (90 days)", "columns": ["Region", "Returned", "Sold", "Rate", "Goal"],
+         "rows": [[reg, round(o["returned"]), round(o["sold"]), f"{o['rate']}%", f"{GOAL_PCT}%"] for reg, o in cur["overall"].items()]},
+        {"title": "Why (themes, units)", "columns": ["Theme", "Last 90 days", "90 days before"],
+         "rows": [[t, round(n), round(prev_themes.get(t, 0))] for t, n in themes.most_common()]},
+        {"title": "Products with too many / rising returns", "columns": ["", "Region", "Product", "Type", "Returned", "Sold", "Rate", "Type rate", "Top reasons"],
+         "rows": [["🔴", r["region"], r["sku"], r["type"], round(r["returned"]), round(r["sold"]), f"{r['rate']}%", f"{r['typeRate']}%",
+                   ", ".join(f"{t} {n:.0f}" for t, n in Counter(r["themes"]).most_common(3))] for r in red] +
+                 [["🟠", r["region"], r["sku"], r["type"], round(r["returned"]), round(r["sold"]), f"{r['prevRate']}% → {r['rate']}%",
+                   f"{r['typeRate']}%", r["topTheme"]] for r in orange]},
+    ]
+    return "\n".join(lines), tables
 
 
 def _cors(body, status=200):
@@ -307,9 +320,15 @@ def SendReturnsMonthlyCheck(request):
     from NotificationRouting import notify
     args = getattr(request, "args", {}) or {}
     try:
-        text = monthly_text(date.fromisoformat(args["today"]) if args.get("today") else None)
+        today = date.fromisoformat(args["today"]) if args.get("today") else date.today()
+        text, tables = monthly_text(today, with_tables=True)
         if str(args.get("dry")) != "1":
-            notify("returns-monthly-check", "amzbot", text)
+            if str(args.get("quiet")) != "1":
+                notify("returns-monthly-check", "amzbot", text)
+            from CheckReports import MONTHLY_JOBS, save_report
+            last = today.replace(day=1) - timedelta(days=1)
+            save_report("monthly", f"{last.year:04d}-{last.month:02d}", "returns-monthly-check",
+                        MONTHLY_JOBS["returns-monthly-check"], text, tables=tables)
         return _cors({"text": text})
     except Exception as exc:
         notify("returns-monthly-check", "amzbot", f"🚨 Returns check failed: {exc}", is_error=True)

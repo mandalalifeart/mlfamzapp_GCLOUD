@@ -78,6 +78,7 @@ def tacos_block(pb, y, m):
         t[1] += r.get("ppc_spend") or 0
         t[2] += r.get("ppc_sales") or 0
     lines = [f"1) Per marketplace - {y}-{m:02d} (vs {months[1][0]}-{months[1][1]:02d} | {y - 1}-{m:02d}), own currency"]
+    trows = []
     for mp, cc in MARKETS:
         sales, spend, adsales = tot.get((mp, (y, m)), (0, 0, 0))
         if not (sales or spend):
@@ -87,9 +88,12 @@ def tacos_block(pb, y, m):
         tac = _pct(spend, sales)
         target = 20 if cc in ("US", "DE") else 25
         mark = "🔴" if tac and tac > target * 1.25 else "🟠" if tac and tac > target else "🟢"
+        trows.append([f"{mark} {cc}", round(sales), round(spend), _f(_pct(spend, adsales)), _f(tac), _f(_pct(p[1], p[0])),
+                      _f(_pct(ly[1], ly[0])), f"{target}%"])
         lines.append(f"{mark} {cc}: sales {sales:,.0f}, ads {spend:,.0f}, ACOS {_f(_pct(spend, adsales))}, TACOS {_f(tac)} "
                      f"(before {_f(_pct(p[1], p[0]))} | last year {_f(_pct(ly[1], ly[0]))}; target {target}%)")
-    return lines
+    return lines, {"title": f"Per marketplace {y}-{m:02d} (own currency)", "rows": trows,
+                   "columns": ["Marketplace", "Sales", "Ad spend", "ACOS", "TACOS", "TACOS month before", "TACOS last year", "Target"]}
 
 
 def segment_block(pb, y, m, rows, camp_port):
@@ -107,6 +111,7 @@ def segment_block(pb, y, m, rows, camp_port):
         if g and not g.startswith("IGNORE") and r["marketplace"] in TRAFFIC_MP:
             sales[(TRAFFIC_MP[r["marketplace"]], "pareo" if "PAREO" in g else "home")] += r.get("sales") or 0
     lines = ["2) Home decor vs pareo (ACOS / TACOS)"]
+    trows = []
     for _mp, cc in MARKETS:
         parts = []
         for seg, name in (("home", "home decor"), ("pareo", "pareo")):
@@ -116,9 +121,10 @@ def segment_block(pb, y, m, rows, camp_port):
             tac = _pct(spend, sales.get((cc, seg), 0))
             mark = "🔴" if tac and tac > 35 else ""
             parts.append(f"{name} {spend:,.0f}: {_f(_pct(spend, adsales))} / {_f(tac)}{mark}")
+            trows.append([cc, name, round(spend), _f(_pct(spend, adsales)), (_f(tac) + (" 🔴" if mark else ""))])
         if parts:
             lines.append(f"• {cc}: " + " | ".join(parts))
-    return lines
+    return lines, {"title": "Home decor vs pareo", "columns": ["Marketplace", "Segment", "Ad spend", "ACOS", "TACOS"], "rows": trows}
 
 
 def adtype_block(rows):
@@ -136,7 +142,16 @@ def adtype_block(rows):
                  for k in ("SP", "SB", "SB video", "SD") if t[(cc, k)][0] >= 1]
         if parts:
             lines.append(f"• {cc}: " + " · ".join(parts))
-    return lines
+    trows = []
+    for _mp, cc in MARKETS:
+        row = [cc]
+        for k in ("SP", "SB", "SB video", "SD"):
+            sp, sa = t[(cc, k)]
+            row += [round(sp) if sp >= 1 else "", (_f(_pct(sp, sa)) + (" 🔴" if (_pct(sp, sa) or 999) > 60 else "")) if sp >= 1 else ""]
+        if any(row[1:]):
+            trows.append(row)
+    return lines, {"title": "Ad types (spend / ACOS)", "rows": trows,
+                   "columns": ["Marketplace", "SP spend", "SP ACOS", "SB spend", "SB ACOS", "SB video spend", "SB video ACOS", "SD spend", "SD ACOS"]}
 
 
 def keyword_cleanup(pb, end, camps):
@@ -236,9 +251,10 @@ def build(today=None):
     rows = _camp_stats(pb, start, end)
 
     lines = [f"📊 MONTHLY ADS REVIEW - {period}", "(last ~7 days can still gain ad sales - 7-day attribution)", ""]
-    lines += tacos_block(pb, y, m) + [""]
-    lines += segment_block(pb, y, m, rows, camp_port) + [""]
-    lines += adtype_block(rows) + [""]
+    tables = []
+    for blk in (tacos_block(pb, y, m), segment_block(pb, y, m, rows, camp_port), adtype_block(rows)):
+        lines += blk[0] + [""]
+        tables.append(blk[1])
 
     proposals = []
     from ProductAdPauses import profit_section
@@ -251,6 +267,12 @@ def build(today=None):
                      f"(TACOS {r['tacos']}%) → ${r['profit']:.0f}" + (f" - {why}" if why else ""))
     for r in p_data["orange"][:15]:
         lines.append(f"🟠 {r['mp'].upper()} {r['sku']}: {r['units']:.0f} units at ${r['price']:.2f} → ${r['before']:.0f} before ads")
+    tables.append({"title": "Products losing money (USD)", "columns": ["", "MP", "Product", "Units", "Price", "Ads", "TACOS", "Profit", "Before ads", "Note"],
+                   "rows": [["🔴", r["mp"].upper(), r["sku"], round(r["units"]), round(r["price"], 2), round(r["ads"]), r["tacos"],
+                             round(r["profit"]), round(r["before"]), "; ".join(f"{n} {w}" for w, n in (r.get("notes") or {}).items())]
+                            for r in p_data["red"]] +
+                           [["🟠", r["mp"].upper(), r["sku"], round(r["units"]), round(r["price"], 2), round(r["ads"]), r["tacos"],
+                             round(r["profit"]), round(r["before"]), "loses money before ads"] for r in p_data["orange"]]})
     lines.append("")
     for r in p_data["red"]:
         if r.get("pauseItems"):
@@ -274,7 +296,7 @@ def build(today=None):
     for i, p in enumerate(proposals, 1):
         p.update(id=i, status="proposed")
     lines.append(f"{len(proposals)} proposals - approve them on the page: {PAGE.format(period)}")
-    return period, "\n".join(lines), proposals
+    return period, "\n".join(lines), proposals, tables
 
 
 def SendMonthlyAdsReview(request):
@@ -282,10 +304,13 @@ def SendMonthlyAdsReview(request):
     from NotificationRouting import notify
     args = getattr(request, "args", {}) or {}
     try:
-        period, text, proposals = build(date.fromisoformat(args["today"]) if args.get("today") else None)
+        period, text, proposals, tables = build(date.fromisoformat(args["today"]) if args.get("today") else None)
         if str(args.get("dry")) == "1":
             return json.dumps({"text": text, "proposals": proposals}), 200, {"Content-Type": "application/json"}
-        save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals)
+        if str(args.get("quiet")) == "1":  # rebuild the page entry without a Telegram message
+            save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals, tables=tables)
+            return json.dumps({"period": period, "proposals": len(proposals)}), 200, {"Content-Type": "application/json"}
+        save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals, tables=tables)
         head = "\n".join(text.splitlines()[:40])
         notify("monthly-ads-review", "amzbot", head + f"\n\n✅ {len(proposals)} proposals to approve: {PAGE.format(period)}")
         return json.dumps({"period": period, "proposals": len(proposals)}), 200, {"Content-Type": "application/json"}

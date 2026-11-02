@@ -93,7 +93,7 @@ def profit_block(rows):
     return t
 
 
-def monthly_profit_text(pb, y, m):
+def monthly_profit_text(pb, y, m, with_tables=False):
     periods = [(y, m), _ym_minus(y, m, 1), (y - 1, m)]
     data = {}
     for (yy, mm) in periods:
@@ -112,6 +112,7 @@ def monthly_profit_text(pb, y, m):
     rates = usd_rates()
     out = [f"💰 Profit per marketplace – {y}-{m:02d} (before product cost; Amazon payouts by settlement month, VAT/sales tax excluded)"]
     tot = defaultdict(float)
+    trows = []
     for name, (mps, cur) in REGIONS.items():
         t = data[(name, y, m)]
         if not t["sales"]:
@@ -124,6 +125,9 @@ def monthly_profit_text(pb, y, m):
         for k, v in (("sales", t["sales"]), ("net", net), ("ads", ads), ("fees", t["fees"]), ("refunds", t["refunds"])):
             tot[k] += v * rate
         margin = 100 * net / t["sales"] if t["sales"] else 0
+        trows.append([name, cur, round(t["sales"]), round(t["refunds"]), round(t["fees"]),
+                      f"{100 * -t['fees'] / t['sales']:.0f}%" if t["sales"] else "", round(ads), round(t["other"]),
+                      round(net), f"{margin:.0f}%", round(t["import"]) if t["import"] else "", round(prev["sales"]), round(ly["sales"])])
         out.append(f"\n{name} ({cur})\n"
                    f"  sales {t['sales']:,.0f} · refunds {t['refunds']:,.0f} · Amazon fees {t['fees']:,.0f} · ads {ads:,.0f}"
                    f"{f' · other {t['other']:,.0f}' if abs(t['other']) >= 1 else ''}"
@@ -136,14 +140,29 @@ def monthly_profit_text(pb, y, m):
                    f" · ads ${tot['ads']:,.0f} → net ${tot['net']:,.0f} ({100 * tot['net'] / tot['sales']:.0f}%)")
     out.append("Product cost (Malani/Acacia) and shipping to Amazon are not included yet. Sales are by settlement period "
                "(the last settlement of the month is often still open), so they're lower than the month's orders.")
-    return "\n".join(out)
+    if not with_tables:
+        return "\n".join(out)
+    if tot["sales"]:
+        trows.append(["ALL (USD)", "USD", round(tot["sales"]), round(tot["refunds"]), round(tot["fees"]),
+                      f"{100 * -tot['fees'] / tot['sales']:.0f}%", round(tot["ads"]), "", round(tot["net"]),
+                      f"{100 * tot['net'] / tot['sales']:.0f}%", "", "", ""])
+    tables = [{"title": f"Profit per marketplace {y}-{m:02d} (before product cost, payouts by settlement month)",
+               "columns": ["Marketplace", "Cur", "Sales", "Refunds", "Amazon fees", "Fees %", "Ads", "Other", "Net",
+                           "Margin", "Import duty+freight", "Prev month sales", "Last year sales"],
+               "rows": trows}]
+    return "\n".join(out), tables
 
 
 def SendMonthlyProfit(request):
     args = getattr(request, "args", {}) or {}
     try:
         y, m = (int(args["year"]), int(args["month"])) if args.get("year") else last_month()
-        return _send("monthly-profit", monthly_profit_text(pb_authenticate(), y, m), args)
+        text, tables = monthly_profit_text(pb_authenticate(), y, m, with_tables=True)
+        res = _send("monthly-profit", text, args)
+        if str(args.get("dry")) != "1":
+            from CheckReports import MONTHLY_JOBS, save_report
+            save_report("monthly", f"{y}-{m:02d}", "monthly-profit", MONTHLY_JOBS["monthly-profit"], text, tables=tables)
+        return res
     except Exception as exc:
         notify("monthly-profit", "amzbot", f"🚨 Monthly profit report failed: {exc}", is_error=True)
         return _json({"error": str(exc)}, 500)
