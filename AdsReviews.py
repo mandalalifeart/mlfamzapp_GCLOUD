@@ -61,6 +61,7 @@ CHECKLISTS = {
         "Stock: no ads on products with low FBA stock (stock guard + low-inventory warning)",
         "Every 2nd week: search-term harvest -> add exact keywords / negatives",
         "New or changed campaigns are on the watch list",
+        "Every 2nd week: products losing money (💸 in the review) -> 🔴 approve ad pauses, 🟠 decide price / coupon",
     ],
     "monthly": [
         "Last month per marketplace: spend, ad sales, ACOS, TACOS vs the month before and last year",

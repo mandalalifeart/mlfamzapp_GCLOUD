@@ -20,7 +20,7 @@ product_ad_ignore. Writes go through AdsBidWriter's product-ad lookup
 (client-side ASIN match) and are logged in ads_bid_change_log.
 
 CLI (after the user's OK):
-  python ProductAdPauses.py preview                build and save proposals now
+  python ProductAdPauses.py preview                build and save proposals now (incl. losing-money check)
   python ProductAdPauses.py pause all|<n,...>      pause proposals (numbers as listed)
   python ProductAdPauses.py unpause due|<key,...>  unpause ads whose pause ended
   python ProductAdPauses.py ignore <key,...>       keep paused for good
@@ -173,6 +173,144 @@ def pause_section(pb, today, save=True):
     return lines, out
 
 
+# ---------------- products losing money (2026-11-02, per the user, formula OK'd) ----------------
+# Per product per marketplace, last 30 days to yesterday, the product profit of
+# ProductCost.product_ranking (fees, product cost, SP+SD ads, SB share, FBA
+# storage, AWD). Returns are shown but never trigger a flag (counted by return
+# date - off-season they belong to old sales).
+#   🔴 profit (w/o returns) < 0 AND ads (SP+SD+SB) >= $15 AND profit before ads > 0
+#      -> the ads make it lose money: pause its SP product ads in that
+#         marketplace, history rules as above (good -> 14 days, or until the
+#         pareo season review for pareo in winter; bad -> 60 days; new -> left alone)
+#   🟠 profit before ads < 0 -> price / fees / coupon problem: listed with the
+#      price paid and the coupons used, no ad change proposed.
+PROFIT_WINDOW = 30
+PROFIT_MIN_ADS = 15
+PROFIT_MARKETS = [("usa", {"US", "CA", "MX"}), ("uk", {"UK"}), ("de", {"DE"}), ("fr", {"FR"}), ("it", {"IT"}),
+                  ("es", {"ES"}), ("nl", {"NL"}), ("be", {"BE"}), ("se", {"SE"}), ("pl", {"PL"}), ("ie", {"IE"})]
+UI_OF_ATOMIC = {"usa": "usa", "ca": "usa", "mex": "usa"}
+
+
+def profit_section(pb, today, save=True):
+    from ProductCost import product_ranking
+    end = (today - timedelta(days=1)).isoformat()
+    start = (today - timedelta(days=PROFIT_WINDOW)).isoformat()
+    h0 = (today - timedelta(days=PROFIT_WINDOW + HISTORY)).isoformat()
+    mapping = {r["asin"]: r for r in pb_list_all(pb, "asin_group_mapping", 'asin != ""', fields="asin,sku,group")}
+    red, orange = [], []
+    for ui, _countries in PROFIT_MARKETS:
+        for asin, v in product_ranking(start, end, [ui])["byAsin"].items():
+            if v.get("profit") is None or not v.get("units"):
+                continue
+            ads = (v.get("ads") or 0) + (v.get("sbAds") or 0)
+            ex_ret = v["profit"] + (v.get("returns") or 0)
+            before = ex_ret + ads
+            row = {"asin": asin, "sku": (mapping.get(asin) or {}).get("sku") or asin, "mp": ui,
+                   "units": v["units"], "sales": v["sales"], "price": v["sales"] / v["units"], "ads": ads,
+                   "sb": v.get("sbAds") or 0, "profit": ex_ret, "before": before, "returns": v.get("returns") or 0,
+                   "returnedUnits": v.get("returnedUnits") or 0, "tacos": v.get("tacos")}
+            if before < 0:
+                orange.append(row)
+            elif ex_ret < 0 and ads >= PROFIT_MIN_ADS:
+                red.append(row)
+    red.sort(key=lambda r: r["profit"])
+    orange.sort(key=lambda r: r["before"])
+
+    # SP product ads to pause for the 🔴 ones
+    by = _load(pb, h0, today.isoformat())
+    camps, dept_of = _dept(pb)
+    pauses = json.loads(get_job_state(pb, "product_ad_pauses") or "[]")
+    ignore = set(json.loads(get_job_state(pb, "product_ad_ignore") or "[]"))
+    active = {p["key"] for p in pauses if p["status"] == "active"}
+    prop = json.loads(get_job_state(pb, "product_ad_pause_proposals") or "{}")
+    items = prop.get("items", []) if prop.get("date") == today.isoformat() else []
+    have = {x["key"]: i for i, x in enumerate(items, 1)}
+    countries = dict(PROFIT_MARKETS)
+    winter = today.isoformat() < PAREO_RESUME
+    new_left = 0
+    for r in red:
+        r["ads_to_pause"], r["notes"] = [], defaultdict(int)
+        for k, rows in by.items():
+            last = max(rows, key=lambda x: x["date"])
+            if last["asin"] != r["asin"] or last["country_code"].upper() not in countries[r["mp"]]:
+                continue
+            recent = _agg([x for x in rows if start <= x["date"] <= end])
+            if recent["spend"] <= 0:
+                continue
+            c = camps.get(last["campaign_id"])
+            if k in have:
+                r["notes"][f"already proposed above as #{have[k]}"] += 1
+                continue
+            if k in active or k in ignore:
+                r["notes"]["already paused by us"] += 1
+                continue
+            if not c or c.get("campaign_status") != "ENABLED":
+                r["notes"]["campaign paused"] += 1
+                continue
+            dept = dept_of(last["campaign_id"], last["campaign_name"])
+            hist = _agg([x for x in rows if h0 <= x["date"] < start])
+            cls = history_class(hist, dept, last["country_code"])
+            if cls == "new":
+                new_left += 1
+                r["notes"]["too little history"] += 1
+                continue
+            days = PAUSE_DAYS[cls]
+            if cls == "good" and dept == "pareo" and winter:
+                days = (date.fromisoformat(PAREO_RESUME) - today).days
+            item = {"key": k, "profile_id": last["profile_id"], "campaign_id": last["campaign_id"],
+                    "campaign": last["campaign_name"], "ad_group_id": last["ad_group_id"],
+                    "ad_group": last.get("ad_group_name") or "", "asin": last["asin"], "sku": last.get("sku") or "",
+                    "country": last["country_code"], "dept": dept, "history": cls, "recent": recent, "hist": hist,
+                    "pause_days": days, "reason": "losing money"}
+            items.append(item)
+            have[k] = len(items)
+            r["ads_to_pause"].append((len(items), item))
+    if save:
+        set_job_state(pb, "product_ad_pause_proposals", json.dumps({"date": today.isoformat(), "items": items}))
+
+    # coupons / promotions used by the 🟠 ones
+    promos = defaultdict(lambda: defaultdict(float))
+    if orange:
+        names = {p["promotion_id"]: p.get("name") for p in pb_list_all(pb, "promotion_names", "")}
+        for l in pb_list_all(pb, "order_items", f'purchase_date >= "{start}" && purchase_date <= "{end}" '
+                                                f'&& promo_discount > 0 && order_status != "Cancelled"',
+                             fields="asin,marketplace,promo_ids,qty"):
+            for pid in (l.get("promo_ids") or "").split(","):
+                pid = pid.strip()
+                if pid:
+                    promos[(l["asin"], UI_OF_ATOMIC.get(l["marketplace"], l["marketplace"]))][names.get(pid) or pid] += l["qty"]
+
+    lines = [f"\n💸 Products losing money (last {PROFIT_WINDOW} days to {end}, profit incl. fees, product cost, "
+             f"SP+SD ads, SB share, storage, AWD; returns shown, not counted)"]
+    lines.append(f"🔴 Ads make it lose money (ads ≥ ${PROFIT_MIN_ADS}): {len(red)}")
+    for r in red[:25]:
+        lines.append(f"• {r['mp'].upper()} {r['sku']}: {r['units']:.0f} units at ${r['price']:.2f}, ads ${r['ads']:.0f} "
+                     f"(SB ${r['sb']:.0f}, TACOS {r['tacos']}%) → profit ${r['profit']:.0f}, before ads ${r['before']:.0f}"
+                     + (f"; returns {r['returnedUnits']:.0f} (${r['returns']:.0f})" if r["returnedUnits"] else ""))
+        for n, it in r["ads_to_pause"]:
+            lines.append(f"   {n}. pause in {it['campaign']} ({it['history']} history) for {it['pause_days']} days")
+        if r["notes"]:
+            lines.append("   (" + "; ".join(f"{n} ad{'s' if n > 1 else ''} {why}" for why, n in r["notes"].items()) + ")")
+        elif not r["ads_to_pause"]:
+            lines.append("   (no SP product ad with spend - the ad cost is SB/SD)")
+    lines.append(f"🟠 Losing money even before ads (price / fees / coupon): {len(orange)}")
+    for r in orange[:25]:
+        used = promos.get((r["asin"], r["mp"])) or {}
+        coup = ", ".join(f"{k} ×{v:.0f}" for k, v in sorted(used.items(), key=lambda kv: -kv[1])) or "no coupon"
+        lines.append(f"• {r['mp'].upper()} {r['sku']}: {r['units']:.0f} units at ${r['price']:.2f} → ${r['before']:.0f} "
+                     f"before ads ({coup})")
+    if red or orange:
+        lines.append("All in USD. Reply \"pause products\" (or the numbers) to pause the listed ads; 🟠 = decide price/coupon.")
+    else:
+        lines.append("none 👍")
+    if new_left:
+        lines.append(f"({new_left} product ads with too little history left alone)")
+    for r in red:
+        r["notes"] = dict(r["notes"])
+        r["ads_to_pause"] = [n for n, _it in r["ads_to_pause"]]
+    return lines, {"red": red, "orange": orange}
+
+
 def followup_section(pb, today):
     pauses = json.loads(get_job_state(pb, "product_ad_pauses") or "[]")
     t = today.isoformat()
@@ -243,6 +381,8 @@ def main(argv):
     today = date.today()
     if cmd == "preview":  # build + save proposals now (outside the Monday run)
         lines, _ = pause_section(pb, today, save=True)
+        print("\n".join(lines))
+        lines, _ = profit_section(pb, today, save=True)
         print("\n".join(lines))
         return
     if cmd == "pause":
