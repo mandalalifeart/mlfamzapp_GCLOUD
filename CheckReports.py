@@ -34,6 +34,8 @@ MANUAL_MONTHLY = {"ads-monthly-review": "📊 Ads monthly review", "ads-monthly-
 
 def flags_of(text):
     lines = [ln.strip() for ln in (text or "").splitlines()]
+    # a legend line ("🔴 ≤7 days · 🟠 ≤14 …") names several markers - not a finding
+    lines = [ln for ln in lines if sum(1 for m in MARKERS if m in ln) < 2 and not ln.lower().startswith("legend")]
     return {m: n for m in MARKERS if (n := sum(1 for ln in lines if ln.startswith(m)))}
 
 
