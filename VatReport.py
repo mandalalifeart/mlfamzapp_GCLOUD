@@ -41,7 +41,9 @@ EU = {
     "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK",
 }
 VAT_RELEVANT_TYPES = {"SALE", "REFUND", "LIQUIDATION_SALE"}
-IGNORE_DEPARTURE_TYPES = {"FC_TRANSFER", "RETURN"}
+# INBOUND = our own FBA shipments from India to Amazon warehouses - their import
+# VAT is handled at import, not on the sales return (per the user 2026-11-02).
+IGNORE_DEPARTURE_TYPES = {"FC_TRANSFER", "RETURN", "INBOUND"}
 COMPONENTS = [
     ("ITEMS", "TOTAL_PRICE_OF_ITEMS_AMT_VAT_EXCL", "TOTAL_PRICE_OF_ITEMS_VAT_AMT", "PRICE_OF_ITEMS_VAT_RATE_PERCENT"),
     ("SHIP", "TOTAL_SHIP_CHARGE_AMT_VAT_EXCL", "TOTAL_SHIP_CHARGE_VAT_AMT", "SHIP_CHARGE_VAT_RATE_PERCENT"),
@@ -275,7 +277,7 @@ def normalize_file(path, vat_countries, display_name=None):
 
 
 _CACHE = {}
-PARSE_VERSION = 2  # bump when normalize_file's output fields change (invalidates the disk cache)
+PARSE_VERSION = 3  # bump when normalize_file's output fields change (invalidates the disk cache)
 _PARSE_LOCK = __import__("threading").Lock()
 CACHE_DIR = os.path.join(VAT_DOCS_DIR, ".cache")
 
