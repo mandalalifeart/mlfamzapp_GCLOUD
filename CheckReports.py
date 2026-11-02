@@ -29,7 +29,7 @@ MONTHLY_JOBS = {  # notify job name -> label
 #   save_report("monthly", "YYYY-MM", "ads-monthly-review", "📊 Ads monthly review", text)
 #   save_report("monthly", "YYYY-MM", "losing-products", "💸 Products losing money", text)
 MANUAL_MONTHLY = {"ads-monthly-review": "📊 Ads monthly review", "ads-monthly-auto": "🤖 Ads monthly review (automatic)",
-                  "losing-products": "💸 Products losing money"}
+                  "losing-products": "💸 Products losing money", "products-no-ads": "📭 Products without ads"}
 
 
 def flags_of(text):

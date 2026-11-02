@@ -276,7 +276,14 @@ def keyword_cleanup(pb, end, camps):
     return props
 
 
+NO_ADS_JOB = "products-no-ads"
+NO_ADS_LABEL = "📭 Products without ads"
+
+
 def no_ads_block(pb, end):
+    """Products with FBA stock >= 5 and no ad impressions in the last 14 days, per
+    marketplace. Its own /checks section with a Reply per product (per the user
+    2026-11-02 - not proposals). -> (text, table)."""
     e = date.fromisoformat(end)
     s = (e - timedelta(days=13)).isoformat()
     seen = defaultdict(set)
@@ -286,8 +293,10 @@ def no_ads_block(pb, end):
     sku_asin = {g["sku"]: (g["asin"], g["group"]) for g in pb_list_all(pb, "asin_group_mapping", 'asin != ""',
                                                                          fields="sku,asin,group")}
     stock = pb_list_all(pb, "sku_statistics", "", fields="sku,usa_balance_fba,de_balance_fba,uk_balance_fba")
-    props = []
     winter = end < "2027-02-20"  # pareo winter mode (no pareo ads on purpose) - same date as ProductAdPauses
+    lines = [f"Products with FBA stock (≥ 5) but no ad impressions {s} – {end}"
+             + (" (pareos left out until the season restart 2027-02-20)" if winter else "")]
+    rows = []
     for field, countries in (("usa_balance_fba", ["US"]), ("de_balance_fba", ["DE", "FR", "IT", "ES"]),
                              ("uk_balance_fba", ["UK"])):
         for cc in countries:
@@ -299,12 +308,19 @@ def no_ads_block(pb, end):
                 if winter and "PAREO" in (grp or "").upper():
                     continue
                 if asin not in seen[cc]:
-                    miss.append(f"{r['sku']} ({r.get(field):.0f})")
-            if miss:
-                props.append({"section": "Products without ads", "title": f"{cc}: {len(miss)} product(s) with FBA stock but no ad in 14 days",
-                              "detail": ", ".join(miss[:40]) + (" …" if len(miss) > 40 else "") +
-                              " - add to a campaign (or leave out on purpose, e.g. pareo in winter)"})
-    return props
+                    miss.append([r["sku"], asin, grp or "", round(r.get(field) or 0)])
+            if not miss:
+                continue
+            miss.sort(key=lambda x: (x[2], -x[3]))
+            pool = "Pan-EU stock" if cc != "US" and cc != "UK" else "FBA stock"
+            rows.append({"cells": [f"{cc} ({len(miss)})", "", "", f"{pool}: {sum(x[3] for x in miss)}"],
+                         "children": [[f"{cc} {x[0]}", x[1], x[2], x[3]] for x in miss]})
+            lines.append(f"\n{cc}: {len(miss)} product(s)")
+            lines += [f"  {cc} {x[0]} ({x[2]}): FBA {x[3]}" for x in miss]
+    if not rows:
+        lines.append("✅ every product with stock had ads")
+    return "\n".join(lines), {"title": f"Products with FBA stock but no ads, {s} – {end} - click a marketplace, 💬 per product",
+                              "columns": ["Product", "ASIN", "Group", "FBA stock"], "rows": rows}
 
 
 def build(today=None):
@@ -362,13 +378,18 @@ def build(today=None):
     lines += [f"5) Keyword clean-up (60+ days, spend ≥ 10, no order ever): {sum(len(p['action']['items']) for p in kc)} in {len(kc)} campaign(s)"]
     lines += [f"• {p['title']}" for p in kc[:15]] + [""]
     proposals += kc
-    na = no_ads_block(pb, end)
-    lines += ["6) Products with FBA stock but no ads (last 14 days; pareos left out until the season restart)"] + [f"• {p['title']}" for p in na] + [""]
-    proposals += na
+    no_ads = no_ads_block(pb, end)
+    lines += [f"6) Products with FBA stock but no ads: see the \"{NO_ADS_LABEL}\" section", ""]
     for i, p in enumerate(proposals, 1):
         p.update(id=i, status="proposed")
     lines.append(f"{len(proposals)} proposals - approve them on the page: {PAGE.format(period)}")
-    return period, "\n".join(lines), proposals, tables
+    return period, "\n".join(lines), proposals, tables, no_ads
+
+
+def save_all(period, text, proposals, tables, no_ads):
+    from CheckReports import save_report
+    save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals, tables=tables)
+    save_report("monthly", period, NO_ADS_JOB, NO_ADS_LABEL, no_ads[0], tables=[no_ads[1]])
 
 
 def SendMonthlyAdsReview(request):
@@ -376,13 +397,13 @@ def SendMonthlyAdsReview(request):
     from NotificationRouting import notify
     args = getattr(request, "args", {}) or {}
     try:
-        period, text, proposals, tables = build(date.fromisoformat(args["today"]) if args.get("today") else None)
+        period, text, proposals, tables, no_ads = build(date.fromisoformat(args["today"]) if args.get("today") else None)
         if str(args.get("dry")) == "1":
             return json.dumps({"text": text, "proposals": proposals}), 200, {"Content-Type": "application/json"}
         if str(args.get("quiet")) == "1":  # rebuild the page entry without a Telegram message
-            save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals, tables=tables)
+            save_all(period, text, proposals, tables, no_ads)
             return json.dumps({"period": period, "proposals": len(proposals)}), 200, {"Content-Type": "application/json"}
-        save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals, tables=tables)
+        save_all(period, text, proposals, tables, no_ads)
         head = "\n".join(text.splitlines()[:40])
         notify("monthly-ads-review", "amzbot", head + f"\n\n✅ {len(proposals)} proposals to approve: {PAGE.format(period)}")
         return json.dumps({"period": period, "proposals": len(proposals)}), 200, {"Content-Type": "application/json"}
