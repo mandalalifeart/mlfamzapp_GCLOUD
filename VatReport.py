@@ -225,7 +225,8 @@ def normalize_file(path, vat_countries, display_name=None):
                         break
                     except ValueError:
                         continue
-        if ttype not in IGNORE_DEPARTURE_TYPES:
+        # Lines where Amazon collected the VAT need nothing from us (per the user 2026-11-02).
+        if ttype not in IGNORE_DEPARTURE_TYPES and not is_marketplace_collected(r.get("TAX_COLLECTION_RESPONSIBILITY")):
             for col in DEPARTURE_COLUMNS_CANDIDATES:
                 if col not in r:
                     continue
@@ -277,7 +278,7 @@ def normalize_file(path, vat_countries, display_name=None):
 
 
 _CACHE = {}
-PARSE_VERSION = 3  # bump when normalize_file's output fields change (invalidates the disk cache)
+PARSE_VERSION = 4  # bump when normalize_file's output fields change (invalidates the disk cache)
 _PARSE_LOCK = __import__("threading").Lock()
 CACHE_DIR = os.path.join(VAT_DOCS_DIR, ".cache")
 
