@@ -173,3 +173,10 @@ def notify(job_name, app, text, is_error=False, subject=None, status=None, teleg
 
     if token:
         _log_run(token, job_name, app, status, text, sent_telegram, sent_email)
+    # Monthly checks are also stored for the /checks page (2026-11-02, per the user).
+    if not is_error:
+        try:
+            from CheckReports import save_monthly_from_notify
+            save_monthly_from_notify(job_name, text)
+        except Exception:
+            pass

@@ -64,7 +64,7 @@ def build(day):
              for f in sorted(os.listdir(folder)) if f.endswith(".txt")} if os.path.isdir(folder) else {}
     order = [name for name, _ in LABELS if name in files] + sorted(n for n in files if n not in dict(LABELS))
     labels = dict(LABELS)
-    head = [f"🗓 Monday checks – {day}", f"{len(order)} checks ran. Full texts in the attached file.", ""]
+    head = [f"🗓 Monday checks – {day}", f"{len(order)} checks ran. Full texts: https://mlfamzappfire.web.app/checks?kind=weekly&period={day}", ""]
     full = []
     for name in order:
         text = files[name].strip()
@@ -82,11 +82,24 @@ def build(day):
     return "\n".join(head), "\n".join(full), len(order)
 
 
+def store_weekly(day):
+    """Each captured check -> check_reports (kind weekly) for the /checks page."""
+    from CheckReports import save_report
+    folder = os.path.join(BASE, day)
+    labels = dict(LABELS)
+    for f in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if f.endswith(".txt"):
+            name = f[:-4]
+            save_report("weekly", day, name, labels.get(name, name), open(os.path.join(folder, f), encoding="utf-8").read())
+
+
 def SendMondayDigest(request):
     try:
         args = getattr(request, "args", {}) or {}
         day = args.get("date") or date.today().isoformat()
         head, full, n = build(day)
+        if args.get("dry") != "1":
+            store_weekly(day)
         if args.get("dry") == "1":
             return _json({"head": head, "full": full})
         if n == 0:
@@ -94,10 +107,7 @@ def SendMondayDigest(request):
             return _json({"sent": False, "reason": "nothing captured"})
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       json={"chat_id": CHAT, "text": head[:4000]}, timeout=30).raise_for_status()
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
-                      data={"chat_id": CHAT, "caption": f"Monday checks {day} - full texts"},
-                      files={"document": (f"monday-checks-{day}.txt", io.BytesIO(full.encode("utf-8")), "text/plain")},
-                      timeout=60).raise_for_status()
+        # The full texts are on the /checks page now (per the user 2026-11-02: the .txt was unreadable).
         notify(JOB_NAME, "amzbot", head, telegram=False)
         return _json({"sent": True, "checks": n})
     except Exception as exc:

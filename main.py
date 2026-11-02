@@ -815,3 +815,8 @@ def GetReturnsForProduct(request):
 def SendReturnsMonthlyCheck(request):
     from ReturnsAnalysis import SendReturnsMonthlyCheck as handler
     return handler(request)
+
+
+def GetCheckReports(request):
+    from CheckReports import GetCheckReports as handler
+    return handler(request)

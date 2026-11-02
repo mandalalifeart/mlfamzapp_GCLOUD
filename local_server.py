@@ -190,6 +190,7 @@ ROUTED_FUNCTIONS = [
     "GetFbaFees",
     "GetFbaFeeHistory",
     "GetReturnsAnalysis",
+    "GetCheckReports",
     "GetReturnsForProduct",
     "SendReturnsMonthlyCheck",
     "GetProductCostScenarios",
