@@ -166,8 +166,114 @@ def order_profit_section(pb, y, m):
     return lines, table
 
 
+def promo_section(pb, y, m):
+    """Coupons & promotions used on orders of y-m (per the user 2026-11-02):
+    per marketplace (EU per country) and per promotion, USD, vs last month."""
+    from GetPromotionSales import fetch_promotion_names
+    rates = usd_rates()
+    py, pm = _ym_minus(y, m, 1)
+    names = fetch_promotion_names(pb)
+    groups = {r["asin"]: r.get("group") or "" for r in pb_list_all(pb, "asin_group_mapping", "", fields="asin,group") if r.get("asin")}
+
+    def usd(v, cur):
+        return (v or 0) * (1 if (cur or "USD") == "USD" else rates.get(cur, 0))
+
+    def load(yy, mm):
+        rows = pb_list_all(pb, "promo_sales_monthly", f"year = {yy} && month = {mm}")
+        allu = defaultdict(float)
+        for r in pb_list_all(pb, "country_sales", f"year = {yy} && month = {mm}", fields="marketplace,quantity"):
+            allu[r["marketplace"]] += r.get("quantity") or 0
+        return rows, allu
+
+    cur_rows, cur_all = load(y, m)
+    prev_rows, prev_all = load(py, pm)
+
+    def by_mp(rows):
+        t = defaultdict(lambda: defaultdict(float))
+        for r in rows:
+            x = t[r["marketplace"]]
+            x["orders"] += r.get("orders") or 0
+            x["units"] += r.get("units") or 0
+            x["sales"] += usd(r.get("sales"), r.get("currency"))
+            x["discount"] += usd(r.get("discount"), r.get("currency"))
+            x["coupon" if r.get("kind") == "coupon" else "promo"] += usd(r.get("discount"), r.get("currency"))
+        return t
+
+    cm, pmp = by_mp(cur_rows), by_mp(prev_rows)
+
+    def agg(src, mps):
+        return {k: sum(src[x][k] for x in mps if x in src) for k in ("orders", "units", "sales", "discount", "coupon", "promo")}
+
+    def mrow(name, mps):
+        t, p = agg(cm, mps), agg(pmp, mps)
+        allu = sum(cur_all.get(x, 0) for x in mps)
+        return [name, round(t["units"]), f"{100 * t['units'] / allu:.0f}%" if allu else "", round(t["sales"]),
+                -round(t["coupon"]), -round(t["promo"]), -round(t["discount"]),
+                f"{100 * t['discount'] / t['sales']:.0f}%" if t["sales"] else "", cmp_cell(t["discount"], p["discount"])]
+
+    mrows = []
+    for name, mps in ORDER_ROWS:
+        if not any(x in cm or x in pmp for x in mps):
+            continue
+        r = mrow(name, mps)
+        if len(mps) > 1:
+            r = {"cells": r, "children": [mrow(MP_NAMES.get(x, x), [x]) for x in mps if x in cm or x in pmp]}
+        mrows.append(r)
+    all_mps = sorted(set(cm) | set(pmp))
+    mrows.append(mrow("ALL (USD)", all_mps))
+
+    # per promotion, children per marketplace
+    promos = defaultdict(lambda: {"mps": defaultdict(lambda: defaultdict(float)), "kind": "", "asins": set()})
+    for r in cur_rows:
+        p = promos[r["promotion_id"]]
+        p["kind"] = r.get("kind") or p["kind"]
+        p["asins"].add(r.get("asin"))
+        x = p["mps"][r["marketplace"]]
+        x["orders"] += r.get("orders") or 0
+        x["units"] += r.get("units") or 0
+        x["sales"] += usd(r.get("sales"), r.get("currency"))
+        x["discount"] += usd(r.get("discount"), r.get("currency"))
+    prows, lines = [], []
+    for pid, p in sorted(promos.items(), key=lambda kv: -sum(x["discount"] for x in kv[1]["mps"].values())):
+        info = names.get(pid, {})
+        kind = info.get("kind") or p["kind"]
+        name = info.get("name")
+        if not name:
+            gs = sorted({groups.get(a, "") for a in p["asins"]} - {""})
+            name = f"Coupon: {', '.join(gs[:3])}" if kind == "coupon" else pid
+        tot = {k: sum(x[k] for x in p["mps"].values()) for k in ("orders", "units", "sales", "discount")}
+
+        def prow(label, t):
+            return [label, kind, round(t["orders"]), round(t["units"]), round(t["sales"]), -round(t["discount"]),
+                    f"{100 * t['discount'] / t['sales']:.0f}%" if t["sales"] else ""]
+        kids = [prow(mp.upper(), x) for mp, x in sorted(p["mps"].items(), key=lambda kv: -kv[1]["units"])]
+        prows.append({"cells": prow(name, tot), "children": kids} if len(kids) > 1
+                     else prow(f"{name} ({next(iter(p['mps'])).upper()})", tot))
+        lines.append(f"  {name} [{kind}] {', '.join(m.upper() for m in p['mps'])}: {tot['units']:.0f} units · "
+                     f"discount ${tot['discount']:,.0f} on ${tot['sales']:,.0f}")
+    t = agg(cm, all_mps)
+    head = [f"\n🏷 Coupons & promotions – {y}-{m:02d} (orders placed this month, USD)",
+            f"  {t['units']:.0f} units with a coupon/promotion · discount given ${t['discount']:,.0f}"
+            f" (coupons ${t['coupon']:,.0f}, promotions ${t['promo']:,.0f}) on ${t['sales']:,.0f} before discount",
+            "  Pending orders get their coupon only when they ship - last month is re-read on days 2-8."]
+    tables = [
+        {"title": f"Coupons & promotions per marketplace {y}-{m:02d} (USD) – click EU for countries",
+         "columns": ["Marketplace", "Units with promo", "% of all units", "Sales before discount", "Coupon discount",
+                     "Promotion discount", "Total discount", "Discount %", "Prev month discount"],
+         "rows": mrows},
+        {"title": f"Per coupon / promotion {y}-{m:02d} (USD) – click a row with several marketplaces",
+         "columns": ["Coupon / promotion", "Kind", "Orders", "Units", "Sales before discount", "Discount", "Discount %"],
+         "rows": prows},
+    ]
+    return head + lines, tables
+
+
 def monthly_profit_text(pb, y, m, with_tables=False):
     order_lines, order_table = order_profit_section(pb, y, m)
+    try:
+        promo_lines, promo_tables = promo_section(pb, y, m)
+    except Exception as exc:
+        promo_lines, promo_tables = [f"\n🏷 Coupons & promotions: failed ({exc})"], []
     periods = [(y, m), _ym_minus(y, m, 1), (y - 1, m)]
     data = {}
     for (yy, mm) in periods:
@@ -225,6 +331,7 @@ def monthly_profit_text(pb, y, m, with_tables=False):
                    f" · ads ${tot['ads']:,.0f} → net ${tot['net']:,.0f} ({100 * tot['net'] / tot['sales']:.0f}%)")
     out.append("Payout view: by settlement period (the last settlement of the month is often still open), so it's lower "
                "than the month's orders - use the order-date table above for the month's profit.")
+    out += promo_lines
     if not with_tables:
         return "\n".join(out)
     if tot["sales"]:
@@ -235,6 +342,7 @@ def monthly_profit_text(pb, y, m, with_tables=False):
                "columns": ["Marketplace", "Cur", "Sales", "Refunds", "Amazon fees", "Fees %", "Ads", "Other", "Net",
                            "Margin", "Import duty+freight", "Prev month sales", "Last year sales", "Paid to bank"],
                "rows": trows}]
+    tables[1:1] = promo_tables
     return "\n".join(out), tables
 
 
