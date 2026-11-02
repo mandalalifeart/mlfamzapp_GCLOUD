@@ -355,6 +355,17 @@ def build_combined_digest_text(result, year, month, marketplaces_used):
     names = fetch_promotion_names()
     promo = [format_promo_section(f"Yesterday:", (result.get("dailyPromoTotals") or {}).get(yesterday, []), names),
              format_promo_section("Month to date:" if not is_closed_month else "Month:", result.get("promoRows") or [], names)]
+    try:
+        from AsinAnalytics import pb_list_all
+        pend = pb_list_all(token, "order_items", f'order_status = "Pending" && purchase_date >= "{month_start}" '
+                                                 f'&& purchase_date <= "{month_end}" && marketplace != "mcf"',
+                           fields="purchase_date")
+        n_y = sum(1 for r in pend if r["purchase_date"][:10] == yesterday)
+        if pend:
+            promo.append(f"⏳ {len(pend)} order lines still pending ({n_y} from yesterday) - Amazon shows their "
+                         f"coupons only once shipped, so these numbers grow over the next days.")
+    except Exception:
+        pass
     parts += ["", "<b>Coupons &amp; promotions</b>", _esc("\n".join(promo))]
     biz = result.get("businessTotals") or {}
     parts += ["", "<b>Business (Amazon Business) orders</b>",
@@ -381,10 +392,57 @@ def in_target_window():
     return now_la.hour == 0 and now_la.minute < 5
 
 
+# Coupons/promotions only appear on an order line once it ships (Pending lines
+# have no <Promotion> - confirmed 2026-11-02), and the 1st closes last month
+# while its last days are still pending. So on days 2-8 last month is read
+# again after the digest, silently, to pick up those discounts (per the user).
+REFRESH_PREVIOUS_UNTIL_DAY = 8
+
+
+def refresh_previous_month():
+    now_la = datetime.now(LA_TZ)
+    if not 2 <= now_la.day <= REFRESH_PREVIOUS_UNTIL_DAY:
+        return
+    last = now_la.replace(day=1) - timedelta(days=1)
+    year, month = last.year, last.month
+    start_date, end_date = build_month_date_range(year, month)
+    report_ids, errors = {}, []
+    for marketplace in ("usa", "de", "au"):
+        try:
+            report_ids[marketplace] = request_report(marketplace, start_date, end_date)
+        except Exception as exc:
+            errors.append(str(exc))
+    ready = {}
+    for marketplace, rid in report_ids.items():
+        ok, error = poll_report_ready(marketplace, rid)
+        if ok:
+            ready[marketplace] = rid
+        else:
+            errors.append(error)
+    # Only rewrite the month when USA and DE are both there (a partial run
+    # would drop that region's rows for the month).
+    if "usa" not in ready or "de" not in ready:
+        notify(JOB_NAME, APP_NAME, f"Refresh of {year}-{month:02d} (pending-order coupons) skipped: {'; '.join(errors)}",
+               is_error=True, telegram=False)
+        return
+    try:
+        result = run_update(ready, start_date, end_date, month, year)
+        print(f"refreshed {year}-{month:02d}: {result.get('orderItems')}")
+    except Exception as exc:
+        notify(JOB_NAME, APP_NAME, f"Refresh of {year}-{month:02d} (pending-order coupons) FAILED: {exc}",
+               is_error=True, telegram=False)
+
+
 def main():
     if not in_target_window():
         return
+    try:
+        send_daily_update()
+    finally:
+        refresh_previous_month()
 
+
+def send_daily_update():
     year, month = get_target_month()
     start_date, end_date = build_month_date_range(year, month)
 
