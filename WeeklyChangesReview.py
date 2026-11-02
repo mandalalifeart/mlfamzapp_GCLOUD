@@ -31,6 +31,10 @@ PAREO_RESUME (winter mode). Shows the bid then/now and our logged changes.
 Section 6 - temporary cuts (2026-10-24, per the user): good targets that went
 crazy last week get a proposed -25% cut + restore/re-check follow-ups, see
 TempBidCuts.py (proposals only; applied after the user's OK).
+Section 7 - product pauses (2026-11-02, per the user): every 2nd Monday, SP
+product ads with many clicks and bad sales get pause proposals (14 days for
+a good history, 60 for a bad one) + unpause / re-check follow-ups weekly,
+see ProductAdPauses.py.
 Non-dry runs are also saved to ads_reviews for the /ads-reviews page.
 Reads only stored ads_campaign_stats / ads_campaigns / country_sales (morning cron pulls).
 Args: dry=1, today=YYYY-MM-DD, group=<label substring>, since_launch=1.
@@ -352,6 +356,18 @@ def build_report(today=None, group=None, since_launch=False, save_proposals=Fals
             lines += spike_lines + follow_lines
         except Exception as exc:
             lines.append(f"\n🌡 temporary-cut check failed: {exc}")
+        # Products per campaign with many clicks and bad sales (2026-11-02, per
+        # the user): proposals every 2nd Monday (even ISO weeks), follow-ups weekly.
+        from ProductAdPauses import followup_section as pause_followup, pause_section
+        try:
+            if today.isocalendar()[1] % 2 == 0:
+                p_lines, data["productPauseProposals"] = pause_section(pb, today, save=save_proposals)
+                lines += p_lines
+            if save_proposals:
+                f_lines, data["productPauseFollowup"] = pause_followup(pb, today)
+                lines += f_lines
+        except Exception as exc:
+            lines.append(f"\n⏸ product-pause check failed: {exc}")
     lines.append(f"\nFlags on watched changes: {n_flags}")
     data["flags"] = n_flags
     return "\n".join(lines), data
