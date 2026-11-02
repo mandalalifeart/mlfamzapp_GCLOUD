@@ -441,6 +441,8 @@ def VatReportSummary(request):
         available = sorted({d[:4] for d in os.listdir(VAT_DOCS_DIR) if re.match(r"20\d{2}-\d{2}$", d)}
                            if os.path.isdir(VAT_DOCS_DIR) else set(), reverse=True)
         year = str(args.get("year") or (available[0] if available else datetime.now().year))
+        if year == "all":
+            return json_response({"year": "all", "years": available, **all_years_payable(available)})
         rows, warnings, sources = load_year(year, VAT_COUNTRIES)
         periods = sorted({r["period"] for r in rows if r["period"]})
         try:
@@ -464,6 +466,56 @@ def VatReportSummary(request):
         })
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def all_years_payable(available):
+    """Per the user (2026-11-02): "all till now" = VAT to pay per country per
+    year. Per year and currency: VAT on the return lines (same lines as the
+    country tables) - deductible input VAT from /wise invoices - typed-in
+    import VAT; OSS = VAT on the OSS return. Rows are filed by their own
+    ACTIVITY_PERIOD year (a folder can hold a neighbouring month)."""
+    rows = []
+    for y in sorted(available):
+        rows.extend(load_year(y, VAT_COUNTRIES)[0])
+    by_year = defaultdict(list)
+    for r in rows:
+        if r.get("period"):
+            by_year[r["period"][:4]].append(r)
+    years = sorted(set(by_year) | set(available))
+    try:
+        deductible, _inv = deductible_vat_by_country(r"20\d{2}")
+    except Exception:  # Wise data is optional
+        deductible = {}
+    table = {c: defaultdict(lambda: defaultdict(lambda: {"vat": 0.0, "deductible": 0.0})) for c in VAT_COUNTRIES}
+    oss = defaultdict(lambda: defaultdict(float))
+    for y in years:
+        yr = by_year.get(y, [])
+        for c in VAT_COUNTRIES:
+            for rate in country_return(yr, c)["rates"]:
+                if rate["rate"] and rate["currency"]:
+                    table[c][y][rate["currency"]]["vat"] += rate["total"]["vat"]
+        for line in oss_return(yr):
+            oss[y][line["currency"] or "EUR"] += line["vat"]
+        for c, types in manual_entries(y).items():
+            for e in (types.get("import_vat") or {}).values():
+                if c in table and e.get("amount"):
+                    table[c][y][e.get("currency") or "EUR"]["deductible"] += e["amount"]
+    for c, months in deductible.items():
+        if c not in table:
+            continue
+        for month, curs in months.items():
+            for cur, amt in curs.items():
+                table[c][month[:4]][cur]["deductible"] += amt
+    out = []
+    for c in VAT_COUNTRIES:
+        ys = {}
+        for y, curs in table[c].items():
+            ys[y] = {cur: {"vat": round(v["vat"], 2), "deductible": round(v["deductible"], 2),
+                           "payable": round(v["vat"] - v["deductible"], 2)}
+                     for cur, v in curs.items() if v["vat"] or v["deductible"]}
+        out.append({"country": c, "name": COUNTRY_NAMES.get(c, c), "years": ys})
+    return {"allYears": {"years": years, "countries": out,
+                         "oss": {y: {cur: round(v, 2) for cur, v in curs.items()} for y, curs in oss.items()}}}
 
 
 def UploadVatReport(request):
