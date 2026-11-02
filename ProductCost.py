@@ -5,9 +5,9 @@ Formula (agreed with the user):
                    (invoice lines matched by EAN = "BUYER CODE" against
                    asin_group_mapping.ean; CIF invoices, where freight is inside
                    the price, are skipped)
-  shipping       = $1.00 per unit
-  import tax     = 10% x (purchase price + shipping)
-  landed cost    = purchase + shipping + import tax                   (USD)
+  duty + freight per destination region (REGION_IMPORT, from the real 2026
+                   shipments): USA 15% + $1.20, EU 9% + $0.80, UK 10% + $1.90
+  landed cost    = purchase + duty + freight                          (USD)
 
 Per marketplace (US/UK/DE/FR/IT/ES), at the current price (price_history):
   net price  = price / (1 + VAT)       (US 0%, UK 20, DE 19, FR 20, IT 22, ES 21)
@@ -129,6 +129,22 @@ def invoice_lines(token):
     return out
 
 
+# Duty % of the purchase price + freight per unit, per destination region, from
+# the real shipments on /shipments 2026 (per the user 2026-11-02; was 10% of
+# purchase+shipping + $1 everywhere): USA (Amazon AGL) duty 14-16% + freight
+# ~$1.2/unit; EU sea (Unicargo) duty 8-10% + ~$0.8/unit; UK sea 10% + ~$1.9/unit.
+REGION_IMPORT = {"usa": (0.15, 1.20), "eu": (0.09, 0.80), "uk": (0.10, 1.90), "other": (0.10, 1.00)}
+_REGION_OF = {"us": "usa", "usa": "usa", "ca": "usa", "mx": "usa", "mex": "usa", "uk": "uk", "gb": "uk",
+              "de": "eu", "fr": "eu", "it": "eu", "es": "eu", "nl": "eu", "be": "eu", "ie": "eu", "se": "eu", "pl": "eu"}
+
+
+def landed_for(cost, mp):
+    """Landed cost (USD) of a landed_cost() result for marketplace code mp."""
+    regs = (cost or {}).get("regions") or {}
+    r = regs.get(_REGION_OF.get((mp or "").lower(), "other"))
+    return r["landed"] if r else (cost or {}).get("landed")
+
+
 def landed_cost(token, ean):
     ean = (ean or "").strip().lstrip("0")
     hist = sorted((ln for ln in invoice_lines(token) if ln["ean"].lstrip("0") == ean and ean),
@@ -141,11 +157,15 @@ def landed_cost(token, ean):
     recent = [ln for ln in fob if ln["date"] >= cutoff]
     qty = sum(ln["qty"] for ln in recent)
     purchase = last["price"]
-    tax = round(IMPORT_TAX * (purchase + SHIPPING_USD), 2)
+    regions = {}
+    for reg, (duty, freight) in REGION_IMPORT.items():
+        d = round(duty * purchase, 2)
+        regions[reg] = {"dutyPct": duty * 100, "duty": d, "freight": freight, "landed": round(purchase + d + freight, 2)}
+    us = regions["usa"]
     return {
         "purchase": purchase, "invoice": last["invoice"], "invoiceDate": last["date"], "supplier": last["supplier"],
-        "supplierCode": last["code"], "shipping": SHIPPING_USD, "importTax": tax,
-        "landed": round(purchase + SHIPPING_USD + tax, 2),
+        "supplierCode": last["code"], "shipping": us["freight"], "importTax": us["duty"], "regions": regions,
+        "landed": us["landed"],
         "avg12m": round(sum(ln["qty"] * ln["price"] for ln in recent) / qty, 2) if qty else None,
         "history": hist,
     }
@@ -404,7 +424,7 @@ def product_cost(sku="", asin=""):
             m.update(amazon_fees(mp, cred, asin, price, cur))
         except Exception as exc:
             m["feesError"] = str(exc)[:200]
-        m["landed"] = round(cost["landed"] * fx, 2) if cost.get("landed") else None
+        m["landed"] = round(landed_for(cost, mp) * fx, 2) if cost.get("landed") else None
         ps, psales = p_spend.get(acode, 0), p_sales.get(tcode, 0)
         ds, dsales = d_spend.get((acode, dept), 0), d_sales.get((tcode, dept), 0)
         sbs, sbu = sb_unit.get(acode, (0.0, 0.0))
@@ -439,7 +459,7 @@ def product_cost(sku="", asin=""):
     return {"sku": row["sku"], "asin": asin, "ean": row.get("ean"), "department": dept,
             "months": [f"{y}-{m:02d}" for y, m in reversed(months)],
             "cost": cost, "markets": markets,
-            "assumptions": {"shippingUsd": SHIPPING_USD, "importTaxPct": IMPORT_TAX * 100}}
+            "assumptions": {"regions": {k: {"dutyPct": v[0] * 100, "freight": v[1]} for k, v in REGION_IMPORT.items()}}}
 
 
 def GetProductCost(request):
@@ -507,7 +527,8 @@ def period_totals(sku="", asin="", period="last_3m", months=None, _token=None):
     row = mapping[0]
     asin = row["asin"]
     dept = "pareo" if "PAREO" in (row.get("group") or "").upper() else "home"
-    landed = landed_cost(token, row.get("ean")).get("landed")
+    lc = landed_cost(token, row.get("ean"))
+    landed = lc.get("landed")
     months = months or period_months(period)
     fees = fee_rates(token, asin)
     vat = {t: v for _m, t, _a, v, _c, _cr in MARKETS} | OTHER_VAT
@@ -562,7 +583,7 @@ def period_totals(sku="", asin="", period="last_3m", months=None, _token=None):
         v = vat.get(mp, 0.2)
         net = x["sales"] / (1 + v)
         fee = f["referralPct"] * x["sales"] + f["fbaUsd"] * x["units"]
-        cost = (landed or 0) * x["units"]
+        cost = (landed_for(lc, mp) or 0) * x["units"] if landed else 0.0
         extras = x["returnsCost"] + x["storage"] + x["awd"]
         profit = net - fee - cost - x["ads"] - x["sb"] - extras
         ds, dsl = d_spend.get((ADS_CODE.get(mp, ""), dept), 0), d_sales.get((mp, dept), 0)
@@ -848,17 +869,24 @@ def product_ranking(start_date, end_date, marketplaces=None):
     for (asin, country, seg, ym), q in asin_units.items():
         agg[asin]["sbAds"] += sb_unit.get((country, seg, ym), 0) * q
 
-    def landed_of(asin):
+    def landed_obj(asin):
         ean = (mapping.get(asin) or {}).get("ean")
         if ean not in landed_by_ean:
-            landed_by_ean[ean] = landed_cost(token, ean).get("landed") if ean else None
+            landed_by_ean[ean] = landed_cost(token, ean) if ean else {}
         return landed_by_ean[ean]
+
+    def landed_of(asin):  # US landed - used for sellable returns
+        return landed_obj(asin).get("landed")
+
+    for l in lines:  # product cost per order line with the destination region's landed cost
+        if l.get("asin") and l.get("qty") and landed_of(l["asin"]):
+            agg[l["asin"]]["cost"] += landed_for(landed_obj(l["asin"]), l["marketplace"]) * l["qty"]
 
     extra = extra_costs_for(token, start_date, end_date, atomic, fees, landed_of)
     out = {}
     for asin, a in agg.items():
         landed = landed_of(asin)
-        cost = (landed or 0) * a["units"]
+        cost = a["cost"]
         x = extra.get(asin, {})
         returns, storage, awd = x.get("returnsCost", 0), x.get("storage", 0), x.get("awd", 0)
         profit = a["netSales"] - a["fees"] - cost - a["ads"] - a["sbAds"] - returns - storage - awd
