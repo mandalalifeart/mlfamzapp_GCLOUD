@@ -363,6 +363,20 @@ def accounting_text(pb, today=None):
     has_vat = os.path.isdir(vat_dir) and any(os.scandir(vat_dir))
     out.append(f"{'✅' if has_vat else '🔴'} Amazon VAT transactions file for {month_key}: "
                f"{'uploaded' if has_vat else 'missing – download it in Seller Central EU (Reports → Tax Document Library) and send it to me'}")
+    if has_vat:  # VAT departure check for that month (2026-11-02, per the user)
+        try:
+            from VatReport import VAT_COUNTRIES, load_year
+            warns = [w for w in load_year(str(y), VAT_COUNTRIES)[1] if w.get("period") == month_key]
+            if warns:
+                seen = {}
+                for w in warns:
+                    seen[(w["country"], w["column"])] = max(seen.get((w["country"], w["column"]), 0), w["count"])
+                out.append("⚠️ VAT departure check: sales you must declare yourself, shipped from a country without our VAT "
+                           "registration: " + ", ".join(f"{c} {n} line(s)" for (c, _col), n in seen.items()))
+            else:
+                out.append("✅ VAT departure check: nothing to declare outside our VAT countries")
+        except Exception as exc:
+            out.append(f"⚠️ VAT departure check failed: {exc}")
     due = vat_due_this_month(today)
     if due:
         out.append("📅 VAT returns this month:\n   " + "\n   ".join(due))

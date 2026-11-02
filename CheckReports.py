@@ -25,6 +25,10 @@ MONTHLY_JOBS = {  # notify job name -> label
     "content-gap-check": "🖼 Content gaps (A+ / video / images)",
     "returns-monthly-check": "↩️ Returns",
 }
+# Written by hand (Claude) when the monthly reviews are done in the chat:
+#   save_report("monthly", "YYYY-MM", "ads-monthly-review", "📊 Ads monthly review", text)
+#   save_report("monthly", "YYYY-MM", "losing-products", "💸 Products losing money", text)
+MANUAL_MONTHLY = {"ads-monthly-review": "📊 Ads monthly review", "losing-products": "💸 Products losing money"}
 
 
 def flags_of(text):
@@ -64,7 +68,7 @@ def GetCheckReports(request):
                               fields="job,label,text,flags,ran_at") if period else []
         from MondayDigest import LABELS
         order = {name: i for i, (name, _l) in enumerate(LABELS)}
-        order.update({j: i for i, j in enumerate(MONTHLY_JOBS)})
+        order.update({j: i for i, j in enumerate(list(MANUAL_MONTHLY) + list(MONTHLY_JOBS))})
         reports.sort(key=lambda r: (order.get(r["job"], 99), r["label"]))
         return json.dumps({"kind": kind, "period": period, "periods": periods, "reports": reports}), 200, \
             {"Access-Control-Allow-Origin": "*", "Content-Type": "application/json"}
