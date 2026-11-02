@@ -31,6 +31,7 @@ LABELS = [
     ("SendCouponHealthWeekly", "🏷 Coupons & promotions"),
     ("SendInventoryWarning", "📦 Low FBA stock"),
     ("SendFbaShipmentsWeekly", "🚚 FBA shipments"),
+    ("UpdateFbaFees", "📦 FBA fees"),
     ("RunWeeklyUsaInventorySync", "🔄 USA inventory sync"),
     ("RunWeeklyEuInventorySync", "🔄 EU inventory sync"),
     ("SendWeeklyChangesReview", "🔎 Ads changes review"),

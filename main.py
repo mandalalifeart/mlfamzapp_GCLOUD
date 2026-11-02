@@ -785,3 +785,18 @@ def GetProductRanking(request):
 def UpdateFbaStorageFees(request):
     from StorageFees import UpdateFbaStorageFees as handler
     return handler(request)
+
+
+def UpdateFbaFees(request):
+    from FbaFees import UpdateFbaFees as handler
+    return handler(request)
+
+
+def GetFbaFees(request):
+    from FbaFees import GetFbaFees as handler
+    return handler(request)
+
+
+def GetFbaFeeHistory(request):
+    from FbaFees import GetFbaFeeHistory as handler
+    return handler(request)
