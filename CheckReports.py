@@ -50,6 +50,13 @@ def save_report(kind, period, job, label, text, token=None, proposals=None, tabl
             o = before.get(p["title"])
             if o and o.get("status") != "proposed":
                 p.update({k: o[k] for k in ("status", "result", "decided_at") if k in o})
+        # decided proposals that a re-run no longer produces (e.g. already
+        # applied) stay on the page as history (2026-11-02 fix)
+        titles = {p["title"] for p in proposals}
+        kept = [o for o in before.values() if o.get("status") not in (None, "proposed") and o["title"] not in titles]
+        proposals = kept + proposals
+        for i, p in enumerate(proposals, 1):
+            p["id"] = i
     elif old and old[0].get("proposals"):
         proposals = old[0]["proposals"]
     ops = [{"method": "DELETE", "url": f"/api/collections/{COLLECTION}/records/{r['id']}"} for r in old]
@@ -173,6 +180,9 @@ def _apply_action(pb, action, label):
                 done.append(x["text"])
             except Exception as exc:
                 failed.append(f"{x['text']}: {str(exc)[:120]}")
+    elif action["type"] in __import__("AdsGrowth").ACTIONS:
+        from AdsGrowth import apply as growth_apply
+        return growth_apply(pb, action, label)
     else:
         raise ValueError(f"unknown action {action['type']}")
     return done, failed

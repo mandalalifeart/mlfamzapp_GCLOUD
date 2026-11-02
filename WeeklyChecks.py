@@ -6,7 +6,8 @@ Monday digest (TELEGRAM_CAPTURE=monday, see MondayDigest.py).
   SendListingHealthWeekly  - stock but not buyable, Buy Box lost, other sellers on our ASINs
   SendCouponHealthWeekly   - coupons/promotions: days left, budget used, 30-day price rule risk, unnamed ids
   SendOrganicRankWeekly    - Brand Analytics search share on our top queries, week vs week
-  SendSearchTermHarvest    - every 2nd Monday: new exact keywords + negatives proposals
+  SendSearchTermHarvest    - every Monday: new exact keywords + negatives (+ bid raises in even weeks), checkboxes on /checks
+  SendComebacksWeekly      - every Monday: paused product ads / bid cuts coming back (checkboxes)
 Each takes dry=1 (return text, no Telegram).
 """
 import json
@@ -472,6 +473,17 @@ def SendOrganicRankWeekly(request):
         return _json({"error": str(exc)}, 500)
 
 
+def SendComebacksWeekly(request):
+    from AdsGrowth import comebacks_weekly
+    args = getattr(request, "args", {}) or {}
+    try:
+        text, _props = comebacks_weekly(store=args.get("dry") != "1")
+        return _send("comebacks-weekly", text, args)
+    except Exception as exc:
+        notify("comebacks-weekly", "amzbot", f"🚨 Coming-back check failed: {exc}", is_error=True)
+        return _json({"error": str(exc)}, 500)
+
+
 # --------------------------------------------------------------- search-term harvest
 PAREO_RE = ("PAREO", "SARONG", "BEACH")
 MONEY_SCALE = {"SE": 11, "PL": 4.3}
@@ -543,11 +555,28 @@ def harvest_text(pb, today=None):
 
 
 def SendSearchTermHarvest(request):
+    """Every Monday since 2026-11-02 (per the user): keyword harvest, plus bid
+    raises for good keywords in even ISO weeks (or raises=1). Proposals with
+    checkboxes on /checks (AdsGrowth), applied after the user ticks them."""
+    from AdsGrowth import Api, _weekly, harvest_block, raise_block
     args = getattr(request, "args", {}) or {}
     try:
-        if args.get("force") != "1" and date.today().isocalendar()[1] % 2:
-            return _json({"skipped": "runs every 2nd Monday (even ISO weeks)"})
-        return _send("search-term-harvest", harvest_text(pb_authenticate()), args)
+        today = date.fromisoformat(args["today"]) if args.get("today") else date.today()
+        pb = pb_authenticate()
+        api = Api(pb)
+        lines, table, props = harvest_block(pb, today, api)
+        tables = [table]
+        if args.get("raises") == "1" or not today.isocalendar()[1] % 2:
+            r_lines, r_table, r_props = raise_block(pb, today, api)
+            lines += [""] + r_lines
+            tables.append(r_table)
+            props += r_props
+        else:
+            lines += ["", "📈 Bid raises: every 2nd Monday (even weeks) and in the monthly review."]
+        text = "\n".join(lines) + "\n\nTick the proposals on the /checks page - applied within 10 minutes."
+        if args.get("dry") != "1":
+            _weekly("SendSearchTermHarvest", "🌾 Keyword harvest + bid raises", text, tables, props, today)
+        return _send("search-term-harvest", text, args)
     except Exception as exc:
         notify("search-term-harvest", "amzbot", f"🚨 Search-term harvest failed: {exc}", is_error=True)
         return _json({"error": str(exc)}, 500)

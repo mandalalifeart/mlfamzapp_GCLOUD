@@ -682,6 +682,11 @@ def SendOrganicRankWeekly(request):
     return _impl(request)
 
 
+def SendComebacksWeekly(request):
+    from WeeklyChecks import SendComebacksWeekly as _impl
+    return _impl(request)
+
+
 def SendSearchTermHarvest(request):
     from WeeklyChecks import SendSearchTermHarvest as _impl
     return _impl(request)

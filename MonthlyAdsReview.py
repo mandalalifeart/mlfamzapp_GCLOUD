@@ -378,6 +378,12 @@ def build(today=None):
     lines += [f"5) Keyword clean-up (60+ days, spend ≥ 10, no order ever): {sum(len(p['action']['items']) for p in kc)} in {len(kc)} campaign(s)"]
     lines += [f"• {p['title']}" for p in kc[:15]] + [""]
     proposals += kc
+    from AdsGrowth import Api, harvest_block, raise_block
+    api = Api(pb)
+    for blk in (raise_block(pb, today, api), harvest_block(pb, today, api)):
+        lines += blk[0] + [""]
+        tables.append(blk[1])
+        proposals += blk[2]
     no_ads = no_ads_block(pb, end)
     lines += [f"6) Products with FBA stock but no ads: see the \"{NO_ADS_LABEL}\" section", ""]
     for i, p in enumerate(proposals, 1):
