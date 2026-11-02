@@ -35,8 +35,8 @@ import requests
 from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY, POCKETBASE_URL, pb_authenticate
 
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")
 
 RETURN_RATE_GOAL_PCT = float(os.environ.get("RETURN_RATE_GOAL_PCT", "10"))
@@ -81,14 +81,18 @@ def compute_return_rates(token, now):
     year-boundary undercounting there is a rare, small edge case)."""
     window_start = (now - timedelta(days=ROLLING_WINDOW_DAYS)).strftime("%Y-%m-%d")
 
-    sales_rows = fetch_all(token, "sku_sales", {"filter": f"year = {now.year}", "fields": "ASIN,quantity,marketplace,sku"})
+    # Units sold in the SAME window (2026-11-02 fix: this used the whole
+    # year's sku_sales against 90 days of returns - 4.7% instead of ~20%).
+    sales_rows = fetch_all(token, "order_items", {
+        "filter": f'purchase_date >= "{window_start}" && order_status != "Cancelled" && marketplace != "mcf"',
+        "fields": "asin,qty,marketplace,sku"})
     sold_usa, sold_eu = defaultdict(int), defaultdict(int)
     sku_by_asin = {}
     for r in sales_rows:
-        asin, mkt = r.get("ASIN"), r.get("marketplace")
-        if not asin or mkt in EXCLUDED_SALES_MARKETPLACES:
+        asin, mkt = r.get("asin"), r.get("marketplace")
+        if not asin or mkt in EXCLUDED_SALES_MARKETPLACES or mkt in ("au", "jp"):
             continue
-        qty = int(r.get("quantity") or 0)
+        qty = int(r.get("qty") or 0)
         (sold_usa if mkt in USA_MARKETPLACES else sold_eu)[asin] += qty
         if asin not in sku_by_asin and r.get("sku"):
             sku_by_asin[asin] = r["sku"]
