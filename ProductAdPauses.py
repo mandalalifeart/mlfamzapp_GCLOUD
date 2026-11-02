@@ -191,11 +191,13 @@ PROFIT_MARKETS = [("usa", {"US", "CA", "MX"}), ("uk", {"UK"}), ("de", {"DE"}), (
 UI_OF_ATOMIC = {"usa": "usa", "ca": "usa", "mex": "usa"}
 
 
-def profit_section(pb, today, save=True):
+def profit_section(pb, today, save=True, start=None, end=None, fresh=False):
+    """start/end (ISO) override the 30-day window (the monthly review uses the
+    last calendar month)."""
     from ProductCost import product_ranking
-    end = (today - timedelta(days=1)).isoformat()
-    start = (today - timedelta(days=PROFIT_WINDOW)).isoformat()
-    h0 = (today - timedelta(days=PROFIT_WINDOW + HISTORY)).isoformat()
+    end = end or (today - timedelta(days=1)).isoformat()
+    start = start or (today - timedelta(days=PROFIT_WINDOW)).isoformat()
+    h0 = (date.fromisoformat(start) - timedelta(days=HISTORY)).isoformat()
     mapping = {r["asin"]: r for r in pb_list_all(pb, "asin_group_mapping", 'asin != ""', fields="asin,sku,group")}
     red, orange = [], []
     for ui, _countries in PROFIT_MARKETS:
@@ -223,7 +225,7 @@ def profit_section(pb, today, save=True):
     ignore = set(json.loads(get_job_state(pb, "product_ad_ignore") or "[]"))
     active = {p["key"] for p in pauses if p["status"] == "active"}
     prop = json.loads(get_job_state(pb, "product_ad_pause_proposals") or "{}")
-    items = prop.get("items", []) if prop.get("date") == today.isoformat() else []
+    items = prop.get("items", []) if prop.get("date") == today.isoformat() and not fresh else []
     have = {x["key"]: i for i, x in enumerate(items, 1)}
     countries = dict(PROFIT_MARKETS)
     winter = today.isoformat() < PAREO_RESUME
@@ -280,7 +282,7 @@ def profit_section(pb, today, save=True):
                 if pid:
                     promos[(l["asin"], UI_OF_ATOMIC.get(l["marketplace"], l["marketplace"]))][names.get(pid) or pid] += l["qty"]
 
-    lines = [f"\n💸 Products losing money (last {PROFIT_WINDOW} days to {end}, profit incl. fees, product cost, "
+    lines = [f"\n💸 Products losing money ({start} → {end}, profit incl. fees, product cost, "
              f"SP+SD ads, SB share, storage, AWD; returns shown, not counted)"]
     lines.append(f"🔴 Ads make it lose money (ads ≥ ${PROFIT_MIN_ADS}): {len(red)}")
     for r in red[:25]:
@@ -307,6 +309,7 @@ def profit_section(pb, today, save=True):
         lines.append(f"({new_left} product ads with too little history left alone)")
     for r in red:
         r["notes"] = dict(r["notes"])
+        r["pauseItems"] = [it for _n, it in r["ads_to_pause"]]
         r["ads_to_pause"] = [n for n, _it in r["ads_to_pause"]]
     return lines, {"red": red, "orange": orange}
 

@@ -820,3 +820,18 @@ def SendReturnsMonthlyCheck(request):
 def GetCheckReports(request):
     from CheckReports import GetCheckReports as handler
     return handler(request)
+
+
+def SendMonthlyAdsReview(request):
+    from MonthlyAdsReview import SendMonthlyAdsReview as handler
+    return handler(request)
+
+
+def SetCheckProposal(request):
+    from CheckReports import SetCheckProposal as handler
+    return handler(request)
+
+
+def ApplyApprovedProposals(request):
+    from CheckReports import ApplyApprovedProposals as handler
+    return handler(request)

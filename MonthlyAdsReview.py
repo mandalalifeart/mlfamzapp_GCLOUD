@@ -1,0 +1,294 @@
+"""Automatic monthly ads review (per the user 2026-11-02: "cut losses and make
+improvements as fast as possible after the month ends").
+
+Runs on the 2nd at 10:00 for the month that just ended (cron), saved to the
+/checks page (check_reports monthly, job ads-monthly-review) with a list of
+proposals, and sent to @baba_update_bot with the page link. The user approves
+proposals with checkboxes on the page (SetCheckProposal); ApplyApprovedProposals
+(cron every 10 min) runs the approved ones that have an executable action and
+reports on Telegram. Proposals without an action are done by Claude in chat.
+
+Sections:
+ 1. Per marketplace: ad spend, ACOS, TACOS - last month vs the month before
+    and the same month last year (country_sales, own currency)
+ 2. Home decor vs pareo per marketplace: spend, ACOS, TACOS (campaign stats
+    split by portfolio/name; all sales per ASIN from asin_traffic_monthly)
+ 3. Ad types per marketplace: SP / SB / SB video / SD spend + ACOS
+ 4. Products losing money (ProductAdPauses.profit_section on the month) ->
+    one proposal per product: pause its SP product ads (action)
+ 5. Keyword clean-up: keywords / product targets with >= 60 days of data,
+    spend >= 10 (x SCALE) in the last 60 days and no order in all stored
+    history, campaign ENABLED, not paused by us before -> one proposal per
+    campaign: pause them (action)
+ 6. Products with FBA stock >= 5 and no ad impressions in that marketplace in
+    the last 14 days -> one proposal per marketplace (manual: add to campaigns)
+Placements are not in it (the placement report takes 30+ min - asked for by hand)."""
+import json
+from collections import defaultdict
+from datetime import date, timedelta
+
+from AsinAnalytics import pb_authenticate, pb_list_all
+
+SCALE = {"SE": 11, "PL": 4.3, "MX": 20, "CA": 1.4}
+CUR = {"US": "$", "UK": "£", "CA": "C$", "MX": "MX$", "SE": "kr ", "PL": "zł "}
+MARKETS = [("usa", "US"), ("de", "DE"), ("uk", "UK"), ("fr", "FR"), ("it", "IT"), ("es", "ES"), ("nl", "NL"),
+           ("se", "SE"), ("pl", "PL"), ("ca", "CA"), ("mex", "MX")]
+TRAFFIC_MP = {"us": "US", "uk": "UK", "de": "DE", "fr": "FR", "it": "IT", "es": "ES", "nl": "NL", "se": "SE", "pl": "PL"}
+PAREO_WORDS = ("PAREO", "SARONG", "BEACH")
+PAGE = "https://mlfamzappfire.web.app/checks?kind=monthly&period={}"
+JOB = "ads-monthly-auto"
+
+
+def _ym(d):
+    return d.year, d.month
+
+
+def _prev(y, m, k=1):
+    for _ in range(k):
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return y, m
+
+
+def _pct(a, b):
+    return a / b * 100 if b else None
+
+
+def _f(x):
+    return "-" if x is None else f"{x:.0f}%"
+
+
+def _camp_stats(pb, start, end):
+    """profile-deduped ads_campaign_stats rows in [start, end]."""
+    best = {}
+    for r in pb_list_all(pb, "ads_campaign_stats", f'date >= "{start}" && date <= "{end}"',
+                         fields="campaign_id,campaign_name,country_code,profile_id,date,spend,sales,ad_product"):
+        k = (r["campaign_id"], r["date"])
+        if k not in best or r["profile_id"] < best[k]["profile_id"]:
+            best[k] = r
+    return list(best.values())
+
+
+def tacos_block(pb, y, m):
+    months = [(y, m), _prev(y, m), (y - 1, m)]
+    flt = " || ".join(f"(year = {a} && month = {b})" for a, b in months)
+    tot = defaultdict(lambda: [0.0, 0.0, 0.0])
+    for r in pb_list_all(pb, "country_sales", f"({flt})", fields="marketplace,year,month,sales,ppc_spend,ppc_sales"):
+        t = tot[(r["marketplace"], (r["year"], r["month"]))]
+        t[0] += r.get("sales") or 0
+        t[1] += r.get("ppc_spend") or 0
+        t[2] += r.get("ppc_sales") or 0
+    lines = [f"1) Per marketplace - {y}-{m:02d} (vs {months[1][0]}-{months[1][1]:02d} | {y - 1}-{m:02d}), own currency"]
+    for mp, cc in MARKETS:
+        sales, spend, adsales = tot.get((mp, (y, m)), (0, 0, 0))
+        if not (sales or spend):
+            continue
+        p = tot.get((mp, months[1]), (0, 0, 0))
+        ly = tot.get((mp, months[2]), (0, 0, 0))
+        tac = _pct(spend, sales)
+        target = 20 if cc in ("US", "DE") else 25
+        mark = "🔴" if tac and tac > target * 1.25 else "🟠" if tac and tac > target else "🟢"
+        lines.append(f"{mark} {cc}: sales {sales:,.0f}, ads {spend:,.0f}, ACOS {_f(_pct(spend, adsales))}, TACOS {_f(tac)} "
+                     f"(before {_f(_pct(p[1], p[0]))} | last year {_f(_pct(ly[1], ly[0]))}; target {target}%)")
+    return lines
+
+
+def segment_block(pb, y, m, rows, camp_port):
+    groups = {g["asin"]: g["group"] for g in pb_list_all(pb, "asin_group_mapping", 'asin != ""', fields="asin,group")}
+    ads = defaultdict(lambda: [0.0, 0.0])
+    for r in rows:
+        text = f"{camp_port.get(r['campaign_id'], '')} {r['campaign_name']}".upper()
+        seg = "pareo" if any(w in text for w in PAREO_WORDS) else "home"
+        a = ads[(r["country_code"].upper(), seg)]
+        a[0] += r.get("spend") or 0
+        a[1] += r.get("sales") or 0
+    sales = defaultdict(float)
+    for r in pb_list_all(pb, "asin_traffic_monthly", f"year = {y} && month = {m}", fields="asin,marketplace,sales"):
+        g = (groups.get(r["asin"]) or "").upper()
+        if g and not g.startswith("IGNORE") and r["marketplace"] in TRAFFIC_MP:
+            sales[(TRAFFIC_MP[r["marketplace"]], "pareo" if "PAREO" in g else "home")] += r.get("sales") or 0
+    lines = ["2) Home decor vs pareo (ACOS / TACOS)"]
+    for _mp, cc in MARKETS:
+        parts = []
+        for seg, name in (("home", "home decor"), ("pareo", "pareo")):
+            spend, adsales = ads.get((cc, seg), (0, 0))
+            if spend < 1:
+                continue
+            tac = _pct(spend, sales.get((cc, seg), 0))
+            mark = "🔴" if tac and tac > 35 else ""
+            parts.append(f"{name} {spend:,.0f}: {_f(_pct(spend, adsales))} / {_f(tac)}{mark}")
+        if parts:
+            lines.append(f"• {cc}: " + " | ".join(parts))
+    return lines
+
+
+def adtype_block(rows):
+    t = defaultdict(lambda: [0.0, 0.0])
+    for r in rows:
+        prod = r.get("ad_product") or ""
+        kind = "SD" if "DISPLAY" in prod else ("SB video" if "VIDEO" in (r["campaign_name"] or "").upper() else "SB") \
+            if prod != "SPONSORED_PRODUCTS" else "SP"
+        a = t[(r["country_code"].upper(), kind)]
+        a[0] += r.get("spend") or 0
+        a[1] += r.get("sales") or 0
+    lines = ["3) Ad types (spend, ACOS)"]
+    for _mp, cc in MARKETS:
+        parts = [f"{k} {t[(cc, k)][0]:,.0f} {_f(_pct(*t[(cc, k)]))}{' 🔴' if (_pct(*t[(cc, k)]) or 999) > 60 else ''}"
+                 for k in ("SP", "SB", "SB video", "SD") if t[(cc, k)][0] >= 1]
+        if parts:
+            lines.append(f"• {cc}: " + " · ".join(parts))
+    return lines
+
+
+def keyword_cleanup(pb, end, camps):
+    """-> proposals (one per campaign) to pause targets with 60+ days, spend >= 10, no order ever."""
+    e = date.fromisoformat(end)
+    w0 = (e - timedelta(days=59)).isoformat()
+    rows = pb_list_all(pb, "ads_keyword_stats", f'date >= "{(e - timedelta(days=365)).isoformat()}"',
+                       fields="profile_id,target_id,target_text,match_type,target_type,campaign_id,campaign_name,ad_group_id,"
+                              "ad_product,country_code,date,spend,orders,bid")
+    best = {}
+    for r in rows:
+        k = (r["target_id"], r["date"])
+        if k not in best or r["profile_id"] < best[k]["profile_id"]:
+            best[k] = r
+    agg = {}
+    for r in best.values():
+        if r["date"] > end:
+            continue
+        a = agg.setdefault(r["target_id"], {"first": r["date"], "orders": 0, "spend60": 0.0, "last": r})
+        a["first"] = min(a["first"], r["date"])
+        a["orders"] += r.get("orders") or 0
+        if r["date"] >= w0:
+            a["spend60"] += r.get("spend") or 0
+        if r["date"] >= a["last"]["date"]:
+            a["last"] = r
+    paused = {r["target_id"] for r in pb_list_all(pb, "ads_bid_change_log", 'action = "disable" || action = "pause"',
+                                                   fields="target_id")}
+    by_camp = defaultdict(list)
+    for tid, a in agg.items():
+        r = a["last"]
+        cc = r["country_code"].upper()
+        if a["orders"] or a["first"] > (e - timedelta(days=60)).isoformat() or a["spend60"] < 10 * SCALE.get(cc, 1):
+            continue
+        if r["match_type"] in ("TARGETING_EXPRESSION_PREDEFINED", "THEME") or r["target_text"] in ("*", "") or tid in paused:
+            continue
+        if (camps.get(r["campaign_id"]) or {}).get("campaign_status") != "ENABLED" or not r.get("bid"):
+            continue
+        by_camp[(cc, r["campaign_id"], r["campaign_name"])].append({
+            "target_id": tid, "text": r["target_text"], "match_type": r["match_type"], "campaign_id": r["campaign_id"],
+            "campaign": r["campaign_name"], "ad_group_id": r.get("ad_group_id") or "", "profile_id": r["profile_id"],
+            "ad_product": r["ad_product"], "country": cc, "bid": r["bid"], "spend60": round(a["spend60"], 2),
+            "since": a["first"]})
+    props = []
+    for (cc, _cid, cname), items in sorted(by_camp.items(), key=lambda kv: -sum(i["spend60"] for i in kv[1])):
+        items.sort(key=lambda i: -i["spend60"])
+        cur = CUR.get(cc, "€")
+        props.append({"section": "Keyword clean-up", "title": f"{cc} {cname}: pause {len(items)} keyword(s)/target(s) with no sale ever",
+                      "detail": "; ".join(f"{i['text']} ({i['match_type'].lower()}, {cur}{i['spend60']:.0f} in 60d, since {i['since']})"
+                                          for i in items[:12]) + (" …" if len(items) > 12 else ""),
+                      "action": {"type": "pause_targets", "items": items}})
+    return props
+
+
+def no_ads_block(pb, end):
+    e = date.fromisoformat(end)
+    s = (e - timedelta(days=13)).isoformat()
+    seen = defaultdict(set)
+    for r in pb_list_all(pb, "ads_advertised_product_stats", f'date >= "{s}" && date <= "{end}" && impressions > 0',
+                         fields="asin,country_code"):
+        seen[r["country_code"].upper()].add(r["asin"])
+    sku_asin = {g["sku"]: (g["asin"], g["group"]) for g in pb_list_all(pb, "asin_group_mapping", 'asin != ""',
+                                                                         fields="sku,asin,group")}
+    stock = pb_list_all(pb, "sku_statistics", "", fields="sku,usa_balance_fba,de_balance_fba,uk_balance_fba")
+    props = []
+    winter = end < "2027-02-20"  # pareo winter mode (no pareo ads on purpose) - same date as ProductAdPauses
+    for field, countries in (("usa_balance_fba", ["US"]), ("de_balance_fba", ["DE", "FR", "IT", "ES"]),
+                             ("uk_balance_fba", ["UK"])):
+        for cc in countries:
+            miss = []
+            for r in stock:
+                asin, grp = sku_asin.get(r["sku"], (None, ""))
+                if not asin or (grp or "").upper().startswith("IGNORE") or (r.get(field) or 0) < 5:
+                    continue
+                if winter and "PAREO" in (grp or "").upper():
+                    continue
+                if asin not in seen[cc]:
+                    miss.append(f"{r['sku']} ({r.get(field):.0f})")
+            if miss:
+                props.append({"section": "Products without ads", "title": f"{cc}: {len(miss)} product(s) with FBA stock but no ad in 14 days",
+                              "detail": ", ".join(miss[:40]) + (" …" if len(miss) > 40 else "") +
+                              " - add to a campaign (or leave out on purpose, e.g. pareo in winter)"})
+    return props
+
+
+def build(today=None):
+    today = today or date.today()
+    first = today.replace(day=1)
+    last_day = first - timedelta(days=1)
+    y, m = _ym(last_day)
+    start, end = f"{y}-{m:02d}-01", last_day.isoformat()
+    period = f"{y}-{m:02d}"
+    pb = pb_authenticate()
+    camps = {c["campaign_id"]: c for c in pb_list_all(pb, "ads_campaigns", 'campaign_id != ""',
+                                                       fields="campaign_id,campaign_name,campaign_status,portfolio_id")}
+    ports = {p["portfolio_id"]: p["name"] for p in pb_list_all(pb, "ads_portfolios", 'portfolio_id != ""', fields="portfolio_id,name")}
+    camp_port = {cid: ports.get(c.get("portfolio_id"), "") for cid, c in camps.items()}
+    rows = _camp_stats(pb, start, end)
+
+    lines = [f"📊 MONTHLY ADS REVIEW - {period}", "(last ~7 days can still gain ad sales - 7-day attribution)", ""]
+    lines += tacos_block(pb, y, m) + [""]
+    lines += segment_block(pb, y, m, rows, camp_port) + [""]
+    lines += adtype_block(rows) + [""]
+
+    proposals = []
+    from ProductAdPauses import profit_section
+    _p_lines, p_data = profit_section(pb, today, save=False, start=start, end=end, fresh=True)
+    lines.append(f"4) Products losing money (USD; profit incl. fees, product cost, SP+SD ads, SB share, storage, AWD - "
+                 f"returns not counted): 🔴 {len(p_data['red'])} because of ads, 🟠 {len(p_data['orange'])} even before ads")
+    for r in p_data["red"][:25]:
+        why = "; ".join(f"{n} ad{'s' if n > 1 else ''} {w}" for w, n in (r.get("notes") or {}).items())
+        lines.append(f"🔴 {r['mp'].upper()} {r['sku']}: {r['units']:.0f} units at ${r['price']:.2f}, ads ${r['ads']:.0f} "
+                     f"(TACOS {r['tacos']}%) → ${r['profit']:.0f}" + (f" - {why}" if why else ""))
+    for r in p_data["orange"][:15]:
+        lines.append(f"🟠 {r['mp'].upper()} {r['sku']}: {r['units']:.0f} units at ${r['price']:.2f} → ${r['before']:.0f} before ads")
+    lines.append("")
+    for r in p_data["red"]:
+        if r.get("pauseItems"):
+            proposals.append({"section": "Products losing money",
+                              "title": f"{r['mp'].upper()} {r['sku']}: pause {len(r['pauseItems'])} product ad(s)",
+                              "detail": f"{r['units']:.0f} units at ${r['price']:.2f}, ads ${r['ads']:.0f} (TACOS {r['tacos']}%) → "
+                                        f"profit ${r['profit']:.0f}; " + "; ".join(
+                                            f"{it['campaign']} ({it['history']} history, {it['pause_days']} days)" for it in r["pauseItems"]),
+                              "action": {"type": "pause_product_ads", "items": r["pauseItems"]}})
+    for r in p_data["orange"]:
+        proposals.append({"section": "Products losing money",
+                          "title": f"{r['mp'].upper()} {r['sku']}: loses money before ads - price / coupon",
+                          "detail": f"{r['units']:.0f} units at ${r['price']:.2f} → ${r['before']:.0f} before ads. Decide price or coupon (Claude prepares it)."})
+    kc = keyword_cleanup(pb, end, camps)
+    lines += [f"5) Keyword clean-up (60+ days, spend ≥ 10, no order ever): {sum(len(p['action']['items']) for p in kc)} in {len(kc)} campaign(s)"]
+    lines += [f"• {p['title']}" for p in kc[:15]] + [""]
+    proposals += kc
+    na = no_ads_block(pb, end)
+    lines += ["6) Products with FBA stock but no ads (last 14 days; pareos left out until the season restart)"] + [f"• {p['title']}" for p in na] + [""]
+    proposals += na
+    for i, p in enumerate(proposals, 1):
+        p.update(id=i, status="proposed")
+    lines.append(f"{len(proposals)} proposals - approve them on the page: {PAGE.format(period)}")
+    return period, "\n".join(lines), proposals
+
+
+def SendMonthlyAdsReview(request):
+    from CheckReports import save_report
+    from NotificationRouting import notify
+    args = getattr(request, "args", {}) or {}
+    try:
+        period, text, proposals = build(date.fromisoformat(args["today"]) if args.get("today") else None)
+        if str(args.get("dry")) == "1":
+            return json.dumps({"text": text, "proposals": proposals}), 200, {"Content-Type": "application/json"}
+        save_report("monthly", period, JOB, "🤖 Ads monthly review (automatic)", text, proposals=proposals)
+        head = "\n".join(text.splitlines()[:40])
+        notify("monthly-ads-review", "amzbot", head + f"\n\n✅ {len(proposals)} proposals to approve: {PAGE.format(period)}")
+        return json.dumps({"period": period, "proposals": len(proposals)}), 200, {"Content-Type": "application/json"}
+    except Exception as exc:
+        notify("monthly-ads-review", "amzbot", f"🚨 Monthly ads review failed: {exc}", is_error=True)
+        return json.dumps({"error": str(exc)}), 500, {"Content-Type": "application/json"}
