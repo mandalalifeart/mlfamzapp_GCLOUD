@@ -637,6 +637,16 @@ def GetAdsReviews(request):
     return _impl(request)
 
 
+def GetAdsChecklist(request):
+    from AdsReviews import GetAdsChecklist as _impl
+    return _impl(request)
+
+
+def SetAdsChecklistItem(request):
+    from AdsReviews import SetAdsChecklistItem as _impl
+    return _impl(request)
+
+
 def SendOffAmazonWeekly(request):
     from OffAmazonWeekly import SendOffAmazonWeekly as _impl
     return _impl(request)

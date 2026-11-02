@@ -197,6 +197,8 @@ ROUTED_FUNCTIONS = [
     "UploadShipmentDocument",
     "SetImportShipmentRole",
     "GetAdsReviews",
+    "GetAdsChecklist",
+    "SetAdsChecklistItem",
     "SendWeeklyChangesReview",
     "SendWeeklyBidChangeSummary",
 ]

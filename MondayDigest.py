@@ -73,6 +73,11 @@ def build(day):
     missing = [labels[n] for n, _ in LABELS if n not in files]
     if missing:
         head.append("\nNo message this week from: " + ", ".join(missing))
+    # Ads review check lists (2026-11-02, per the user): weekly every Monday,
+    # monthly on the first Monday of the month.
+    head.append("\n✅ Weekly ads review checklist: https://mlfamzappfire.web.app/ads-reviews#weekly")
+    if int(day[8:10]) <= 7:
+        head.append("✅ Monthly ads review checklist: https://mlfamzappfire.web.app/ads-reviews#monthly")
     return "\n".join(head), "\n".join(full), len(order)
 
 
