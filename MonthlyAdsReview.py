@@ -61,7 +61,7 @@ def _camp_stats(pb, start, end):
     """profile-deduped ads_campaign_stats rows in [start, end]."""
     best = {}
     for r in pb_list_all(pb, "ads_campaign_stats", f'date >= "{start}" && date <= "{end}"',
-                         fields="campaign_id,campaign_name,country_code,profile_id,date,spend,sales,ad_product"):
+                         fields="campaign_id,campaign_name,country_code,profile_id,date,spend,sales,orders,ad_product"):
         k = (r["campaign_id"], r["date"])
         if k not in best or r["profile_id"] < best[k]["profile_id"]:
             best[k] = r
@@ -152,6 +152,77 @@ def adtype_block(rows):
             trows.append(row)
     return lines, {"title": "Ad types (spend / ACOS)", "rows": trows,
                    "columns": ["Marketplace", "SP spend", "SP ACOS", "SB spend", "SB ACOS", "SB video spend", "SB video ACOS", "SD spend", "SD ACOS"]}
+
+
+SEG_TARGET = {"home": 35, "pareo": 30}  # target ACOS % (USA home decor plan; pareo 30)
+
+
+def campaigns_block(pb, y, m, rows, camps, camp_port):
+    """All campaigns with spend last month, grouped per marketplace + department
+    (per the user 2026-11-02: "show all campaigns, sort them per mp/department").
+    Verdict: 🟢 grow = ACOS <= target and >= 70% of the budget used; 🔴 ACOS >= 2x
+    target, or spend >= 15 (x SCALE) with no sales; 🟠 above target; else ok."""
+    import calendar
+    days = calendar.monthrange(y, m)[1]
+    py, pm = _prev(y, m)
+    prev_rows = _camp_stats(pb, f"{py}-{pm:02d}-01", f"{py}-{pm:02d}-{calendar.monthrange(py, pm)[1]:02d}")
+
+    def agg(rs):
+        t = defaultdict(lambda: {"spend": 0.0, "sales": 0.0, "orders": 0.0, "name": "", "cc": "", "prod": ""})
+        for r in rs:
+            a = t[r["campaign_id"]]
+            a["spend"] += r.get("spend") or 0
+            a["sales"] += r.get("sales") or 0
+            a["orders"] += r.get("orders") or 0
+            a["name"], a["cc"], a["prod"] = r["campaign_name"], r["country_code"].upper(), r.get("ad_product") or ""
+        return t
+
+    cur, prev = agg(rows), agg(prev_rows)
+    groups = defaultdict(list)
+    for cid, a in cur.items():
+        if a["spend"] < 0.5:
+            continue
+        text = f"{camp_port.get(cid, '')} {a['name']}".upper()
+        seg = "pareo" if any(w in text for w in PAREO_WORDS) else "home"
+        c = camps.get(cid, {})
+        kind = "SP" if a["prod"] == "SPONSORED_PRODUCTS" else "SD" if "DISPLAY" in a["prod"] else \
+            ("SB video" if "VIDEO" in a["name"].upper() else "SB")
+        acos = _pct(a["spend"], a["sales"])
+        target = SEG_TARGET[seg]
+        sc = SCALE.get(a["cc"], 1)
+        budget = c.get("budget") or 0
+        used = a["spend"] / days / budget * 100 if budget else None
+        if not a["sales"] and a["spend"] >= 15 * sc or (acos or 0) >= 2 * target:
+            verdict = "🔴 cut"
+        elif acos is not None and acos <= target and (used or 0) >= 70:
+            verdict = "🟢 grow"
+        elif acos is not None and acos <= target:
+            verdict = "🟢 ok"
+        else:
+            verdict = "🟠 above target"
+        status = (c.get("campaign_status") or "").title()
+        if status and status != "Enabled":
+            verdict = f"⏸ {status.lower()} now ({verdict.split(' ', 1)[1]})"
+        p = prev.get(cid)
+        groups[(a["cc"], seg)].append([
+            a["name"], kind, (c.get("campaign_status") or "").title(), round(budget, 2) if budget else "",
+            round(a["spend"] / days, 2), f"{used:.0f}%" if used is not None else "", round(a["spend"]), round(a["sales"]),
+            round(a["orders"]), _f(acos), _f(_pct(p["spend"], p["sales"])) if p and p["spend"] >= 0.5 else "", f"{target}%", verdict])
+    order = {cc: i for i, (_mp, cc) in enumerate(MARKETS)}
+    trows, lines = [], ["7) All campaigns per marketplace / department (own currency) - see the table"]
+    for (cc, seg) in sorted(groups, key=lambda k: (order.get(k[0], 99), k[1])):
+        kids = sorted(groups[(cc, seg)], key=lambda r: -r[6])
+        sp, sa = sum(r[6] for r in kids), sum(r[7] for r in kids)
+        grow = [r[0] for r in kids if r[12] == "🟢 grow"]
+        cut = [r[0] for r in kids if r[12].startswith("🔴")]  # paused ones are "⏸ ..." and left out
+        trows.append({"cells": [f"{cc} · {'Home decor' if seg == 'home' else 'Pareo'} ({len(kids)})", "", "", "", "", "",
+                                sp, sa, sum(r[8] for r in kids), _f(_pct(sp, sa)), "", f"{SEG_TARGET[seg]}%",
+                                f"🟢 {len(grow)} · 🔴 {len(cut)}"], "children": kids})
+        lines.append(f"• {cc} {seg}: spend {sp:,.0f}, ACOS {_f(_pct(sp, sa))}"
+                     + (f" | grow: {', '.join(grow[:4])}" if grow else "") + (f" | cut: {', '.join(cut[:4])}" if cut else ""))
+    return lines, {"title": f"All campaigns {y}-{m:02d} per marketplace / department (own currency) - click a row",
+                   "columns": ["Campaign", "Type", "Status now", "Budget/day now", "Spend/day", "Budget used", "Spend", "Sales",
+                               "Orders", "ACOS", "ACOS month before", "Target", "Verdict"], "rows": trows}
 
 
 def keyword_cleanup(pb, end, camps):
@@ -245,14 +316,15 @@ def build(today=None):
     period = f"{y}-{m:02d}"
     pb = pb_authenticate()
     camps = {c["campaign_id"]: c for c in pb_list_all(pb, "ads_campaigns", 'campaign_id != ""',
-                                                       fields="campaign_id,campaign_name,campaign_status,portfolio_id")}
+                                                       fields="campaign_id,campaign_name,campaign_status,portfolio_id,budget")}
     ports = {p["portfolio_id"]: p["name"] for p in pb_list_all(pb, "ads_portfolios", 'portfolio_id != ""', fields="portfolio_id,name")}
     camp_port = {cid: ports.get(c.get("portfolio_id"), "") for cid, c in camps.items()}
     rows = _camp_stats(pb, start, end)
 
     lines = [f"📊 MONTHLY ADS REVIEW - {period}", "(last ~7 days can still gain ad sales - 7-day attribution)", ""]
     tables = []
-    for blk in (tacos_block(pb, y, m), segment_block(pb, y, m, rows, camp_port), adtype_block(rows)):
+    for blk in (tacos_block(pb, y, m), segment_block(pb, y, m, rows, camp_port), adtype_block(rows),
+                campaigns_block(pb, y, m, rows, camps, camp_port)):
         lines += blk[0] + [""]
         tables.append(blk[1])
 
