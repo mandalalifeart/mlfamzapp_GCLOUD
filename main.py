@@ -767,6 +767,11 @@ def GetProductCostPeriod(request):
     return handler(request)
 
 
+def GetProductProfitMonthly(request):
+    from ProductCost import GetProductProfitMonthly as handler
+    return handler(request)
+
+
 def GetProductCostScenarios(request):
     from ProductCost import GetProductCostScenarios as handler
     return handler(request)

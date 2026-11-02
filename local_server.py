@@ -185,6 +185,7 @@ ROUTED_FUNCTIONS = [
     "GetBsrHistory",
     "GetProductCost",
     "GetProductCostPeriod",
+    "GetProductProfitMonthly",
     "GetProductCostScenarios",
     "GetProductRanking",
     "UpdateFbaStorageFees",

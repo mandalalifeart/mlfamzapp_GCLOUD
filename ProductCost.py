@@ -282,6 +282,64 @@ def department_tacos(token, months):
     return _cached(f"dept|{months}", 6, compute)
 
 
+# ---------- SB spend split over units (per the user 2026-11-02) ----------
+# SB ads aren't reported per product, so each product carries a share:
+#   SB cost of an ASIN = SB spend of its section (home decor / pareo) in that
+#                        marketplace and month / all units the section sold
+#                        there that month x units of the ASIN.
+# Section of an SB campaign = portfolio/name contains PAREO/SARONG/BEACH ->
+# pareo, else home decor (same as department_tacos). Shares add up to the SB
+# spend exactly. SB data starts Jan 2026 (none stored for 2025).
+
+def _section_of_group(group):
+    g = (group or "").upper()
+    if not g or g.startswith("IGNORE"):
+        return None
+    return "pareo" if "PAREO" in g else "home"
+
+
+def sb_spend_monthly(token, months):
+    """(ads COUNTRY, section, 'YYYY-MM') -> SB spend in USD."""
+    def compute():
+        ports = {p["portfolio_id"]: p["name"] for p in pb_list_all(token, "ads_portfolios", 'portfolio_id != ""',
+                                                                   fields="portfolio_id,name")}
+        camp_port = {c["campaign_id"]: ports.get(c.get("portfolio_id"), "")
+                     for c in pb_list_all(token, "ads_campaigns", 'campaign_id != ""', fields="campaign_id,portfolio_id")}
+        best = {}
+        for r in pb_list_all(token, "ads_campaign_stats", f'ad_product = "SPONSORED_BRANDS" && {_month_filter(months)}',
+                             fields="campaign_id,campaign_name,country_code,profile_id,date,spend,currency_code"):
+            k = (r["campaign_id"], r["date"])
+            if k not in best or r["profile_id"] < best[k]["profile_id"]:
+                best[k] = r
+        out = defaultdict(float)
+        for r in best.values():
+            text = f"{camp_port.get(r['campaign_id'], '')} {r['campaign_name']}".upper()
+            seg = "pareo" if any(w in text for w in PAREO_WORDS) else "home"
+            out[(r["country_code"].upper(), seg, r["date"][:7])] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
+        return dict(out)
+    return _cached(f"sbspend|{sorted(months)}", 6, compute)
+
+
+def section_units_monthly(token, months):
+    """(ads COUNTRY, section, 'YYYY-MM') -> all units sold (asin_traffic_monthly)."""
+    def compute():
+        groups = {m["asin"]: m["group"] for m in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,group")}
+        out = defaultdict(float)
+        for r in pb_list_all(token, "asin_traffic_monthly", _month_filter(months), fields="asin,marketplace,year,month,units"):
+            seg = _section_of_group(groups.get(r["asin"]))
+            ads = ADS_CODE.get(r["marketplace"])
+            if seg and ads:
+                out[(ads, seg, f"{int(r['year']):04d}-{int(r['month']):02d}")] += r.get("units") or 0
+        return dict(out)
+    return _cached(f"secunits|{sorted(months)}", 6, compute)
+
+
+def sb_per_unit_monthly(token, months):
+    """(ads COUNTRY, section, 'YYYY-MM') -> SB USD per unit sold."""
+    spend, units = sb_spend_monthly(token, months), section_units_monthly(token, months)
+    return {k: v / units[k] for k, v in spend.items() if units.get(k)}
+
+
 # ---------- endpoint ----------
 
 def product_cost(sku="", asin=""):
@@ -323,6 +381,15 @@ def product_cost(sku="", asin=""):
     units_mp = defaultdict(float)
     for r in pb_list_all(token, "asin_traffic_monthly", f'asin = "{asin}" && {_month_filter(months)}', fields="marketplace,units"):
         units_mp[r["marketplace"]] += r.get("units") or 0
+    # SB share per unit (USD) over the same 3 months: section SB spend / section units.
+    sb_sp, sb_un = sb_spend_monthly(token, months), section_units_monthly(token, months)
+    sb_unit = {}
+    for (country, seg, _ym), v in sb_sp.items():
+        if seg == dept:
+            sb_unit.setdefault(country, [0.0, 0.0])[0] += v
+    for (country, seg, _ym), v in sb_un.items():
+        if seg == dept and country in sb_unit:
+            sb_unit[country][1] += v
     markets = []
     for mp, tcode, acode, vat, cur, cred in MARKETS:
         pr = prices.get(mp)
@@ -340,8 +407,11 @@ def product_cost(sku="", asin=""):
         m["landed"] = round(cost["landed"] * fx, 2) if cost.get("landed") else None
         ps, psales = p_spend.get(acode, 0), p_sales.get(tcode, 0)
         ds, dsales = d_spend.get((acode, dept), 0), d_sales.get((tcode, dept), 0)
+        sbs, sbu = sb_unit.get(acode, (0.0, 0.0))
+        m["sbPerUnit"] = round(sbs / sbu * fx, 2) if sbu else 0.0
         m["productTacos"] = {"spend": round(ps, 2), "sales": round(psales, 2),
-                             "pct": round(ps / psales * 100, 1) if psales else None}
+                             "pct": round(ps / psales * 100, 1) if psales else None,
+                             "sbPerUnit": m["sbPerUnit"]}
         m["deptTacos"] = {"spend": round(ds, 2), "sales": round(dsales, 2),
                           "pct": round(ds / dsales * 100, 1) if dsales else None}
         ex, u = extra_mp.get(tcode, {}), units_mp.get(tcode, 0)
@@ -358,10 +428,10 @@ def product_cost(sku="", asin=""):
             if base is None:
                 continue
             if pct is None and key == "productTacos" and not ps:
-                pct = 0.0  # no ads on this product = no ad cost
+                pct = 0.0  # no SP/SD ads on this product = only its SB share
             if pct is None:
                 continue
-            ad = round(price * pct / 100, 2)
+            ad = round(price * pct / 100 + (m["sbPerUnit"] if key == "productTacos" else 0), 2)
             m[key]["adCost"] = ad
             m[key]["profit"] = round(base - ad, 2)
             m[key]["margin"] = round((base - ad) / m["netPrice"] * 100, 1) if m["netPrice"] else None
@@ -429,8 +499,8 @@ def fee_rates(token, asin):
     return out
 
 
-def period_totals(sku="", asin="", period="last_3m"):
-    token = pb_authenticate()
+def period_totals(sku="", asin="", period="last_3m", months=None, _token=None):
+    token = _token or pb_authenticate()
     mapping = pb_list_all(token, "asin_group_mapping", f"sku = {json.dumps(sku)}" if sku else f"asin = {json.dumps(asin)}")
     if not mapping:
         return {"error": f"{sku or asin} not in asin_group_mapping"}
@@ -438,14 +508,17 @@ def period_totals(sku="", asin="", period="last_3m"):
     asin = row["asin"]
     dept = "pareo" if "PAREO" in (row.get("group") or "").upper() else "home"
     landed = landed_cost(token, row.get("ean")).get("landed")
-    months = period_months(period)
+    months = months or period_months(period)
     fees = fee_rates(token, asin)
     vat = {t: v for _m, t, _a, v, _c, _cr in MARKETS} | OTHER_VAT
 
     rows = defaultdict(lambda: defaultdict(float))
+    sb_rate = sb_per_unit_monthly(token, months)
     for r in pb_list_all(token, "asin_traffic_monthly", f'asin = "{asin}" && {_month_filter(months)}',
-                         fields="marketplace,units,sales,units_refunded,currency"):
+                         fields="marketplace,units,sales,units_refunded,currency,year,month"):
         x = rows[r["marketplace"]]
+        ym = f"{int(r['year']):04d}-{int(r['month']):02d}"
+        x["sb"] += sb_rate.get((ADS_CODE.get(r["marketplace"], ""), dept, ym), 0) * (r.get("units") or 0)
         x["units"] += r.get("units") or 0
         x["refunded"] += r.get("units_refunded") or 0
         x["sales"] += usd(r.get("sales") or 0, r.get("currency") or "USD")
@@ -491,29 +564,29 @@ def period_totals(sku="", asin="", period="last_3m"):
         fee = f["referralPct"] * x["sales"] + f["fbaUsd"] * x["units"]
         cost = (landed or 0) * x["units"]
         extras = x["returnsCost"] + x["storage"] + x["awd"]
-        profit = net - fee - cost - x["ads"] - extras
+        profit = net - fee - cost - x["ads"] - x["sb"] - extras
         ds, dsl = d_spend.get((ADS_CODE.get(mp, ""), dept), 0), d_sales.get((mp, dept), 0)
         dept_tacos = ds / dsl if dsl else None
         dept_profit = net - fee - cost - extras - dept_tacos * x["sales"] if dept_tacos is not None else None
         line = {"mp": mp.upper(), "units": x["units"], "refunded": x["refunded"], "sales": round(x["sales"], 2),
                 "vat": round(x["sales"] - net, 2), "netSales": round(net, 2), "fees": round(fee, 2),
-                "productCost": round(cost, 2), "ads": round(x["ads"], 2),
+                "productCost": round(cost, 2), "ads": round(x["ads"], 2), "sbAds": round(x["sb"], 2),
                 "returnedUnits": x["returnedUnits"], "returns": round(x["returnsCost"], 2),
                 "storage": round(x["storage"], 2), "awd": round(x["awd"], 2),
-                "tacos": round(x["ads"] / x["sales"] * 100, 1) if x["sales"] else None,
+                "tacos": round((x["ads"] + x["sb"]) / x["sales"] * 100, 1) if x["sales"] else None,
                 "profit": round(profit, 2), "margin": round(profit / net * 100, 1) if net else None,
                 "profitPerUnit": round(profit / x["units"], 2) if x["units"] else None,
                 "deptTacos": round(dept_tacos * 100, 1) if dept_tacos is not None else None,
                 "deptProfit": round(dept_profit, 2) if dept_profit is not None else None}
         out.append(line)
         for k in ("units", "refunded", "returnedUnits", "sales", "vat", "netSales", "fees", "productCost", "ads",
-                  "returns", "storage", "awd", "profit"):
+                  "sbAds", "returns", "storage", "awd", "profit"):
             tot[k] += line[k]
         tot["deptProfit"] += line["deptProfit"] if line["deptProfit"] is not None else line["profit"]
     out.sort(key=lambda r: -r["sales"])
     total = {k: round(v, 2) for k, v in tot.items()}
     if out:
-        total.update(mp="TOTAL", tacos=round(tot["ads"] / tot["sales"] * 100, 1) if tot["sales"] else None,
+        total.update(mp="TOTAL", tacos=round((tot["ads"] + tot["sbAds"]) / tot["sales"] * 100, 1) if tot["sales"] else None,
                      margin=round(tot["profit"] / tot["netSales"] * 100, 1) if tot["netSales"] else None,
                      profitPerUnit=round(tot["profit"] / tot["units"], 2) if tot["units"] else None)
     return {"sku": row["sku"], "asin": asin, "period": period, "periods": PERIODS, "landed": landed,
@@ -527,6 +600,43 @@ def GetProductCostPeriod(request):
         if period not in PERIODS:
             return _json({"error": f"period must be one of {list(PERIODS)}"}, 400)
         res = period_totals((args.get("sku") or "").strip(), (args.get("asin") or "").strip(), period)
+        return _json(res, 404 if "error" in res else 200)
+    except Exception as exc:
+        return _json({"error": str(exc)}, 500)
+
+
+ADS_DATA_FROM = (2026, 1)  # per-product ad spend (SP/SD/SB) is stored from Jan 2026
+
+
+def profit_monthly(sku="", asin="", n=12):
+    """Profitability graph (per the user 2026-11-02): the period totals for each
+    of the last n months incl. the current one (all marketplaces, USD)."""
+    token = pb_authenticate()
+    y, m = date.today().year, date.today().month
+    months = []
+    for _ in range(n):
+        months.append((y, m))
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    out, info = [], {}
+    for ym in reversed(months):
+        res = period_totals(sku, asin, months=[ym], _token=token)
+        if "error" in res:
+            return res
+        info = {"sku": res["sku"], "asin": res["asin"], "landed": res["landed"]}
+        t = res.get("total") or {}
+        out.append({"month": f"{ym[0]:04d}-{ym[1]:02d}", "partial": ym == (date.today().year, date.today().month),
+                    "adsData": ym >= ADS_DATA_FROM,
+                    **{k: t.get(k, 0) for k in ("units", "sales", "netSales", "fees", "productCost", "ads", "sbAds",
+                                                "returns", "storage", "awd", "profit")},
+                    "margin": t.get("margin"), "tacos": t.get("tacos")})
+    return {**info, "months": out}
+
+
+def GetProductProfitMonthly(request):
+    args = getattr(request, "args", {}) or {}
+    try:
+        res = profit_monthly((args.get("sku") or "").strip(), (args.get("asin") or "").strip(),
+                             min(int(args.get("months") or 12), 24))
         return _json(res, 404 if "error" in res else 200)
     except Exception as exc:
         return _json({"error": str(exc)}, 500)
@@ -686,7 +796,8 @@ def product_ranking(start_date, end_date, marketplaces=None):
     lines = pb_list_all(token, "order_items",
                         f'purchase_date >= "{start_date}" && purchase_date <= "{end_date}" && ({mp_filter}) '
                         f'&& order_status != "Cancelled"',
-                        fields="asin,marketplace,qty,net_amount,currency")
+                        fields="asin,marketplace,qty,net_amount,currency,purchase_date")
+    sec_units, asin_units = defaultdict(float), defaultdict(float)
     fees = fee_table(token, sorted({l["asin"] for l in lines if l.get("asin")}))
     landed_by_ean = {}
     agg = defaultdict(lambda: defaultdict(float))
@@ -698,6 +809,10 @@ def product_ranking(start_date, end_date, marketplaces=None):
         sales = usd(l.get("net_amount") or 0, l.get("currency") or "USD")
         f = fees.get((fmk, asin)) or {"referralPct": 0.15, "fbaUsd": 0.0}
         a = agg[asin]
+        seg = _section_of_group((mapping.get(asin) or {}).get("group"))
+        if seg:
+            sec_units[(ATOMIC[mp][1], seg, (l.get("purchase_date") or "")[:7])] += l["qty"]
+            asin_units[(asin, ATOMIC[mp][1], seg, (l.get("purchase_date") or "")[:7])] += l["qty"]
         a["units"] += l["qty"]
         a["sales"] += sales
         a["netSales"] += sales / (1 + vat)
@@ -717,6 +832,22 @@ def product_ranking(start_date, end_date, marketplaces=None):
         a = agg[r["asin"]]
         a["ads"] += usd(r.get("spend") or 0, r.get("currency_code") or "USD")
         a["adSales"] += usd(r.get("sales") or 0, r.get("currency_code") or "USD")
+    # SB share: section SB spend per country-month (prorated to the days of the
+    # month inside the range) / section units in the range that month.
+    from ProductExtraCosts import _overlap
+    rng = [(int(start_date[:4]), int(start_date[5:7]))]
+    while rng[-1] < (int(end_date[:4]), int(end_date[5:7])):
+        y, m = rng[-1]
+        rng.append((y + 1, 1) if m == 12 else (y, m + 1))
+    sb_sp = sb_spend_monthly(token, rng)
+    sb_unit = {}
+    for (country, seg, ym), v in sb_sp.items():
+        share = _overlap(int(ym[:4]), int(ym[5:7]), start_date, end_date)
+        if sec_units.get((country, seg, ym)):
+            sb_unit[(country, seg, ym)] = v * share / sec_units[(country, seg, ym)]
+    for (asin, country, seg, ym), q in asin_units.items():
+        agg[asin]["sbAds"] += sb_unit.get((country, seg, ym), 0) * q
+
     def landed_of(asin):
         ean = (mapping.get(asin) or {}).get("ean")
         if ean not in landed_by_ean:
@@ -730,18 +861,18 @@ def product_ranking(start_date, end_date, marketplaces=None):
         cost = (landed or 0) * a["units"]
         x = extra.get(asin, {})
         returns, storage, awd = x.get("returnsCost", 0), x.get("storage", 0), x.get("awd", 0)
-        profit = a["netSales"] - a["fees"] - cost - a["ads"] - returns - storage - awd
+        profit = a["netSales"] - a["fees"] - cost - a["ads"] - a["sbAds"] - returns - storage - awd
         out[asin] = {
             "units": a["units"], "sales": round(a["sales"], 2), "netSales": round(a["netSales"], 2),
             "fees": round(a["fees"], 2), "productCost": round(cost, 2), "landed": landed,
-            "ads": round(a["ads"], 2), "adSales": round(a["adSales"], 2),
+            "ads": round(a["ads"], 2), "sbAds": round(a["sbAds"], 2), "adSales": round(a["adSales"], 2),
             "returnedUnits": x.get("returnedUnits", 0), "returns": round(returns, 2),
             "returnsPct": round(x.get("returnedUnits", 0) / a["units"] * 100, 1) if a["units"] else None,
             "storage": round(storage, 2), "awd": round(awd, 2),
             "profit": round(profit, 2) if landed else None,
             "margin": round(profit / a["netSales"] * 100, 1) if landed and a["netSales"] else None,
             "acos": round(a["ads"] / a["adSales"] * 100, 1) if a["adSales"] else None,
-            "tacos": round(a["ads"] / a["sales"] * 100, 1) if a["sales"] else None,
+            "tacos": round((a["ads"] + a["sbAds"]) / a["sales"] * 100, 1) if a["sales"] else None,
         }
     return {"start": start_date, "end": end_date, "byAsin": out}
 
