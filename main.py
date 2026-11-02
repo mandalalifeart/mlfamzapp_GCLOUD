@@ -800,3 +800,18 @@ def GetFbaFees(request):
 def GetFbaFeeHistory(request):
     from FbaFees import GetFbaFeeHistory as handler
     return handler(request)
+
+
+def GetReturnsAnalysis(request):
+    from ReturnsAnalysis import GetReturnsAnalysis as handler
+    return handler(request)
+
+
+def GetReturnsForProduct(request):
+    from ReturnsAnalysis import GetReturnsForProduct as handler
+    return handler(request)
+
+
+def SendReturnsMonthlyCheck(request):
+    from ReturnsAnalysis import SendReturnsMonthlyCheck as handler
+    return handler(request)

@@ -74,6 +74,7 @@ CHECKLISTS = {
         "Competitors and prices: monthly competitor price check, coupons and promotions ending",
         "New products without ads + products with stock but no campaign",
         "USA home-decor ads plan: next step",
+        "Returns check (↩️ on the 3rd): 🔴 products with too many returns -> fix listing (cover only / size / colour photos) or check the batch with the supplier",
     ],
 }
 CHECKLIST_KEY = "ads_checklists"
