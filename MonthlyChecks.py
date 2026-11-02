@@ -184,8 +184,16 @@ def monthly_profit_text(pb, y, m, with_tables=False):
         if r["marketplace"] in mp_region:
             ads_by[mp_region[r["marketplace"]]] += r.get("ppc_spend") or 0
     rates = usd_rates()
+    # Money that actually reached the bank this month (per the user 2026-11-02):
+    # settlements whose transfer succeeded with a transfer date in y-m.
+    paid = defaultdict(float)
+    for st in pb_list_all(pb, "amazon_settlements", f'fund_transfer_status = "Succeeded" && fund_transfer_date >= "{y}-{m:02d}-01"'):
+        if (st.get("fund_transfer_date") or "")[:7] == f"{y}-{m:02d}":
+            for name, (mps, cur) in REGIONS.items():
+                if st.get("marketplace") in mps and st.get("currency") == cur:
+                    paid[name] += st.get("original_amount") or 0
     out = [f"💰 Profit per marketplace – {y}-{m:02d}"] + order_lines + [
-        f"\n💵 Amazon payouts by settlement period – {y}-{m:02d} (cash view, before product cost, VAT/sales tax excluded)"]
+        f"\n💵 Monthly payouts – {y}-{m:02d} (Amazon settlements: what Amazon paid out, not profit; before product cost, VAT/sales tax excluded)"]
     tot = defaultdict(float)
     trows = []
     for name, (mps, cur) in REGIONS.items():
@@ -202,13 +210,15 @@ def monthly_profit_text(pb, y, m, with_tables=False):
         margin = 100 * net / t["sales"] if t["sales"] else 0
         trows.append([name, cur, round(t["sales"]), round(t["refunds"]), round(t["fees"]),
                       f"{100 * -t['fees'] / t['sales']:.0f}%" if t["sales"] else "", round(ads), round(t["other"]),
-                      round(net), f"{margin:.0f}%", round(t["import"]) if t["import"] else "", cmp_cell(t["sales"], prev["sales"]), cmp_cell(t["sales"], ly["sales"])])
+                      round(net), f"{margin:.0f}%", round(t["import"]) if t["import"] else "", cmp_cell(t["sales"], prev["sales"]), cmp_cell(t["sales"], ly["sales"]),
+                      round(paid[name])])
+        tot["paid"] += paid[name] * rate
         out.append(f"\n{name} ({cur})\n"
                    f"  sales {t['sales']:,.0f} · refunds {t['refunds']:,.0f} · Amazon fees {t['fees']:,.0f} · ads {ads:,.0f}"
                    f"{f' · other {t['other']:,.0f}' if abs(t['other']) >= 1 else ''}"
                    f"{f' · fees {100 * -t['fees'] / t['sales']:.0f}% of sales' if t['sales'] else ''}\n"
                    f"{f'  import duty + freight for our shipments (AGL, landed cost - not in net): {t['import']:,.0f}' + chr(10) if t['import'] else ''}"
-                   f"  = net {net:,.0f} ({margin:.0f}% of sales)"
+                   f"  = net {net:,.0f} ({margin:.0f}% of sales) · paid to bank {paid[name]:,.0f}"
                    f" | prev month sales {prev['sales']:,.0f} · last year {ly['sales']:,.0f}")
     if tot["sales"]:
         out.append(f"\nALL in USD: sales ${tot['sales']:,.0f} · refunds ${tot['refunds']:,.0f} · fees ${tot['fees']:,.0f}"
@@ -220,10 +230,10 @@ def monthly_profit_text(pb, y, m, with_tables=False):
     if tot["sales"]:
         trows.append(["ALL (USD)", "USD", round(tot["sales"]), round(tot["refunds"]), round(tot["fees"]),
                       f"{100 * -tot['fees'] / tot['sales']:.0f}%", round(tot["ads"]), "", round(tot["net"]),
-                      f"{100 * tot['net'] / tot['sales']:.0f}%", "", "", ""])
-    tables = [order_table, {"title": f"Amazon payouts {y}-{m:02d} by settlement period (cash view, before product cost; last settlement of the month is still open)",
+                      f"{100 * tot['net'] / tot['sales']:.0f}%", "", "", "", round(tot["paid"])])
+    tables = [order_table, {"title": f"Monthly payouts {y}-{m:02d} – Amazon settlements, not profit (paid to bank = transfers that arrived this month)",
                "columns": ["Marketplace", "Cur", "Sales", "Refunds", "Amazon fees", "Fees %", "Ads", "Other", "Net",
-                           "Margin", "Import duty+freight", "Prev month sales", "Last year sales"],
+                           "Margin", "Import duty+freight", "Prev month sales", "Last year sales", "Paid to bank"],
                "rows": trows}]
     return "\n".join(out), tables
 
