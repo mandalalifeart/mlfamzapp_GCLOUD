@@ -840,3 +840,13 @@ def SetCheckProposal(request):
 def ApplyApprovedProposals(request):
     from CheckReports import ApplyApprovedProposals as handler
     return handler(request)
+
+
+def GetTodos(request):
+    from TodoList import GetTodos as handler
+    return handler(request)
+
+
+def SetTodo(request):
+    from TodoList import SetTodo as handler
+    return handler(request)
