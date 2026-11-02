@@ -71,6 +71,14 @@ def profit_block(rows):
         cat, amt = r["category"], r.get("amount") or 0
         if cat in SKIP_CATS:
             continue
+        # Amazon Global Logistics import duty + freight for our own shipments
+        # (India -> US) is product landed cost, not a selling fee - shown apart
+        # (2026-11-02: it made October's US fees look like 68% of sales).
+        if "GlobalInboundTransportation" in cat:
+            t["import"] += amt
+            continue
+        if cat == "Other: DebtRecovery":  # a balance transfer between accounts, not income
+            continue
         if cat in SALES_CATS:
             t["sales"] += amt
         elif cat == "Refunds":
@@ -118,13 +126,16 @@ def monthly_profit_text(pb, y, m):
         margin = 100 * net / t["sales"] if t["sales"] else 0
         out.append(f"\n{name} ({cur})\n"
                    f"  sales {t['sales']:,.0f} · refunds {t['refunds']:,.0f} · Amazon fees {t['fees']:,.0f} · ads {ads:,.0f}"
-                   f"{f' · other {t['other']:,.0f}' if abs(t['other']) >= 1 else ''}\n"
+                   f"{f' · other {t['other']:,.0f}' if abs(t['other']) >= 1 else ''}"
+                   f"{f' · fees {100 * -t['fees'] / t['sales']:.0f}% of sales' if t['sales'] else ''}\n"
+                   f"{f'  import duty + freight for our shipments (AGL, landed cost - not in net): {t['import']:,.0f}' + chr(10) if t['import'] else ''}"
                    f"  = net {net:,.0f} ({margin:.0f}% of sales)"
                    f" | prev month sales {prev['sales']:,.0f} · last year {ly['sales']:,.0f}")
     if tot["sales"]:
         out.append(f"\nALL in USD: sales ${tot['sales']:,.0f} · refunds ${tot['refunds']:,.0f} · fees ${tot['fees']:,.0f}"
                    f" · ads ${tot['ads']:,.0f} → net ${tot['net']:,.0f} ({100 * tot['net'] / tot['sales']:.0f}%)")
-    out.append("Product cost (Malani/Acacia) and shipping to Amazon are not included yet.")
+    out.append("Product cost (Malani/Acacia) and shipping to Amazon are not included yet. Sales are by settlement period "
+               "(the last settlement of the month is often still open), so they're lower than the month's orders.")
     return "\n".join(out)
 
 
