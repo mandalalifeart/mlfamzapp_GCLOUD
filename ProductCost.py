@@ -806,10 +806,10 @@ def extra_costs_for(token, start, end, atomic, fees, landed_of, by_mp=False):
                        lambda mp: ATOMIC.get(mp, (None, None, 0.2))[2], by_mp=by_mp)
 
 
-def product_ranking(start_date, end_date, marketplaces=None):
+def product_ranking(start_date, end_date, marketplaces=None, atomic=None, _token=None):
     from GetSalesDepartmentReport import expand_marketplaces
-    token = pb_authenticate()
-    atomic = expand_marketplaces(marketplaces or [])
+    token = _token or pb_authenticate()
+    atomic = set(atomic) if atomic else expand_marketplaces(marketplaces or [])
     mapping = {r["asin"]: r for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,sku,ean,group")}
     mp_filter = " || ".join(f'marketplace = "{m}"' for m in sorted(atomic) if m in ATOMIC)
     if not mp_filter:

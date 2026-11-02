@@ -58,7 +58,7 @@ def _ym_minus(y, m, k):
 # --------------------------------------------------------------- monthly profit
 REGIONS = {  # report row -> (amazon_expense_events marketplaces, currency)
     "USA": (("usa",), "USD"), "Canada": (("ca",), "CAD"), "Mexico": (("mex",), "MXN"), "UK": (("uk",), "GBP"),
-    "EU (EUR)": (("de", "fr", "it", "es", "nl", "be", "ie", "eu"), "EUR"), "Poland": (("pl",), "PLN"),
+    "EU": (("de", "fr", "it", "es", "nl", "be", "ie", "eu"), "EUR"), "Poland": (("pl",), "PLN"),
     "Sweden": (("se",), "SEK"), "UAE": (("aed",), "AED"),
 }
 SALES_CATS = ("Sales Revenue", "Shipping Charged to Buyer", "FBA Liquidation Revenue")
@@ -93,7 +93,81 @@ def profit_block(rows):
     return t
 
 
+# Order-month profit (2026-11-02, per the user: the payout view showed EU at half
+# of the month's orders). Same per-product formula as the product page / Best &
+# Worst ranking (ProductCost.product_ranking), summed per marketplace, in USD.
+ORDER_ROWS = [("USA", ["usa"]), ("Canada", ["ca"]), ("Mexico", ["mex"]), ("UK", ["uk"]),
+              ("EU", ["de", "fr", "it", "es", "nl", "be", "ie"]), ("Poland", ["pl"]), ("Sweden", ["se"])]
+MP_NAMES = {"de": "Germany", "fr": "France", "it": "Italy", "es": "Spain", "nl": "Netherlands", "be": "Belgium", "ie": "Ireland"}
+ORDER_KEYS = ("units", "sales", "netSales", "fees", "productCost", "ads", "sbAds", "returns", "storage", "awd")
+
+
+def cmp_cell(now, before):
+    """Table cell: the earlier value + % change to now (the page colours it)."""
+    pct = round(100 * (now - before) / before) if before else None
+    return {"v": round(before), "pct": pct}
+
+
+def order_month_profit(pb, y, m):
+    """{atomic mp: totals} for orders placed in y-m (LA dates)."""
+    import calendar
+    from ProductCost import product_ranking
+    start, end = f"{y}-{m:02d}-01", f"{y}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+    out = {}
+    for _name, mps in ORDER_ROWS:
+        for mp in mps:
+            rows = product_ranking(start, end, atomic=[mp], _token=pb)["byAsin"].values()
+            t = {k: sum((r.get(k) or 0) for r in rows) for k in ORDER_KEYS}
+            t["noCostUnits"] = sum(r["units"] for r in rows if r.get("profit") is None)
+            t["profit"] = (t["netSales"] - t["fees"] - t["productCost"] - t["ads"] - t["sbAds"] - t["returns"]
+                           - t["storage"] - t["awd"])
+            out[mp] = t
+    return out
+
+
+def _sum(ts):
+    return {k: sum(t.get(k, 0) for t in ts) for k in ORDER_KEYS + ("noCostUnits", "profit")}
+
+
+def order_profit_section(pb, y, m):
+    cur = order_month_profit(pb, y, m)
+    prev = order_month_profit(pb, *_ym_minus(y, m, 1))
+    ly = order_month_profit(pb, y - 1, m)
+
+    def row(name, t, p, l):
+        mg = f"{100 * t['profit'] / t['netSales']:.0f}%" if t["netSales"] else ""
+        return [name, round(t["units"]), round(t["sales"]), round(t["netSales"]), -round(t["fees"]),
+                -round(t["productCost"]), -round(t["ads"]), -round(t["sbAds"]), -round(t["returns"]),
+                -round(t["storage"] + t["awd"]), round(t["profit"]), mg, round(p["profit"]),
+                cmp_cell(t["sales"], p["sales"]), cmp_cell(t["sales"], l["sales"]), round(t["noCostUnits"]) or ""]
+
+    rows, lines = [], [f"\n📦 By order date – {y}-{m:02d} (USD, after product cost; same formula as the product page)"]
+    for name, mps in ORDER_ROWS:
+        t, p, l = _sum([cur[x] for x in mps]), _sum([prev[x] for x in mps]), _sum([ly[x] for x in mps])
+        if not t["units"] and not p["units"]:
+            continue
+        r = row(name, t, p, l)
+        if len(mps) > 1:
+            r = {"cells": r, "children": [row(MP_NAMES.get(x, x), cur[x], prev[x], ly[x]) for x in mps
+                                          if cur[x]["units"] or prev[x]["units"]]}
+        rows.append(r)
+        lines.append(f"  {name}: {t['units']:.0f} units · sales ${t['sales']:,.0f} · profit ${t['profit']:,.0f}"
+                     f" ({(r if isinstance(r, list) else r['cells'])[11]} of sales w/o VAT) | prev month ${p['profit']:,.0f}")
+    t, p, l = _sum(cur.values()), _sum(prev.values()), _sum(ly.values())
+    rows.append(row("ALL (USD)", t, p, l))
+    lines.append(f"  ALL: sales ${t['sales']:,.0f} · profit ${t['profit']:,.0f} | prev month ${p['profit']:,.0f}")
+    if not t["storage"]:
+        lines.append("  FBA storage for this month comes on the 10th (not in yet).")
+    table = {"title": f"Profit by order date {y}-{m:02d} (USD, after product cost) – click EU for countries",
+             "columns": ["Marketplace", "Units", "Sales", "Sales w/o VAT", "Amazon fees", "Product cost", "Ads SP+SD",
+                         "SB share", "Returns", "Storage+AWD", "Profit", "Margin", "Prev month profit", "Prev month sales",
+                         "Last year sales", "Units w/o cost"],
+             "rows": rows}
+    return lines, table
+
+
 def monthly_profit_text(pb, y, m, with_tables=False):
+    order_lines, order_table = order_profit_section(pb, y, m)
     periods = [(y, m), _ym_minus(y, m, 1), (y - 1, m)]
     data = {}
     for (yy, mm) in periods:
@@ -105,12 +179,13 @@ def monthly_profit_text(pb, y, m, with_tables=False):
     ads_rows = pb_list_all(pb, "country_sales", f"year = {y} && month = {m}")
     ads_by = defaultdict(float)
     mp_region = {"usa": "USA", "ca": "Canada", "mex": "Mexico", "uk": "UK", "pl": "Poland", "se": "Sweden",
-                 "de": "EU (EUR)", "fr": "EU (EUR)", "it": "EU (EUR)", "es": "EU (EUR)", "nl": "EU (EUR)", "be": "EU (EUR)", "ie": "EU (EUR)"}
+                 "de": "EU", "fr": "EU", "it": "EU", "es": "EU", "nl": "EU", "be": "EU", "ie": "EU"}
     for r in ads_rows:
         if r["marketplace"] in mp_region:
             ads_by[mp_region[r["marketplace"]]] += r.get("ppc_spend") or 0
     rates = usd_rates()
-    out = [f"💰 Profit per marketplace – {y}-{m:02d} (before product cost; Amazon payouts by settlement month, VAT/sales tax excluded)"]
+    out = [f"💰 Profit per marketplace – {y}-{m:02d}"] + order_lines + [
+        f"\n💵 Amazon payouts by settlement period – {y}-{m:02d} (cash view, before product cost, VAT/sales tax excluded)"]
     tot = defaultdict(float)
     trows = []
     for name, (mps, cur) in REGIONS.items():
@@ -127,7 +202,7 @@ def monthly_profit_text(pb, y, m, with_tables=False):
         margin = 100 * net / t["sales"] if t["sales"] else 0
         trows.append([name, cur, round(t["sales"]), round(t["refunds"]), round(t["fees"]),
                       f"{100 * -t['fees'] / t['sales']:.0f}%" if t["sales"] else "", round(ads), round(t["other"]),
-                      round(net), f"{margin:.0f}%", round(t["import"]) if t["import"] else "", round(prev["sales"]), round(ly["sales"])])
+                      round(net), f"{margin:.0f}%", round(t["import"]) if t["import"] else "", cmp_cell(t["sales"], prev["sales"]), cmp_cell(t["sales"], ly["sales"])])
         out.append(f"\n{name} ({cur})\n"
                    f"  sales {t['sales']:,.0f} · refunds {t['refunds']:,.0f} · Amazon fees {t['fees']:,.0f} · ads {ads:,.0f}"
                    f"{f' · other {t['other']:,.0f}' if abs(t['other']) >= 1 else ''}"
@@ -138,15 +213,15 @@ def monthly_profit_text(pb, y, m, with_tables=False):
     if tot["sales"]:
         out.append(f"\nALL in USD: sales ${tot['sales']:,.0f} · refunds ${tot['refunds']:,.0f} · fees ${tot['fees']:,.0f}"
                    f" · ads ${tot['ads']:,.0f} → net ${tot['net']:,.0f} ({100 * tot['net'] / tot['sales']:.0f}%)")
-    out.append("Product cost (Malani/Acacia) and shipping to Amazon are not included yet. Sales are by settlement period "
-               "(the last settlement of the month is often still open), so they're lower than the month's orders.")
+    out.append("Payout view: by settlement period (the last settlement of the month is often still open), so it's lower "
+               "than the month's orders - use the order-date table above for the month's profit.")
     if not with_tables:
         return "\n".join(out)
     if tot["sales"]:
         trows.append(["ALL (USD)", "USD", round(tot["sales"]), round(tot["refunds"]), round(tot["fees"]),
                       f"{100 * -tot['fees'] / tot['sales']:.0f}%", round(tot["ads"]), "", round(tot["net"]),
                       f"{100 * tot['net'] / tot['sales']:.0f}%", "", "", ""])
-    tables = [{"title": f"Profit per marketplace {y}-{m:02d} (before product cost, payouts by settlement month)",
+    tables = [order_table, {"title": f"Amazon payouts {y}-{m:02d} by settlement period (cash view, before product cost; last settlement of the month is still open)",
                "columns": ["Marketplace", "Cur", "Sales", "Refunds", "Amazon fees", "Fees %", "Ads", "Other", "Net",
                            "Margin", "Import duty+freight", "Prev month sales", "Last year sales"],
                "rows": trows}]
