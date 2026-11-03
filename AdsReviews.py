@@ -50,7 +50,7 @@ def GetAdsReviews(request):
 CHECKLISTS = {
     "weekly": [
         "Read the Monday digest headline - any 🔴 is handled first",
-        "TACOS per marketplace vs target (US/DE 20%, others 25%)",
+        "TACOS per marketplace × department vs its target (⚙️ Rules & TACOS targets card)",
         "🔴 campaigns (spend with no sales / ACOS >= 70%): check 60-day history -> cut bid or pause",
         "🟠 spend doubled vs last week: find why (new keyword? Amazon placement?)",
         "🟡 hitting budget 4+ days with good ACOS -> raise budget",
@@ -79,6 +79,7 @@ CHECKLISTS = {
         "Returns check (↩️ on the 2nd): 🔴 products with too many returns -> fix listing (cover only / size / colour photos) or check the batch with the supplier",
         "Monthly profit by order date (EU per country) + coupons & promotions: margin per marketplace, discounts vs last month",
         "Automatic ads review on /checks: tick bid raises, keyword harvest, losing products, keyword clean-up",
+        "🎯 TACOS bid rule: approve per group (SP by product TACOS vs target, SB keywords by own ACOS vs the SB limit 20% / DE-FR-ES home 15%)",
     ],
 }
 CHECKLIST_KEY = "ads_checklists"

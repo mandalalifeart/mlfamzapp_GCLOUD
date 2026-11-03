@@ -53,7 +53,9 @@ DEFAULTS = {
     "noSaleSpend": 15.0,       # ad spend (own currency) with < minUnits sold -> cut
     "noSaleCut": 30.0,         # that cut %
     "skipChangedDays": 14,     # don't touch bids changed in the last N days
-    "sbProfitPct": 15.0,       # SB = independent sales: profit wanted on them -> SB ACOS limit
+    "sbProfitPct": 15.0,       # SB = independent sales: profit on them (shown as "SB ACOS at profit%")
+    "sbAcos": 20.0,            # SB ACOS limit used by the rules (per the user 2026-11-03, option C)
+    "sbAcosOverrides": "DE home 15, FR home 15, ES home 15",  # "<market> <home|pareo> <acos>, ..."
     "kwMinClicks": 5,          # keyword clicks in the month: own ACOS > limit -> no raise, lower instead
     "historyDays": 60,         # history window before the month (pause temporary vs for good)
     "historyOrders": 3,        # orders in that window -> temporary pause
@@ -120,6 +122,14 @@ def compute_targets(token=None, end=None):
                 "sbAcos": round(100 * (before - cfg["sbProfitPct"] / 100 * d["netSales"] - gap * s) / s, 1),
                 "tacos": round(100 * (d["ads"] + d["sbAds"]) / s, 1)}
 
+    overrides = {}
+    for part in str(cfg.get("sbAcosOverrides") or "").split(","):
+        bits = part.split()
+        if len(bits) == 3:
+            try:
+                overrides[f"{bits[0].upper()}|{bits[1].lower()}"] = float(bits[2])
+            except ValueError:
+                pass
     targets = {}
     for (country, seg), d in year.items():
         if country.endswith("*") or not d["sales"]:
@@ -129,9 +139,13 @@ def compute_targets(token=None, end=None):
             reg = year.get((_region(country) + "*", seg))
             if reg and reg["sales"]:
                 row["targetTacos"] = calc(reg)["targetTacos"]
-                row["sbAcos"] = calc(reg)["sbAcos"]
+                row["sbAcos"] = calc(reg)["sbAcos"]  # replaced below by the configured limit
                 row["source"] = _region(country)
         row.setdefault("source", "own")
+        # SB limit used by the rules: flat sbAcos with per-market overrides
+        # (user's option C 2026-11-03); the computed 15%-profit value stays as sbAcosCalc.
+        row["sbAcosCalc"] = row.pop("sbAcos", None)
+        row["sbAcos"] = overrides.get(f"{country}|{seg}", float(cfg["sbAcos"]))
         # 12 months, not the last 90 days: pareo's off-season ad share is tiny
         row["adShare"] = round(100 * d.get("adSales", 0) / d["sales"], 1) if d.get("sales") else None
         row["acosLimit"] = (round(min(100.0, row["targetTacos"] / row["adShare"] * 100), 1)
@@ -371,7 +385,7 @@ def bid_rule(token, y, m, today=None, api=None):
             "section": "TACOS bid rule",
             "title": f"{cc} {seg}: {'raise' if way == 'up' else 'lower'} {len(xs) - pauses} bid(s)"
                      + (f", pause {pauses}" if pauses else "")
-                     + (f" – SB ACOS limit {sb_acos(state, cc, base_seg)}% (15% profit)" if is_sb_group
+                     + (f" – SB ACOS limit {sb_acos(state, cc, base_seg):.0f}%" if is_sb_group
                         else f" – TACOS {tacos:.0f}% vs target {target_for(state, cc, seg)}%" if tacos is not None else ""),
             "detail": "; ".join(f"{x['text'][:35]} {x['old_bid']}→{'pause' if x.get('pause') else x['new_bid']}"
                                 for x in xs[:12]) + (" …" if len(xs) > 12 else ""),
