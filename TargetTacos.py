@@ -53,6 +53,7 @@ DEFAULTS = {
     "noSaleSpend": 15.0,       # ad spend (own currency) with < minUnits sold -> cut
     "noSaleCut": 30.0,         # that cut %
     "skipChangedDays": 14,     # don't touch bids changed in the last N days
+    "sbProfitPct": 15.0,       # SB = independent sales: profit wanted on them -> SB ACOS limit
     "kwMinClicks": 5,          # keyword clicks in the month: own ACOS > limit -> no raise, lower instead
     "historyDays": 60,         # history window before the month (pause temporary vs for good)
     "historyOrders": 3,        # orders in that window -> temporary pause
@@ -114,6 +115,9 @@ def compute_targets(token=None, end=None):
         before = d["netSales"] - d["fees"] - d["productCost"] - d["returns"] - d["storage"] - d["awd"]
         return {"sales": round(s), "units": round(d["units"]), "beforeAdsPct": round(100 * before / s, 1),
                 "targetTacos": round(100 * (before - profit * d["netSales"] - gap * s) / s, 1),
+                # Per the user 2026-11-03: SB sales are independent, ACOS = TACOS,
+                # and SB should make sbProfitPct (15%) on them.
+                "sbAcos": round(100 * (before - cfg["sbProfitPct"] / 100 * d["netSales"] - gap * s) / s, 1),
                 "tacos": round(100 * (d["ads"] + d["sbAds"]) / s, 1)}
 
     targets = {}
@@ -125,6 +129,7 @@ def compute_targets(token=None, end=None):
             reg = year.get((_region(country) + "*", seg))
             if reg and reg["sales"]:
                 row["targetTacos"] = calc(reg)["targetTacos"]
+                row["sbAcos"] = calc(reg)["sbAcos"]
                 row["source"] = _region(country)
         row.setdefault("source", "own")
         # 12 months, not the last 90 days: pareo's off-season ad share is tiny
@@ -146,6 +151,12 @@ def load_targets(token):
 def target_for(state, country, seg):
     t = (state.get("targets") or {}).get(f"{(country or '').upper()}|{seg}")
     return t["targetTacos"] if t else None
+
+
+def sb_acos(state, country, seg):
+    """SB ACOS limit = the TACOS that leaves sbProfitPct profit (SB sales count as independent)."""
+    t = (state.get("targets") or {}).get(f"{(country or '').upper()}|{seg}")
+    return (t or {}).get("sbAcos")
 
 
 def acos_limit(state, country, seg, default=None):
@@ -205,7 +216,7 @@ def bid_rule(token, y, m, today=None, api=None):
             it = items.setdefault(k, {"units": 0.0, "sales": 0.0, "spend": 0.0, "seg": seg})
             it["units"] += v.get("units") or 0
             it["sales"] += v.get("sales") or 0
-            it["spend"] += (v.get("ads") or 0) + (v.get("sbAds") or 0)
+            it["spend"] += v.get("ads") or 0          # SP + SD only - SB is judged on its own (2026-11-03)
             d = dept[(country, seg)]
             d["units"] += v.get("units") or 0
             d["sales"] += v.get("sales") or 0
@@ -252,11 +263,11 @@ def bid_rule(token, y, m, today=None, api=None):
     for (cid, agid), pct in ag_pct.items():
         if abs(pct) >= 0.01:
             by_camp[cid][agid] = pct
+    # SB: every keyword on its own ACOS vs the SB ACOS limit (per the user
+    # 2026-11-03: "SB performs on its own, based on ACOS ... make 15% on them").
     for cid, c in camps.items():
         if c.get("ad_product") == "SPONSORED_BRANDS" and c.get("campaign_status") == "ENABLED":
-            d = dept_pct.get((c.get("country_code", "").upper(), c["seg"]))
-            if d and abs(d[2]) >= 0.01:
-                by_camp[cid]["*"] = d[2]
+            by_camp[cid]["*"] = "sb"
 
     # keyword texts + the month's numbers per keyword for the page (the live
     # list carries only ids; per the user 2026-11-03 "more info on bid raises")
@@ -287,14 +298,25 @@ def bid_rule(token, y, m, today=None, api=None):
             if pct is None or tid in changed or not lv.get("bid"):
                 continue
             old = float(lv["bid"])
+            k = kw.get(tid) or {}
+            is_sb = pct == "sb"
+            if is_sb:
+                sb_limit = sb_acos(state, cc, c["seg"])
+                if not sb_limit or sb_limit <= 0:
+                    continue
+                kacos = 100 * k.get("spend", 0) / k["sales"] if k.get("sales") else (math.inf if k.get("spend") else 0.0)
+                pct = change_pct(kacos, sb_limit, k.get("orders") or 0, k.get("spend") or 0, cfg)
+                if pct > 0 and c["seg"] == "pareo" and winter:
+                    pct = 0.0
+                if abs(pct) < 0.01:
+                    continue
             # Keyword guard (per the user 2026-11-03 "ok"): a raise comes from
             # the products / department, but a keyword with >= kwMinClicks clicks
             # whose OWN ACOS is above the ACOS limit is lowered instead
             # (1 - limit/ACOS, capped by its orders like the TACOS rule); no
             # orders: cut noSaleCut% once spend >= noSaleSpend, else left alone.
-            k = kw.get(tid) or {}
             limit = acos_limit(state, cc, c["seg"])
-            if pct > 0 and limit and (k.get("clicks") or 0) >= cfg["kwMinClicks"]:
+            if not is_sb and pct > 0 and limit and (k.get("clicks") or 0) >= cfg["kwMinClicks"]:
                 if k.get("sales"):
                     kacos = 100 * k["spend"] / k["sales"]
                     if kacos > limit:
@@ -309,15 +331,14 @@ def bid_rule(token, y, m, today=None, api=None):
             if new == old:
                 continue
             why = (", ".join(sku_of.get(a, a) for a in ag_items.get((cid, lv["ad_group_id"]), []))[:80]
-                   if lv["ad_group_id"] in agp else f"{c['seg']} department (SB)")
-            if lv["ad_group_id"] in agp:
+                   if not is_sb else f"SB own ACOS vs limit {sb_limit:.0f}%")
+            if not is_sb:
                 drivers = "; ".join(
                     f"{sku_of.get(a, a)} {items[(cc, a)]['units']:.0f}u TACOS "
                     + ("∞" if items[(cc, a)]["tacos"] == math.inf else f"{items[(cc, a)]['tacos']:.0f}%")
                     for a in ag_items.get((cid, lv["ad_group_id"]), []) if (cc, a) in items)[:160]
             else:
-                dt = dept_pct.get((cc, c["seg"]))
-                drivers = f"{c['seg']} dept TACOS {dt[0]:.0f}%" if dt else ""
+                drivers = f"SB: own ACOS {'∞' if kacos == math.inf else f'{kacos:.0f}%'} vs limit {sb_limit:.0f}% ({k.get('orders', 0):.0f} orders)"
             x = {"profile_id": c["profile_id"], "ad_product": c["ad_product"], "is_keyword": lv["is_keyword"],
                  "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                  "text": tid, "country": cc, "old_bid": old, "new_bid": new,
@@ -330,7 +351,7 @@ def bid_rule(token, y, m, today=None, api=None):
             elif new < min_bid:
                 x["pause"] = "temporary" if hist[tid] >= cfg["historyOrders"] else "for good"
                 x["new_bid"] = old
-            groups[(cc, c["seg"], "up" if pct > 0 else "down")].append(x)
+            groups[(cc, c["seg"] + (" SB" if is_sb else ""), "up" if pct > 0 else "down")].append(x)
             trows.append([cc, c["seg"], c["campaign_name"], tid, why, f"{pct * 100:+.0f}%", old,
                           "pause " + x["pause"] if x.get("pause") else new])
     for xs in groups.values():
@@ -341,18 +362,23 @@ def bid_rule(token, y, m, today=None, api=None):
 
     proposals = []
     for (cc, seg, way), xs in sorted(groups.items()):
-        d = dept.get((cc, seg)) or {}
+        is_sb_group = seg.endswith(" SB")
+        base_seg = seg[:-3] if is_sb_group else seg
+        d = dept.get((cc, base_seg)) or {}
         tacos = 100 * d.get("spend", 0) / d["sales"] if d.get("sales") else None
         pauses = sum(1 for x in xs if x.get("pause"))
         proposals.append({
             "section": "TACOS bid rule",
             "title": f"{cc} {seg}: {'raise' if way == 'up' else 'lower'} {len(xs) - pauses} bid(s)"
                      + (f", pause {pauses}" if pauses else "")
-                     + f" – TACOS {tacos:.0f}% vs target {target_for(state, cc, seg)}%" if tacos is not None else "",
+                     + (f" – SB ACOS limit {sb_acos(state, cc, base_seg)}% (15% profit)" if is_sb_group
+                        else f" – TACOS {tacos:.0f}% vs target {target_for(state, cc, seg)}%" if tacos is not None else ""),
             "detail": "; ".join(f"{x['text'][:35]} {x['old_bid']}→{'pause' if x.get('pause') else x['new_bid']}"
                                 for x in xs[:12]) + (" …" if len(xs) > 12 else ""),
-            "why": f"{y}-{m:02d}: bid × target ÷ TACOS of the products the ad group sells "
-                   f"(capped by units sold); SB = whole department",
+            "why": (f"{y}-{m:02d}: each SB keyword on its own: bid × SB ACOS limit ÷ its ACOS (capped by orders); "
+                    f"no orders & spend ≥ {cfg['noSaleSpend']:.0f} → −{cfg['noSaleCut']:.0f}%") if is_sb_group else
+                   (f"{y}-{m:02d}: bid × target ÷ TACOS (SP+SD spend) of the products the ad group sells "
+                    f"(capped by units sold); keywords with ≥ {cfg['kwMinClicks']:.0f} clicks and own ACOS above the limit are lowered"),
             "columns": ["Keyword / target", "Campaign", "Products (units, TACOS)", "Clicks", "Orders", "Spend", "Sales",
                         "ACOS", "Bid now", "New bid", "Change"],
             "rows": [[x["text"][:50], x["campaign"], x.get("drivers", ""),

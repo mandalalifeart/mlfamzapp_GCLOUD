@@ -33,7 +33,7 @@ PAREO_WORDS = ("PAREO", "SARONG", "BEACH")
 TARGET = {"home": 35, "pareo": 30}  # fallback only - the ACOS limit now comes from the TACOS target (TargetTacos)
 
 
-def acos_target(pb, cc, seg, _cache={}):
+def acos_target(pb, cc, seg, product=None, _cache={}):
     """Keyword ACOS limit derived from the marketplace-department TACOS target
     (per the user 2026-11-03: every ad recommendation looks at TACOS)."""
     if "state" not in _cache:
@@ -42,7 +42,11 @@ def acos_target(pb, cc, seg, _cache={}):
             _cache["state"] = load_targets(pb)
         except Exception:
             _cache["state"] = {}
-    from TargetTacos import acos_limit
+    from TargetTacos import acos_limit, sb_acos
+    if product == "SPONSORED_BRANDS":  # SB = independent sales, own 15%-profit ACOS limit (2026-11-03)
+        sb = sb_acos(_cache["state"], cc, seg)
+        if sb and sb > 0:
+            return sb
     return acos_limit(_cache["state"], cc, seg, TARGET[seg])
 SEASON_RESTART = "2027-02-20"
 MAX_BID = 2.0
@@ -162,7 +166,7 @@ def raise_block(pb, today, api=None):
         if winter(today, c["seg"]):
             continue
         acos = 100 * a["spend"] / a["sales"]
-        t = acos_target(pb, a["cc"], c["seg"])
+        t = acos_target(pb, a["cc"], c["seg"], a["product"])
         a["target"] = t
         pct = 25 if a["orders"] >= 5 and acos <= 0.5 * t else 15 if a["orders"] >= 3 and acos <= 0.7 * t else 0
         if pct:
