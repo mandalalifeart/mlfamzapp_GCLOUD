@@ -53,6 +53,7 @@ DEFAULTS = {
     "noSaleSpend": 15.0,       # ad spend (own currency) with < minUnits sold -> cut
     "noSaleCut": 30.0,         # that cut %
     "skipChangedDays": 14,     # don't touch bids changed in the last N days
+    "kwMinClicks": 5,          # keyword clicks in the month: own ACOS > limit -> no raise, lower instead
     "historyDays": 60,         # history window before the month (pause temporary vs for good)
     "historyOrders": 3,        # orders in that window -> temporary pause
     "orangeBand": 3.0,         # TACOS up to target + this = orange, above = red
@@ -257,6 +258,17 @@ def bid_rule(token, y, m, today=None, api=None):
             if d and abs(d[2]) >= 0.01:
                 by_camp[cid]["*"] = d[2]
 
+    # keyword texts + the month's numbers per keyword for the page (the live
+    # list carries only ids; per the user 2026-11-03 "more info on bid raises")
+    names, kw = {}, defaultdict(lambda: defaultdict(float))
+    for r in _dedupe(pb_list_all(token, "ads_keyword_stats", f'date >= "{start}" && date <= "{end}"',
+                                 fields="profile_id,campaign_id,target_id,target_text,date,clicks,orders,spend,sales"),
+                     lambda r: (r["campaign_id"], r["target_id"], r["date"])):
+        names[r["target_id"]] = r.get("target_text") or r["target_id"]
+        for k in ("clicks", "orders", "spend", "sales"):
+            kw[r["target_id"]][k] += r.get(k) or 0
+    for r in pb_list_all(token, "ads_keyword_stats", f'date > "{end}"', fields="target_id,target_text"):
+        names.setdefault(r["target_id"], r.get("target_text") or r["target_id"])
     groups = defaultdict(list)
     trows = []
     for cid, agp in by_camp.items():
@@ -275,6 +287,24 @@ def bid_rule(token, y, m, today=None, api=None):
             if pct is None or tid in changed or not lv.get("bid"):
                 continue
             old = float(lv["bid"])
+            # Keyword guard (per the user 2026-11-03 "ok"): a raise comes from
+            # the products / department, but a keyword with >= kwMinClicks clicks
+            # whose OWN ACOS is above the ACOS limit is lowered instead
+            # (1 - limit/ACOS, capped by its orders like the TACOS rule); no
+            # orders: cut noSaleCut% once spend >= noSaleSpend, else left alone.
+            k = kw.get(tid) or {}
+            limit = acos_limit(state, cc, c["seg"])
+            if pct > 0 and limit and (k.get("clicks") or 0) >= cfg["kwMinClicks"]:
+                if k.get("sales"):
+                    kacos = 100 * k["spend"] / k["sales"]
+                    if kacos > limit:
+                        pct = -min(1 - limit / kacos, _cap(max(k.get("orders") or 0, cfg["minUnits"]), cfg))
+                elif (k.get("spend") or 0) >= cfg["noSaleSpend"]:  # keyword stats are in own currency
+                    pct = -cfg["noSaleCut"] / 100
+                else:
+                    pct = 0.0
+                if abs(pct) < 0.01:
+                    continue
             new = round(old * (1 + pct), 2)
             if new == old:
                 continue
@@ -303,17 +333,6 @@ def bid_rule(token, y, m, today=None, api=None):
             groups[(cc, c["seg"], "up" if pct > 0 else "down")].append(x)
             trows.append([cc, c["seg"], c["campaign_name"], tid, why, f"{pct * 100:+.0f}%", old,
                           "pause " + x["pause"] if x.get("pause") else new])
-    # keyword texts + the month's numbers per keyword for the page (the live
-    # list carries only ids; per the user 2026-11-03 "more info on bid raises")
-    names, kw = {}, defaultdict(lambda: defaultdict(float))
-    for r in _dedupe(pb_list_all(token, "ads_keyword_stats", f'date >= "{start}" && date <= "{end}"',
-                                 fields="profile_id,campaign_id,target_id,target_text,date,clicks,orders,spend,sales"),
-                     lambda r: (r["campaign_id"], r["target_id"], r["date"])):
-        names[r["target_id"]] = r.get("target_text") or r["target_id"]
-        for k in ("clicks", "orders", "spend", "sales"):
-            kw[r["target_id"]][k] += r.get(k) or 0
-    for r in pb_list_all(token, "ads_keyword_stats", f'date > "{end}"', fields="target_id,target_text"):
-        names.setdefault(r["target_id"], r.get("target_text") or r["target_id"])
     for xs in groups.values():
         for x in xs:
             x["text"] = names.get(x["target_id"], x["target_id"])
