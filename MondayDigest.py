@@ -43,6 +43,7 @@ LABELS = [
     ("SendCampaignWatchDigest", "🍄 Campaign watch"),
     ("SendWeeklyReturnRateDigest", "↩️ Returns"),
     ("SendArcherWeekly", "🤝 Archer affiliates"),
+    ("SendReviewRequestsWeekly", "⭐ Review requests"),
 ]
 MARKERS = ("🔴", "🟠", "⚠️", "🚨", "🚩", "❌")
 

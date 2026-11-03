@@ -905,3 +905,13 @@ def GetTodos(request):
 def SetTodo(request):
     from TodoList import SetTodo as handler
     return handler(request)
+
+
+def RunReviewRequests(request):
+    from ReviewRequests import RunReviewRequests as handler
+    return handler(request)
+
+
+def SendReviewRequestsWeekly(request):
+    from ReviewRequests import SendReviewRequestsWeekly as handler
+    return handler(request)
