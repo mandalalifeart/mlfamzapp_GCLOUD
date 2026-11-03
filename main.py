@@ -792,6 +792,16 @@ def GetPriceSimulation(request):
     return handler(request)
 
 
+def GetStockValuations(request):
+    from StockValuation import GetStockValuations as handler
+    return handler(request)
+
+
+def UpdateStockValuation(request):
+    from StockValuation import UpdateStockValuation as handler
+    return handler(request)
+
+
 def GetPageNotes(request):
     from PageNotes import GetPageNotes as handler
     return handler(request)
