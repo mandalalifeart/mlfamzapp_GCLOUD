@@ -124,7 +124,7 @@ def fetch_mapping_records(token):
     return records
 
 
-def load_mapping(token):
+def load_mapping(token, keep_skus=None):
     # Same GROUP/IGNORE handling as GetSalesDepartmentReport.load_mapping -
     # IGNORE-group SKUs are deliberately excluded products, not candidates to reorder.
     # end_of_life (added 2026-09-22, set via the product page's "EndOfLife
@@ -149,6 +149,16 @@ def load_mapping(token):
         if row.get("end_of_life") and (row.get("asin") or "").strip()
     }
 
+    # keep_skus (2026-11-03, per the user "any product that has positive value
+    # in nextxxx field should be exported"): an end-of-life product that still
+    # has a positive Next value is shown (and exported), flagged end_of_life.
+    keep_skus = keep_skus or set()
+    keep_asins = {
+        (row.get("asin") or "").strip()
+        for row in all_rows
+        if (row.get("sku") or "").strip() in keep_skus and (row.get("asin") or "").strip()
+    }
+
     rows = []
     sku_to_asin = {}
     for row in all_rows:
@@ -161,9 +171,10 @@ def load_mapping(token):
             continue
         if asin:
             sku_to_asin[sku] = asin
-        if group == "IGNORE" or row.get("end_of_life") or (asin and asin in end_of_life_asins):
+        eol = bool(row.get("end_of_life") or (asin and asin in end_of_life_asins))
+        if group == "IGNORE" or (eol and sku not in keep_skus and asin not in keep_asins):
             continue
-        rows.append({"sku": sku, "asin": asin, "upc": upc, "supplier_sku": supplier_sku, "group": group})
+        rows.append({"sku": sku, "asin": asin, "upc": upc, "supplier_sku": supplier_sku, "group": group, "end_of_life": eol})
     return rows, sku_to_asin
 
 
@@ -515,8 +526,15 @@ def GetNextOrderData(request):
 
     try:
         token = pb_authenticate()
-        mapping_rows, sku_to_asin = load_mapping(token)
         stats_records = fetch_sku_statistics(token)
+        next_positive = {
+            rec.get("sku") for rec in stats_records
+            if rec.get("sku") and any(
+                (k == "next_order" or k.endswith("_next_shipment")) and isinstance(v, (int, float)) and v > 0
+                for k, v in rec.items()
+            )
+        }
+        mapping_rows, sku_to_asin = load_mapping(token, keep_skus=next_positive)
         stats_by_sku = {rec.get("sku"): rec for rec in stats_records if rec.get("sku")}
 
         # Index sku_statistics by ASIN (resolved via the mapping, not PocketBase
@@ -556,7 +574,7 @@ def GetNextOrderData(request):
         groups = defaultdict(list)
         for row in unique_product_rows(mapping_rows, stats_by_sku):
             stats = stats_by_sku.get(row["sku"]) or stats_by_asin.get(row["asin"]) or {}
-            item = {"sku": row["sku"], "asin": row["asin"], "upc": row["upc"], "supplier_sku": row["supplier_sku"]}
+            item = {"sku": row["sku"], "asin": row["asin"], "upc": row["upc"], "supplier_sku": row["supplier_sku"], "end_of_life": row.get("end_of_life", False)}
             for field in STATS_FIELDS:
                 item[field] = stats.get(field) or 0
             # Balance = FBA + AWD (+ LG warehouse for DE), per the user
