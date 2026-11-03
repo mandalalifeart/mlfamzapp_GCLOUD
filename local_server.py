@@ -201,6 +201,8 @@ ROUTED_FUNCTIONS = [
     "GetProductCostScenarios",
     "GetProductRanking",
     "GetPriceSimulation",
+    "GetPageNotes",
+    "SetPageNote",
     "UpdateFbaStorageFees",
     "SetProductResearchStatus",
     "GetAsinAnalyticsList",

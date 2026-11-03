@@ -792,6 +792,16 @@ def GetPriceSimulation(request):
     return handler(request)
 
 
+def GetPageNotes(request):
+    from PageNotes import GetPageNotes as handler
+    return handler(request)
+
+
+def SetPageNote(request):
+    from PageNotes import SetPageNote as handler
+    return handler(request)
+
+
 def UpdateFbaStorageFees(request):
     from StorageFees import UpdateFbaStorageFees as handler
     return handler(request)
