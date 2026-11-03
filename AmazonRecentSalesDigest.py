@@ -57,6 +57,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from NotificationRouting import send_amz_telegram
+
 from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY, pb_authenticate
 from JobState import get_job_state, set_job_state
@@ -228,11 +230,7 @@ def build_digest_text(as_of, results, errors):
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]},
-        timeout=15,
-    )
+    send_amz_telegram("sendMessage", json_body={"text": text[:4000]}, timeout=15)
 
 
 TABLE_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -354,12 +352,7 @@ def send_telegram_sku_table_image(results):
     try:
         path = render_sku_table_image(line_items)
         with open(path, "rb") as f:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                data={"chat_id": TELEGRAM_CHAT_ID},
-                files={"photo": ("sales.png", f, "image/png")},
-                timeout=30,
-            )
+            send_amz_telegram("sendPhoto", data={}, files={"photo": ("sales.png", f, "image/png")}, timeout=30)
     except Exception:
         pass  # an image-generation/send problem should never break the digest
     finally:

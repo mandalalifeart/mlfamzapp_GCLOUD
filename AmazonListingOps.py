@@ -12,8 +12,8 @@ POCKETBASE_RELIST_QUEUE_COLLECTION = os.environ.get("POCKETBASE_RELIST_QUEUE_COL
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 
 
 def pb_authenticate():

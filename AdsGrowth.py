@@ -187,7 +187,7 @@ def raise_block(pb, today, api=None):
             acts.append({"profile_id": c["profile_id"], "ad_product": c["ad_product"], "is_keyword": lv["is_keyword"],
                          "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                          "text": a["text"], "country": a["cc"], "old_bid": old, "new_bid": new})
-            trows.append([f"{a['cc']} {c['campaign_name']}", a["text"][:60], (a["match"] or "").lower().replace("_", " "),
+            trows.append([f"{a['cc']} {c['campaign_name']}", a["text"][:60], {"TARGETING_EXPRESSION_PREDEFINED": "auto", "TARGETING_EXPRESSION": "product"}.get(a["match"], (a["match"] or "").lower()),
                           round(a["orders"]), round(a["clicks"]), round(a["spend"], 2), round(a["sales"], 2),
                           f"{acos:.0f}%", f"{a['target']:.0f}%",
                           round(a["spend"] / a["clicks"], 2) if a["clicks"] else None, old, new, f"+{pct}%"])

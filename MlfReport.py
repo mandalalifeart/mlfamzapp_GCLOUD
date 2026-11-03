@@ -23,6 +23,14 @@ REGION_CONFIGS = {
         "refresh_token_env": "REFRESH_TOKEN_EU",
         "marketplace": Marketplaces.DE,
     },
+    # Amazon.com.au is a separate Far East account/app (added 2026-10-19),
+    # its own report - no overlap with "usa"/"de".
+    "au": {
+        "client_id_env": "CLIENT_ID_AU",
+        "client_secret_env": "CLIENT_SECRET_AU",
+        "refresh_token_env": "REFRESH_TOKEN_AU",
+        "marketplace": Marketplaces.AU,
+    },
     # No "uk" entry - confirmed live 2026-09-04 that Amazon already bundles
     # UK orders into the "de" report via SalesChannel="amazon.co.uk" (228
     # real orders seen in a single de-report pull), so a dedicated UK region
@@ -55,6 +63,7 @@ DB_MARKETPLACE_MAP = {
     "amazon.pl": "pl",
     "amazon.nl": "nl",
     "amazon.ie": "ie",
+    "amazon.com.au": "au",
 }
 
 EU_MARKETPLACES = {"de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}

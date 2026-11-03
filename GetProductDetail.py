@@ -10,11 +10,10 @@ from GetNextOrderData import (
     REGION_RECO_CONFIGS,
     apply_category_min_order,
     compute_region_recommendations,
-    compute_trailing_total_prorated,
     shipment_window_months,
     trailing_months_with_current,
 )
-from NextOrderSettings import get_or_create_next_shipment_date
+from NextOrderSettings import get_next_shipment_dates, region_cover_months
 
 POCKETBASE_URL = os.environ["POCKETBASE_URL"].rstrip("/")
 POCKETBASE_ADMIN_EMAIL = os.environ["POCKETBASE_ADMIN_EMAIL"]
@@ -118,58 +117,52 @@ def fetch_sales_by_month_for_asin(token, asin, marketplaces):
     return totals
 
 
-def fetch_zero_inventory_weeks_for_asin(token, asin, region, since_date_str):
-    rows = fetch_all(
-        token, POCKETBASE_INVENTORY_HISTORY_COLLECTION,
-        f'asin = "{pb_escape(asin)}" && region = "{region}" && week_date >= "{since_date_str}" && balance <= 0',
-        fields="week_date",
-    )
-    return len({row.get("week_date") for row in rows})
-
-
 def compute_product_recos(token, asin, sku, stock):
     """Same Reco engine as GetNextOrderData.py (A/B recommendation +
     stockout-week exclusion + category minimum threshold), just scoped to
     this one product's ASIN instead of every SKU - added 2026-09-22 at the
-    user's request to show Reco on the product page too. Returns
-    {region: {"recommended": int, "recommendedSeasonal": int,
-    "seasonalSource": str, "avgMonthly": float, "debug": {...}}}."""
-    next_shipment_date_str = get_or_create_next_shipment_date(token)
-    next_shipment_date = date.fromisoformat(next_shipment_date_str)
+    user's request to show Reco on the product page too. Three-value A/B/C
+    split (2026-09-22, per the user - see GetNextOrderData.py's
+    compute_region_recommendations docstring). Returns
+    {region: {"recommended": int, "recommendedSeasonal1yr": int,
+    "recommendedSeasonal2yr": int, "seasonal1yrSource": str,
+    "seasonal2yrSource": str, "avgMonthly": float, "debug": {...}}}."""
+    shipment_dates = get_next_shipment_dates(token)
+    region_dates = {r: date.fromisoformat(shipment_dates[r]) for r in REGION_RECO_CONFIGS}
+    pb_count = region_cover_months(token, region_dates)
+    next_shipment_date_str = shipment_dates["usa"]
+    next_shipment_date = region_dates["usa"]
     today = date.today()
 
     trailing_months = trailing_months_with_current(3, today)
     year1_months = shipment_window_months(next_shipment_date, 1)
     year2_months = shipment_window_months(next_shipment_date, 2)
-    trailing_window_start = f"{trailing_months[0][0]:04d}-{trailing_months[0][1]:02d}-01"
+    from StockDays import load_stock_days
+    from GetNextOrderData import BALANCE_PARTS
+    stock_days, covered_days = load_stock_days(token, asin=asin)
+    stock = dict(stock)
+    for region, parts in BALANCE_PARTS.items():  # Bal = FBA + AWD (+ LG for DE)
+        values = [stock.get(f"{region}_balance_{p}") or 0 for p in parts]
+        if any(values):
+            stock[f"{region}_balance"] = sum(values)
 
     recos = {}
     for region, cfg in REGION_RECO_CONFIGS.items():
         asin_sales = fetch_sales_by_month_for_asin(token, asin, cfg["sales_marketplaces"])
-        zero_inventory_weeks = fetch_zero_inventory_weeks_for_asin(token, asin, region, trailing_window_start)
-        already_covered = (stock.get(cfg["balance"]) or 0) + (stock.get(cfg["otw"]) or 0) + (stock.get(cfg["next"]) or 0)
-        trailing_total, lookback_days, _ = compute_trailing_total_prorated(asin_sales, 3, today)
+        # Reco ignores the Next column (per the user 2026-10-03): Bal + OTW only.
+        already_covered = (stock.get(cfg["balance"]) or 0) + (stock.get(cfg["otw"]) or 0)
         reco = compute_region_recommendations(
-            asin_sales, already_covered, next_shipment_date, today,
-            trailing_total, lookback_days, year1_months, year2_months,
-            zero_inventory_weeks,
+            asin_sales, already_covered, region_dates[region], today, trailing_months,
+            shipment_window_months(region_dates[region], 1, pb_count[region]), shipment_window_months(region_dates[region], 2, pb_count[region]), stock_days[region].get(asin, {}), covered_days[region], pb_count[region],
         )
         recos[region] = {
             "recommended": apply_category_min_order(sku, reco["reco_recent"]),
-            "recommendedSeasonal": apply_category_min_order(sku, reco["reco_seasonal"]),
-            "seasonalSource": reco["seasonal_source"],
+            "recommendedSeasonal1yr": apply_category_min_order(sku, reco["reco_seasonal_1yr"]),
+            "recommendedSeasonal2yr": apply_category_min_order(sku, reco["reco_seasonal_2yr"]),
+            "seasonal1yrSource": reco["seasonal_1yr_source"],
+            "seasonal2yrSource": reco["seasonal_2yr_source"],
             "avgMonthly": reco["avg_monthly"],
-            "debug": {
-                "trailingTotal": reco["trailing_total"],
-                "year1Total": reco["year1_total"],
-                "year2Total": reco["year2_total"],
-                "xDays": reco["x_days"],
-                "needForXDays": reco["need_for_x_days"],
-                "alreadyCovered": reco["already_covered"],
-                "avgDailyRecent": reco["avg_daily_recent"],
-                "avgDailySeasonal": reco["avg_daily_seasonal"],
-                "zeroInventoryWeeks": reco["zero_inventory_weeks"],
-            },
+            "debug": reco["debug"],
         }
     return recos, next_shipment_date_str
 
@@ -206,8 +199,18 @@ def GetProductDetail(request):
     try:
         body = request.get_json(silent=True) or {}
         asin = (body.get("asin") or "").strip()
+        sku_in = (body.get("sku") or "").strip()
+        # Per the user (2026-10-12): the product page works by SKU alone - resolve
+        # the ASIN from asin_group_mapping when only a SKU is given.
+        if sku_in:
+            token0 = pb_authenticate()
+            rec = find_one(token0, POCKETBASE_MAPPING_COLLECTION, f'sku="{pb_escape(sku_in)}"')
+            if rec and rec.get("asin"):
+                asin = rec["asin"]
+            elif not asin:  # unmapped SKU and no ASIN to fall back on
+                return json_response({"error": f"SKU {sku_in} not found in the mapping"}, 404)
         if not asin:
-            return json_response({"error": "asin is required"}, 400)
+            return json_response({"error": "sku (or asin) is required"}, 400)
 
         now = datetime.now(LA_TZ)
         current_year = now.year

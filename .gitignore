@@ -10,3 +10,4 @@ mandalalifeart.pub
 *.pem
 id_*
 id_*.pub
+tools/sheet2csv/node_modules/

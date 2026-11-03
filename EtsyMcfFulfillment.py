@@ -26,8 +26,8 @@ ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 
 # Wide enough that an order stuck in "Pending" for a while still shows up -
 # Etsy receipts don't expose a "still unshipped" filter server-side, so this
@@ -103,7 +103,18 @@ def set_order_mcf_status(pb_token, receipt_id, mcf_status, mcf_order_id=None):
     response.raise_for_status()
     items = response.json().get("items", [])
     if not items:
-        raise RuntimeError(f"No stored etsy_orders row for receipt {receipt_id} to update mcf_status on")
+        # 2026-10-08: the order can be newer than the last daily etsy_orders
+        # sync - create a minimal row so the status sticks (UpdateEtsyOrders
+        # carries mcf_status/mcf_order_id forward when it rewrites the row).
+        # Without it the next run re-submitted the order and Amazon answered
+        # "A create request already exists for ETSY-<id>".
+        body = {"receipt_id": str(receipt_id), "mcf_status": mcf_status}
+        if mcf_order_id:
+            body["mcf_order_id"] = mcf_order_id
+        created = requests.post(f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
+                                headers={"Authorization": pb_token}, json=body, timeout=30)
+        created.raise_for_status()
+        return
     patch_body = {"mcf_status": mcf_status}
     if mcf_order_id:
         patch_body["mcf_order_id"] = mcf_order_id
@@ -414,6 +425,17 @@ def RunEtsyMcfFulfillmentWet(request):
             try:
                 payload = create_mcf_order(receipt, sku_map)
             except Exception as exc:
+                if "already exists for MerchantFulfillmentOrderId" in str(exc):
+                    # Created by an earlier run whose status update didn't stick
+                    # - it IS an MCF order, just mark it (2026-10-08).
+                    entry = {"receiptId": order["receiptId"], "buyer": order["buyer"], "amazonOrderId": "",
+                             "note": "MCF order already existed (created by an earlier run) - marked in progress"}
+                    try:
+                        set_order_mcf_status(pb_token, order["receiptId"], "in_progress")
+                    except Exception as exc2:
+                        entry["statusUpdateFailed"] = str(exc2)
+                    created.append(entry)
+                    continue
                 failed.append({"receiptId": order["receiptId"], "buyer": order["buyer"], "error": str(exc)})
                 continue
             # The real Amazon order is placed at this point - any failure past
@@ -452,6 +474,9 @@ def RunEtsyMcfFulfillmentWet(request):
             "etsy-daily-mcf-fulfillment-wet", "amzbot", report_text,
             is_error=bool(failed or fetch_errors),
             subject=f"Etsy MCF fulfillment (WET RUN) - {len(created)} created, {len(failed)} failed, {len(needs_manual)} manual",
+            # per the user (2026-10-02): Telegram only when an MCF order was
+            # created or failed - not for runs with nothing new
+            telegram=bool(created or failed or needs_manual),
         )
 
         return json_response({
@@ -870,6 +895,11 @@ def push_tracking_to_etsy(access_token, shop_id, receipt_id, tracking_code, carr
         json={"tracking_code": tracking_code, "carrier_name": carrier_name, "send_bcc": False},
         timeout=30,
     )
+    # Etsy refuses a tracking number it already has on the order (e.g. added by
+    # hand, or a run that pushed it but crashed before recording it) - that is
+    # the outcome we want, so treat it as done instead of failing every day.
+    if response.status_code == 400 and "already in use" in response.text:
+        return "already_on_etsy"
     if response.status_code not in (200, 201):
         raise RuntimeError(f"Etsy tracking update failed: HTTP {response.status_code} - {response.text}")
     return response.json()
@@ -1052,11 +1082,12 @@ def UpdateEtsyTrackingFromAmazon(request):
                             "tracking": pkg["trackingNumber"],
                         })
                         continue
-                    push_tracking_to_etsy(access_token, shop_id, receipt_id, pkg["trackingNumber"], carrier_name)
-                    shipped.append({
-                        "receiptId": receipt_id, "carrier": carrier_name, "tracking": pkg["trackingNumber"],
-                        "additional": bool(already_pushed),
-                    })
+                    result = push_tracking_to_etsy(access_token, shop_id, receipt_id, pkg["trackingNumber"], carrier_name)
+                    if result != "already_on_etsy":
+                        shipped.append({
+                            "receiptId": receipt_id, "carrier": carrier_name, "tracking": pkg["trackingNumber"],
+                            "additional": bool(already_pushed),
+                        })
                     newly_pushed.add(pkg["trackingNumber"])
 
                 if newly_pushed:
@@ -1077,6 +1108,9 @@ def UpdateEtsyTrackingFromAmazon(request):
             "etsy-daily-tracking-update", "amzbot", report_text,
             is_error=bool(skipped_no_carrier_match or cancelled or completed_partial or errors),
             subject=f"Etsy tracking sync - {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+            # per the user (2026-10-02): Telegram only when tracking was
+            # actually pushed to Etsy (errors still go by email)
+            telegram=bool(shipped),
         )
 
         return json_response({

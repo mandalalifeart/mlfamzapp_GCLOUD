@@ -6,8 +6,9 @@ balance top-ups sent between currencies) - plus a balance snapshot via
 GET /v4/profiles/{id}/balances. Both need only the personal API token,
 confirmed live 2026-09-09.
 
-This does NOT cover incoming deposits (e.g. an Amazon settlement landing
-directly in the USD balance) - that needs the real per-balance ledger via
+CORRECTION (2026-10-01): /v1/transfers DOES include incoming deposits - see
+WiseLedger.py, which builds the full per-balance accounting ledger the /wise
+page uses. The statement endpoint below is still unreachable:
 GET /v1/profiles/{id}/balance-statements/{balanceId}/statement.json, which
 is gated by Wise's Strong Customer Authentication (SCA: sign a challenge
 token with a registered RSA key). Investigated live 2026-09-09: correctly
@@ -282,7 +283,13 @@ def UpdateWiseFinances(request):
             transfers_written = write_transfers(pb_token, profile_tag, profile_id, transfers, counterparty_names)
             balances = fetch_balances(profile_id)
             balances_written = write_balances(pb_token, profile_tag, profile_id, balances)
-            results[profile_tag] = {"transfersWritten": transfers_written, "balancesWritten": balances_written}
+            # wise_ledger (the /wise page's real source) is built from the same
+            # transfer list plus the activity feed - see WiseLedger.py.
+            from WiseLedger import sync_ledger_from_api
+            ledger = sync_ledger_from_api(pb_token, profile_id, transfers)
+            from WiseLedger import build_amazon_monthly_docs
+            ledger.update(build_amazon_monthly_docs(pb_token))
+            results[profile_tag] = {"transfersWritten": transfers_written, "balancesWritten": balances_written, **ledger}
         return json_response({"regions": results})
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__, "partialResults": results}, 500)

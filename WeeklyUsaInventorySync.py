@@ -23,8 +23,8 @@ from InventoryHistory import write_inventory_history_snapshot
 from NotificationRouting import notify, pb_authenticate
 from UpdateUsaInventory import POCKETBASE_STATS_COLLECTION, POCKETBASE_URL, sync_usa_inventory
 
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")
 JOB_NAME = "amazon-weekly-usa-inventory-sync"
 APP_NAME = "amzbot"
@@ -40,6 +40,7 @@ EXPORT_FIELDS = (
     "de_balance", "de_balance_fba", "de_balance_awd", "de_balance_lg", "de_on_the_way", "de_next_shipment",
     "usa_balance", "usa_balance_fba", "usa_balance_awd",
     "usa_on_the_way", "usa_next_shipment", "next_order",
+    "au_balance", "au_on_the_way",
 )
 
 

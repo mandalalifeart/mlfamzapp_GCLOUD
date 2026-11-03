@@ -14,9 +14,14 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from GetMarketplaceSalesSummary import fetch_usd_rates
+from NotificationRouting import send_amz_telegram
+
 from AdsAuth import cors_headers, json_response
 from AdsReporting import ADMIN_KEY, POCKETBASE_URL, last_recorded_date, pb_authenticate
 
+# @baba_amz_bot since 2026-10-22 via send_amz_telegram (per the user); these
+# remain only for the "is Telegram configured" check.
 TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
 SYSTEM_TZ = ZoneInfo("Asia/Jerusalem")
@@ -74,6 +79,22 @@ def format_section(title, totals):
         acos_text = f"{acos:.1f}%" if acos is not None else "n/a"
         currency = vals["currency"] or "USD"
         lines.append(f"  {label}: {currency} {vals['spend']:,.2f} spend / {currency} {vals['sales']:,.2f} sales (ACOS {acos_text})")
+    # All marketplaces in USD (per the user 2026-10-22), live rates via
+    # frankfurter with the summary page's fallback rates.
+    rates = fetch_usd_rates({v["currency"] or "USD" for v in real.values()})
+    spend = sales = 0.0
+    missing = []
+    for vals in real.values():
+        cur = vals["currency"] or "USD"
+        rate = 1.0 if cur == "USD" else rates.get(cur)
+        if not rate:
+            missing.append(cur)
+            continue
+        spend += vals["spend"] / rate
+        sales += vals["sales"] / rate
+    acos = f"{spend / sales * 100:.1f}%" if sales else "n/a"
+    note = f" (excl. {', '.join(sorted(set(missing)))})" if missing else ""
+    lines.append(f"  TOTAL: USD {spend:,.2f} spend / USD {sales:,.2f} sales (ACOS {acos}){note}")
     return "\n".join(lines)
 
 
@@ -119,11 +140,7 @@ def send_telegram(text):
         return
     if len(text) > 3900:
         text = text[:3900] + "\n...(truncated)"
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-        timeout=15,
-    )
+    send_amz_telegram("sendMessage", json_body={"text": text}, timeout=15)
 
 
 def SendDailyAdsDigest(request):

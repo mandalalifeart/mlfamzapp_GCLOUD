@@ -16,8 +16,8 @@ POCKETBASE_EXPERIMENTS_COLLECTION = os.environ.get("POCKETBASE_ETSY_EXPERIMENTS_
 POCKETBASE_SNAPSHOTS_COLLECTION = os.environ.get("POCKETBASE_ETSY_SNAPSHOTS_COLLECTION", "etsy_listing_snapshots")
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("MCF_TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("MCF_TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = (os.environ.get("UPDATE_TELEGRAM_BOT_TOKEN") or os.environ.get("MCF_TELEGRAM_BOT_TOKEN", ""))
+TELEGRAM_CHAT_ID = (os.environ.get("UPDATE_TELEGRAM_CHAT_ID") or os.environ.get("MCF_TELEGRAM_CHAT_ID", ""))
 
 # Weekly summaries rather than daily noise - a listing's views/orders don't
 # move meaningfully day to day, and this is a slow-moving experiment.

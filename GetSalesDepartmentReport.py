@@ -350,3 +350,73 @@ def GetSalesDepartmentReport(request):
         return json_response({"error": str(exc)}, 403)
     except Exception as exc:
         return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+EU_COUNTRY_CODES = {"de", "fr", "it", "es", "se", "be", "pl", "nl", "ie"}
+
+
+def GetSkuSalesByDateRange(request):
+    """Units per ASIN over an arbitrary LA-date range, from sku_sales_daily
+    (only populated from Sep 2026 onward by the nightly update - see
+    UpdateSkuSalesMonth.write_daily_sku_data). Powers the Sales page's
+    "Last week" Best/Worst Sellers ranking. Same ASIN resolution/IGNORE
+    rules as build_report, so the result lines up with its groups."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    if request.method != "POST":
+        return json_response({"error": "Method not allowed"}, 405)
+
+    try:
+        body = request.get_json(silent=True) or {}
+        start_date = str(body.get("start_date") or "")
+        end_date = str(body.get("end_date") or "")
+        if len(start_date) != 10 or len(end_date) != 10:
+            return json_response({"error": "start_date and end_date (YYYY-MM-DD) are required"}, 400)
+
+        atomic = expand_marketplaces(body.get("marketplaces"))
+        # sku_sales_daily has no combined "eu" row - expand it to its countries.
+        if "eu" in atomic:
+            atomic = (atomic - {"eu"}) | EU_COUNTRY_CODES
+        if not atomic:
+            return json_response({"status": "success", "byAsin": {}, "latestDate": None})
+
+        mapping = load_mapping()
+        token = pb_authenticate()
+        marketplace_clause = " || ".join(f'marketplace="{mp}"' for mp in sorted(atomic))
+        by_asin = defaultdict(int)
+        latest_date = None
+        page = 1
+        while True:
+            response = requests.get(
+                f"{POCKETBASE_URL}/api/collections/sku_sales_daily/records",
+                headers={"Authorization": token},
+                params={
+                    "filter": f'(date>="{start_date}" && date<="{end_date}" && ({marketplace_clause}))',
+                    "fields": "sku,ASIN,date,quantity",
+                    "perPage": 500,
+                    "page": page,
+                },
+                timeout=60,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"PocketBase list failed: HTTP {response.status_code} - {response.text}")
+            data = response.json()
+            for rec in data.get("items", []):
+                sku = rec.get("sku") or ""
+                if sku in mapping["ignored_skus"]:
+                    continue
+                asin = (rec.get("ASIN") or "").strip()
+                if (not asin or asin not in mapping["asin_to_group"]) and sku in mapping["sku_to_asin"]:
+                    asin = mapping["sku_to_asin"][sku]
+                if not asin or asin not in mapping["asin_to_group"]:
+                    continue
+                by_asin[asin] += int(rec.get("quantity") or 0)
+                if latest_date is None or rec["date"] > latest_date:
+                    latest_date = rec["date"]
+            if page >= data.get("totalPages", 1):
+                break
+            page += 1
+
+        return json_response({"status": "success", "byAsin": dict(by_asin), "latestDate": latest_date})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

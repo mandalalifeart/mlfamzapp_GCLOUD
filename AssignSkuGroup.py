@@ -68,6 +68,9 @@ def AssignSkuGroup(request):
         sku = (body.get("sku") or "").strip()
         asin = (body.get("asin") or "").strip()
         group = (body.get("group") or "").strip()
+        # Next Order page's "Add New Product" (2026-09-30): never silently
+        # move an existing SKU to another group - report it instead.
+        create_only = bool(body.get("createOnly"))
 
         if not sku:
             return json_response({"error": "sku is required"}, 400)
@@ -76,6 +79,12 @@ def AssignSkuGroup(request):
 
         token = pb_authenticate()
         record = find_by_sku(token, sku)
+
+        if record and create_only:
+            return json_response(
+                {"error": f"SKU {sku} already exists (group {record.get('group') or '-'})"},
+                409,
+            )
 
         if record:
             update_body = {"group": group}

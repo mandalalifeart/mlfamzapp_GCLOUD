@@ -7,4 +7,4 @@ set -a
 source ./.env
 set +a
 mkdir -p logs
-.venv/bin/python3 run_local.py "$1"
+.venv/bin/python3 run_local.py "$@"

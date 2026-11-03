@@ -47,7 +47,13 @@ AD_ADVERTISED_PRODUCT_PRODUCTS = [
             "date", "campaignId", "campaignName", "adGroupId", "adGroupName",
             "advertisedAsin", "advertisedSku",
             "impressions", "clicks", "cost", "purchases7d", "sales7d",
+            # purchases7d/sales7d include OTHER products bought after the ad
+            # click (brand halo) - the SameSku columns are this exact SKU
+            # only, needed for per-ASIN "ad vs organic" (added 2026-10-02).
+            "purchasesSameSku7d", "unitsSoldSameSku7d", "attributedSalesSameSku7d",
         ],
+        "same_sku": {"same_sku_orders": "purchasesSameSku7d", "same_sku_units": "unitsSoldSameSku7d",
+                     "same_sku_sales": "attributedSalesSameSku7d"},
         "asin_field": "advertisedAsin",
         "sku_field": "advertisedSku",
         "sales_field": "sales7d",
@@ -98,6 +104,8 @@ def advertised_product_row_to_body(ads_profile, row, product):
         "spend": row.get("cost", 0),
         "sales": row.get(product["sales_field"], 0),
         "orders": row.get(product["purchases_field"], 0),
+        **{field: row.get(col) or 0 for field, col in (product.get("same_sku") or {}).items()},
+        "has_same_sku": bool(product.get("same_sku")),
     }
 
 

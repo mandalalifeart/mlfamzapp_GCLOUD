@@ -162,7 +162,8 @@ def pb_list_orders(token, receipt_ids):
             response = requests.get(
                 f"{POCKETBASE_URL}/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records",
                 headers={"Authorization": token},
-                params={"filter": filter_str, "fields": "id,receipt_id,mcf_status", "perPage": 200, "page": page},
+                params={"filter": filter_str, "fields": "id,receipt_id,mcf_status,mcf_order_id,mcf_tracking_pushed",
+                        "perPage": 200, "page": page},
                 timeout=30,
             )
             if response.status_code != 200:
@@ -427,9 +428,18 @@ def UpdateEtsyOrders(request):
         # delete+reinsert instead of getting silently wiped on the next pull.
         if order_bodies:
             existing_orders = pb_list_orders(pb_token, [b["receipt_id"] for b in order_bodies])
-            existing_mcf_status = {row["receipt_id"]: row.get("mcf_status", "") for row in existing_orders}
+            # mcf_order_id (a manually-created order id like ETSY-<id>x) and
+            # mcf_tracking_pushed must survive too - losing mcf_order_id made
+            # the tracking sync look up the cancelled default id and mark a
+            # live order "cancelled" (found 2026-10-03, receipt 4189542389).
+            existing_by_receipt = {row["receipt_id"]: row for row in existing_orders}
             for body in order_bodies:
-                body["mcf_status"] = existing_mcf_status.get(body["receipt_id"], "")
+                prev = existing_by_receipt.get(body["receipt_id"]) or {}
+                body["mcf_status"] = prev.get("mcf_status", "")
+                if prev.get("mcf_order_id"):
+                    body["mcf_order_id"] = prev["mcf_order_id"]
+                if prev.get("mcf_tracking_pushed"):
+                    body["mcf_tracking_pushed"] = prev["mcf_tracking_pushed"]
             ops.extend(
                 {"method": "DELETE", "url": f"/api/collections/{POCKETBASE_ORDERS_COLLECTION}/records/{row['id']}"}
                 for row in existing_orders
