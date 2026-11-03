@@ -8,7 +8,8 @@ totals json, rows json). Units per product (ASIN) at the date:
   method "backcalc" (a past date): units now (sku_statistics: FBA + AWD +
     Lagerpark + on the way, every region) + units sold after the date
     (order_items, every channel incl. Etsy MCF, not cancelled) - units on
-    supplier invoices dated after the date. Below 0 -> 0 (flagged).
+    supplier invoices booked after the date (booked_date, else invoice date).
+    Below 0 -> 0 (flagged).
   method "snapshot" (today, e.g. the cron on the last day of each month): units
     now from sku_statistics.
   FBA units at the date from Amazon's Inventory Ledger (US + Pan-EU/UK) are
@@ -115,7 +116,9 @@ def compute(as_of, method="backcalc", with_ledger=True, token=None):
         a = ean2asin.get(ln["ean"].lstrip("0"))
         if not a:
             continue
-        if method == "backcalc" and ln["date"] > as_of:
+        # Goods count from the period the accounts book the invoice in
+        # (booked_date, e.g. MI/198: sent Sep 2025, arrived and booked 2026).
+        if method == "backcalc" and (ln.get("booked") or ln["date"]) > as_of:
             invoiced[a] += ln["qty"]
         if ln["cif"]:
             continue

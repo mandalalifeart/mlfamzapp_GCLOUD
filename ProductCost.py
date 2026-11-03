@@ -122,6 +122,7 @@ def invoice_lines(token):
         e = d.get("extracted") or {}
         for ln in cache[key]["lines"]:
             out.append({**ln, "invoice": e.get("invoice_number") or "", "date": e.get("invoice_date") or "",
+                        "booked": e.get("booked_date") or e.get("invoice_date") or "",
                         "supplier": d["group_key"].split("|")[1], "cif": cache[key]["cif"]})
     if changed:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
