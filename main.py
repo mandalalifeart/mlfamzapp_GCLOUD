@@ -792,6 +792,31 @@ def GetPriceSimulation(request):
     return handler(request)
 
 
+def GetTacosTargets(request):
+    from TargetTacos import GetTacosTargets as handler
+    return handler(request)
+
+
+def UpdateTacosTargets(request):
+    from TargetTacos import UpdateTacosTargets as handler
+    return handler(request)
+
+
+def SendTacosBidRule(request):
+    from TargetTacos import SendTacosBidRule as handler
+    return handler(request)
+
+
+def GetAdsRulesConfig(request):
+    from TargetTacos import GetAdsRulesConfig as handler
+    return handler(request)
+
+
+def SetAdsRulesConfig(request):
+    from TargetTacos import SetAdsRulesConfig as handler
+    return handler(request)
+
+
 def SendModelVsReal(request):
     from ModelVsReal import SendModelVsReal as handler
     return handler(request)

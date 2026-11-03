@@ -30,7 +30,20 @@ from AsinAnalytics import pb_authenticate, pb_list_all
 from JobState import get_job_state, set_job_state
 
 PAREO_WORDS = ("PAREO", "SARONG", "BEACH")
-TARGET = {"home": 35, "pareo": 30}
+TARGET = {"home": 35, "pareo": 30}  # fallback only - the ACOS limit now comes from the TACOS target (TargetTacos)
+
+
+def acos_target(pb, cc, seg, _cache={}):
+    """Keyword ACOS limit derived from the marketplace-department TACOS target
+    (per the user 2026-11-03: every ad recommendation looks at TACOS)."""
+    if "state" not in _cache:
+        from TargetTacos import load_targets
+        try:
+            _cache["state"] = load_targets(pb)
+        except Exception:
+            _cache["state"] = {}
+    from TargetTacos import acos_limit
+    return acos_limit(_cache["state"], cc, seg, TARGET[seg])
 SEASON_RESTART = "2027-02-20"
 MAX_BID = 2.0
 SCALE = {"SE": 11, "PL": 4.3, "MX": 20, "CA": 1.4}
@@ -149,7 +162,8 @@ def raise_block(pb, today, api=None):
         if winter(today, c["seg"]):
             continue
         acos = 100 * a["spend"] / a["sales"]
-        t = TARGET[c["seg"]]
+        t = acos_target(pb, a["cc"], c["seg"])
+        a["target"] = t
         pct = 25 if a["orders"] >= 5 and acos <= 0.5 * t else 15 if a["orders"] >= 3 and acos <= 0.7 * t else 0
         if pct:
             cands[cid].append((tid, a, acos, pct))
@@ -174,7 +188,7 @@ def raise_block(pb, today, api=None):
                          "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                          "text": a["text"], "country": a["cc"], "old_bid": old, "new_bid": new})
             trows.append([f"{a['cc']} {c['campaign_name']}", a["text"][:60], round(a["orders"]), round(a["clicks"]),
-                          round(a["spend"], 2), f"{acos:.0f}%", f"{TARGET[c['seg']]}%", old, new, f"+{pct}%"])
+                          round(a["spend"], 2), f"{acos:.0f}%", f"{a['target']:.0f}%", old, new, f"+{pct}%"])
         if acts:
             proposals.append({"section": "Bid raises", "title": f"{acts[0]['country']} {c['campaign_name']}: raise {len(acts)} bid(s)",
                               "detail": "; ".join(f"{x['text'][:40]} {x['old_bid']}→{x['new_bid']}" for x in acts[:10])
@@ -242,7 +256,7 @@ def harvest_block(pb, today, api=None):
     for (cc, cid, term), a in agg.items():
         c = camps.get(cid) or {"seg": seg_of(a["camp"]), "campaign_name": a["camp"], "profile_id": None}
         acos = 100 * a["spend"] / a["sales"] if a["sales"] else None
-        if (a["orders"] >= 2 and a["clicks"] >= 3 and acos is not None and acos <= TARGET[c["seg"]]
+        if (a["orders"] >= 2 and a["clicks"] >= 3 and acos is not None and acos <= acos_target(pb, cc, c["seg"])
                 and term not in exact[cc] and not winter(today, c["seg"])):
             prev = adds.get((cc, term))
             if not prev or a["orders"] > prev["orders"]:
@@ -393,15 +407,38 @@ def apply(pb, action, label):
                 continue
             try:
                 c, tok = api.ctx(x["profile_id"])
+                state = None
+                if x.get("pause"):
+                    state = "PAUSED"
+                elif x.get("unpause"):
+                    state = "ENABLED"
                 resp = write_bid_or_state(c, tok, x["profile_id"], x["ad_product"], x["is_keyword"], x["target_id"],
-                                          x["campaign_id"], x["ad_group_id"], x["new_bid"])
-                record_bid_change(pb, {"action": "bid_change", "ad_product": x["ad_product"], "campaign_id": x["campaign_id"],
+                                          x["campaign_id"], x["ad_group_id"], x["new_bid"], state=state)
+                why = x.get("reason") or "bid raise (good keyword)"
+                if x.get("pause"):
+                    why += f" - paused {x['pause']} (bid would go below Amazon's minimum)"
+                record_bid_change(pb, {"action": "disable" if x.get("pause") else "bid_change", "ad_product": x["ad_product"],
+                                       "campaign_id": x["campaign_id"],
                                        "campaign_name": x["campaign"], "changed_at": today, "country_code": x["country"],
                                        "profile_id": x["profile_id"], "target_id": x["target_id"], "target_text": x["text"],
                                        "old_bid": x["old_bid"], "new_bid": x["new_bid"], "status": "applied",
-                                       "reason": f"{label}: bid raise (good keyword), approved on /checks",
+                                       "reason": f"{label}: {why}, approved on the page",
                                        "amazon_response": json.dumps(resp)[:2000]})
-                done.append(f"{x['text']} {x['old_bid']}→{x['new_bid']}")
+                if x.get("pause") == "temporary":
+                    from TargetTacos import PAUSES_KEY
+                    ps = json.loads(get_job_state(pb, PAUSES_KEY) or "[]")
+                    ps = [p for p in ps if p["target_id"] != x["target_id"]]
+                    ps.append({**x, "paused_on": today, "status": "active"})
+                    set_job_state(pb, PAUSES_KEY, json.dumps(ps))
+                elif x.get("unpause"):
+                    from TargetTacos import PAUSES_KEY
+                    ps = json.loads(get_job_state(pb, PAUSES_KEY) or "[]")
+                    for p in ps:
+                        if p["target_id"] == x["target_id"]:
+                            p.update(status="unpaused", unpaused_on=today)
+                    set_job_state(pb, PAUSES_KEY, json.dumps(ps))
+                done.append(f"{x['text']} " + (f"paused ({x['pause']})" if x.get("pause") else
+                                               "unpaused" if x.get("unpause") else f"{x['old_bid']}→{x['new_bid']}"))
             except Exception as exc:
                 failed.append(f"{x['text']}: {str(exc)[:120]}")
     elif typ == "add_exact_keywords":

@@ -79,17 +79,30 @@ def save_monthly_from_notify(job_name, text):
     save_report("monthly", f"{prev.year:04d}-{prev.month:02d}", job_name, MONTHLY_JOBS[job_name], text)
 
 
+# Ads checks live on /ads-reviews, the business checks on /checks (per the user
+# 2026-11-03). GetCheckReports?area=ads|business (no area = everything).
+ADS_JOBS = {"SendWeeklyChangesReview", "SendWeeklyBidChangeSummary", "SendComebacksWeekly", "SendSearchTermHarvest",
+            "SendOffAmazonWeekly", "SendCampaignWatchDigest", "ads-monthly-review", "ads-monthly-auto",
+            "losing-products", "products-no-ads", "tacos-bids"}
+
+
+def _in_area(job, area):
+    return not area or (job in ADS_JOBS) == (area == "ads")
+
+
 def GetCheckReports(request):
     args = getattr(request, "args", {}) or {}
     try:
         token = pb_authenticate()
-        rows = pb_list_all(token, COLLECTION, "", fields="kind,period")
+        area = args.get("area") or ""
+        rows = [r for r in pb_list_all(token, COLLECTION, "", fields="kind,period,job") if _in_area(r["job"], area)]
         periods = {"weekly": sorted({r["period"] for r in rows if r["kind"] == "weekly"}, reverse=True),
                    "monthly": sorted({r["period"] for r in rows if r["kind"] == "monthly"}, reverse=True)}
         kind = args.get("kind") or "weekly"
         period = args.get("period") or (periods[kind][0] if periods.get(kind) else "")
         reports = pb_list_all(token, COLLECTION, f'kind = "{kind}" && period = "{period}"',
                               fields="id,job,label,text,flags,ran_at,proposals,tables") if period else []
+        reports = [r for r in reports if _in_area(r["job"], area)]
         for r in reports:  # the page doesn't need the executable payloads
             for p in r.get("proposals") or []:
                 p["hasAction"] = bool(p.pop("action", None))

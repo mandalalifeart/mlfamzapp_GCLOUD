@@ -142,18 +142,29 @@ def tacos_section(pb, today):
     def cell(mp, ym):
         sales, spend = tot.get((mp, ym), (0, 0))
         return (spend / sales * 100) if sales else None
-    lines = [f"\n📊 TACOS (ad spend / all sales) - {date(*prev_m, 1):%b} | {date(*cur_m, 1):%b} to date · target USA/DE 20%, others 25%"]
+    # target per marketplace = its departments' TACOS targets (10% profit,
+    # TargetTacos) weighted by their 12-month sales (2026-11-03, per the user)
+    from TargetTacos import config, load_targets
+    st, cfg = load_targets(pb), config(pb)
+
+    def mp_target(mp):
+        cc = "US" if mp == "usa" else mp.upper()
+        ts = [t for k, t in (st.get("targets") or {}).items() if k.split("|")[0] == cc]
+        w = sum(t["sales"] for t in ts)
+        return round(sum(t["targetTacos"] * t["sales"] for t in ts) / w, 1) if w else TACOS_TARGET.get(mp, 25)
+    lines = [f"\n📊 TACOS (ad spend / all sales) - {date(*prev_m, 1):%b} | {date(*cur_m, 1):%b} to date · "
+             f"target = {cfg['profitPct']:.0f}% profit (per marketplace, departments weighted by sales)"]
     data = []
     for mp in TACOS_MARKETS:
         a, b = cell(mp, prev_m), cell(mp, cur_m)
         if a is None and b is None:
             continue
-        data.append({"market": mp.upper(), "prev": a, "cur": b, "target": TACOS_TARGET.get(mp, 25)})
-        target = TACOS_TARGET.get(mp, 25)
+        target = mp_target(mp)
+        data.append({"market": mp.upper(), "prev": a, "cur": b, "target": target})
         worst = max(x for x in (a, b) if x is not None)
-        mark = "🔴" if worst > target * 1.25 else ("🟠" if worst > target else "🟢")
+        mark = "🔴" if worst > target + cfg["orangeBand"] else ("🟠" if worst > target else "🟢")
         fmt = lambda x: "-" if x is None else f"{x:.0f}%"
-        lines.append(f"{mark} {mp.upper()}: {fmt(a)} | {fmt(b)}")
+        lines.append(f"{mark} {mp.upper()}: {fmt(a)} | {fmt(b)} (target {target:.0f}%)")
     return lines, data
 
 
@@ -194,7 +205,10 @@ def segment_section(pb, today):
             continue
         totals[(r["marketplace"], (r["year"], r["month"]), "pareo" if "PAREO" in g else "home")] += r.get("sales") or 0
     pct = lambda x: "-" if x is None else f"{x:.0f}%"  # noqa: E731
-    lines = [f"\n🏷️ Home decor vs pareo - ACOS/TACOS {date(*prev_m, 1):%b} → {date(*cur_m, 1):%b} to date"]
+    from TargetTacos import config, load_targets, target_for
+    st, cfg = load_targets(pb), config(pb)
+    lines = [f"\n🏷️ Home decor vs pareo - ACOS/TACOS {date(*prev_m, 1):%b} → {date(*cur_m, 1):%b} to date "
+             f"· TACOS target = {cfg['profitPct']:.0f}% profit; 🔴 above → only cuts, 🟢 {cfg['growBand']:.0f}+ points under → room to grow"]
     data = []
     for mp, label in SEGMENT_MARKETS:
         parts = []
@@ -208,9 +222,18 @@ def segment_section(pb, today):
                             "tacos": spend / total * 100 if total else None}
             if not (row["prev"]["spend"] or row["cur"]["spend"] or row["prev"]["sales"] or row["cur"]["sales"]):
                 continue
+            tgt = target_for(st, "US" if mp == "us" else mp.upper(), seg)
+            row["target"] = tgt
+            tv = row["prev"]["tacos"]
+            mark = ""
+            if tgt is not None and tv is not None:
+                mark = ("🔴" if tv > tgt + cfg["orangeBand"] else "🟠" if tv > tgt else
+                        "🟢⬆" if tv <= tgt - cfg["growBand"] else "🟢")
+            row["status"] = mark
             data.append(row)
-            parts.append(f"{name} {pct(row['prev']['acos'])}/{pct(row['prev']['tacos'])} → "
-                         f"{pct(row['cur']['acos'])}/{pct(row['cur']['tacos'])}")
+            parts.append(f"{mark}{name} {pct(row['prev']['acos'])}/{pct(row['prev']['tacos'])} → "
+                         f"{pct(row['cur']['acos'])}/{pct(row['cur']['tacos'])}"
+                         + (f" (target {tgt:.0f}%)" if tgt is not None else ""))
         if parts:
             lines.append(f"{label}: " + " | ".join(parts))
     lines.append("(ACOS/TACOS; this month's ACOS drops as late ad sales arrive)")
