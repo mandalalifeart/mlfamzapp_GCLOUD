@@ -1919,10 +1919,14 @@ def GetWiseSupplierBalances(request):
                 if d.get("group_key") != f"supplier|{sid}":
                     continue
                 ex = d.get("extracted") or {}
-                invoices.append({"id": d["id"], "filename": d.get("filename"), "date": ex.get("invoice_date") or d.get("month"),
+                # booked_date: the accounts book an invoice in a later period than
+                # its own date (per the user 2026-11-03: MI/198 of 26.09.2025 goes to 2026).
+                inv_date = ex.get("booked_date") or ex.get("invoice_date") or d.get("month")
+                invoices.append({"id": d["id"], "filename": d.get("filename"), "date": inv_date,
+                                 "invoiceDate": ex.get("invoice_date"), "bookedDate": ex.get("booked_date"),
                                  "number": ex.get("invoice_number") or "", "total": ex.get("total"),
                                  "currency": (ex.get("currency") or "").upper(),
-                                 "beforeStart": bool(start and (ex.get("invoice_date") or d.get("month") or "") < start)})
+                                 "beforeStart": bool(start and (inv_date or "") < start)})
             all_invoices = invoices
             invoices = [i for i in all_invoices if not i["beforeStart"]]
             if cfg.get("currency"):
