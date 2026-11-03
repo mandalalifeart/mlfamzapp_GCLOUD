@@ -787,6 +787,11 @@ def GetProductRanking(request):
     return handler(request)
 
 
+def GetPriceSimulation(request):
+    from PriceSimulation import GetPriceSimulation as handler
+    return handler(request)
+
+
 def UpdateFbaStorageFees(request):
     from StorageFees import UpdateFbaStorageFees as handler
     return handler(request)
