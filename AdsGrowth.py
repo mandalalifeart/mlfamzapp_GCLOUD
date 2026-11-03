@@ -187,20 +187,31 @@ def raise_block(pb, today, api=None):
             acts.append({"profile_id": c["profile_id"], "ad_product": c["ad_product"], "is_keyword": lv["is_keyword"],
                          "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                          "text": a["text"], "country": a["cc"], "old_bid": old, "new_bid": new})
-            trows.append([f"{a['cc']} {c['campaign_name']}", a["text"][:60], round(a["orders"]), round(a["clicks"]),
-                          round(a["spend"], 2), f"{acos:.0f}%", f"{a['target']:.0f}%", old, new, f"+{pct}%"])
+            trows.append([f"{a['cc']} {c['campaign_name']}", a["text"][:60], (a["match"] or "").lower().replace("_", " "),
+                          round(a["orders"]), round(a["clicks"]), round(a["spend"], 2), round(a["sales"], 2),
+                          f"{acos:.0f}%", f"{a['target']:.0f}%",
+                          round(a["spend"] / a["clicks"], 2) if a["clicks"] else None, old, new, f"+{pct}%"])
         if acts:
+            # Per the user 2026-11-03 ("give more info on bid raises"): the card
+            # on /ads-reviews shows one row per keyword with its numbers.
+            prows = [r[1:] for r in trows[-len(acts):]]
             proposals.append({"section": "Bid raises", "title": f"{acts[0]['country']} {c['campaign_name']}: raise {len(acts)} bid(s)",
+                              "why": f"{start:%d %b} – {end:%d %b}: ≥3 orders & ACOS ≤ 70% of target → +15%; "
+                                     f"≥5 orders & ACOS ≤ 50% of target → +25%",
+                              "columns": ["Keyword / target", "Match", "Orders", "Clicks", "Spend", "Sales", "ACOS", "Target",
+                                          "CPC", "Bid now", "New bid", "Raise"],
+                              "rows": prows,
                               "detail": "; ".join(f"{x['text'][:40]} {x['old_bid']}→{x['new_bid']}" for x in acts[:10])
                                         + (" …" if len(acts) > 10 else ""),
                               "action": {"type": "set_bids", "items": acts}})
-    trows.sort(key=lambda r: (r[0], -r[2]))
+    trows.sort(key=lambda r: (r[0], -r[3]))
     lines = [f"📈 Bid raises – good keywords {start} – {end} (≥3 orders & ACOS ≤ 70% of target → +15%; ≥5 orders & ≤ 50% → +25%;"
              f" not changed in 14 days; max {MAX_BID:.2f}; pareo from {SEASON_RESTART}): "
              f"{sum(len(p['action']['items']) for p in proposals)} in {len(proposals)} campaign(s)"]
     lines += [f"• {p['title']}: {p['detail']}" for p in proposals]
     table = {"title": f"Bid raises {start} – {end}", "rows": trows,
-             "columns": ["Campaign", "Keyword / target", "Orders", "Clicks", "Spend", "ACOS", "Target", "Bid now", "New bid", "Raise"]}
+             "columns": ["Campaign", "Keyword / target", "Match", "Orders", "Clicks", "Spend", "Sales", "ACOS", "Target", "CPC",
+                        "Bid now", "New bid", "Raise"]}
     return lines, table, proposals
 
 

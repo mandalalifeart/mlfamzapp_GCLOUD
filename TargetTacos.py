@@ -280,10 +280,19 @@ def bid_rule(token, y, m, today=None, api=None):
                 continue
             why = (", ".join(sku_of.get(a, a) for a in ag_items.get((cid, lv["ad_group_id"]), []))[:80]
                    if lv["ad_group_id"] in agp else f"{c['seg']} department (SB)")
+            if lv["ad_group_id"] in agp:
+                drivers = "; ".join(
+                    f"{sku_of.get(a, a)} {items[(cc, a)]['units']:.0f}u TACOS "
+                    + ("∞" if items[(cc, a)]["tacos"] == math.inf else f"{items[(cc, a)]['tacos']:.0f}%")
+                    for a in ag_items.get((cid, lv["ad_group_id"]), []) if (cc, a) in items)[:160]
+            else:
+                dt = dept_pct.get((cc, c["seg"]))
+                drivers = f"{c['seg']} dept TACOS {dt[0]:.0f}%" if dt else ""
             x = {"profile_id": c["profile_id"], "ad_product": c["ad_product"], "is_keyword": lv["is_keyword"],
                  "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                  "text": tid, "country": cc, "old_bid": old, "new_bid": new,
-                 "reason": f"TACOS rule {y}-{m:02d}: {pct * 100:+.0f}% ({why})"}
+                 "reason": f"TACOS rule {y}-{m:02d}: {pct * 100:+.0f}% ({why})", "pct": pct, "drivers": drivers,
+                 "ag_name": lv.get("ad_group_name") or ""}
             if new < min_bid and pct > 0:
                 x["new_bid"] = new = min_bid
                 if new <= old:
@@ -294,10 +303,17 @@ def bid_rule(token, y, m, today=None, api=None):
             groups[(cc, c["seg"], "up" if pct > 0 else "down")].append(x)
             trows.append([cc, c["seg"], c["campaign_name"], tid, why, f"{pct * 100:+.0f}%", old,
                           "pause " + x["pause"] if x.get("pause") else new])
-    # keyword texts for the page (the live list carries only ids)
-    names = {}
-    for r in pb_list_all(token, "ads_keyword_stats", f'date >= "{start}"', fields="target_id,target_text"):
+    # keyword texts + the month's numbers per keyword for the page (the live
+    # list carries only ids; per the user 2026-11-03 "more info on bid raises")
+    names, kw = {}, defaultdict(lambda: defaultdict(float))
+    for r in _dedupe(pb_list_all(token, "ads_keyword_stats", f'date >= "{start}" && date <= "{end}"',
+                                 fields="profile_id,campaign_id,target_id,target_text,date,clicks,orders,spend,sales"),
+                     lambda r: (r["campaign_id"], r["target_id"], r["date"])):
         names[r["target_id"]] = r.get("target_text") or r["target_id"]
+        for k in ("clicks", "orders", "spend", "sales"):
+            kw[r["target_id"]][k] += r.get(k) or 0
+    for r in pb_list_all(token, "ads_keyword_stats", f'date > "{end}"', fields="target_id,target_text"):
+        names.setdefault(r["target_id"], r.get("target_text") or r["target_id"])
     for xs in groups.values():
         for x in xs:
             x["text"] = names.get(x["target_id"], x["target_id"])
@@ -316,7 +332,19 @@ def bid_rule(token, y, m, today=None, api=None):
                      + f" – TACOS {tacos:.0f}% vs target {target_for(state, cc, seg)}%" if tacos is not None else "",
             "detail": "; ".join(f"{x['text'][:35]} {x['old_bid']}→{'pause' if x.get('pause') else x['new_bid']}"
                                 for x in xs[:12]) + (" …" if len(xs) > 12 else ""),
-            "action": {"type": "set_bids", "items": xs}})
+            "why": f"{y}-{m:02d}: bid × target ÷ TACOS of the products the ad group sells "
+                   f"(capped by units sold); SB = whole department",
+            "columns": ["Keyword / target", "Campaign", "Products (units, TACOS)", "Clicks", "Orders", "Spend", "Sales",
+                        "ACOS", "Bid now", "New bid", "Change"],
+            "rows": [[x["text"][:50], x["campaign"], x.get("drivers", ""),
+                      round(kw[x["target_id"]]["clicks"]), round(kw[x["target_id"]]["orders"]),
+                      round(kw[x["target_id"]]["spend"], 2), round(kw[x["target_id"]]["sales"], 2),
+                      (f"{100 * kw[x['target_id']]['spend'] / kw[x['target_id']]['sales']:.0f}%"
+                       if kw[x["target_id"]]["sales"] else ("no sales" if kw[x["target_id"]]["spend"] else "-")),
+                      x["old_bid"], "pause " + x["pause"] if x.get("pause") else x["new_bid"], f"{x['pct'] * 100:+.0f}%"]
+                     for x in sorted(xs, key=lambda x: -kw[x["target_id"]]["spend"])],
+            "action": {"type": "set_bids", "items": [{k: v for k, v in x.items() if k not in ("drivers", "pct", "ag_name")}
+                                                     for x in xs]}})
     # temporary pauses of earlier months come back for a decision
     back = [p for p in json.loads(get_job_state(token, PAUSES_KEY) or "[]")
             if p.get("status") == "active" and p.get("paused_on", "") < date(today.year, today.month, 1).isoformat()]
