@@ -22,7 +22,8 @@ Real =
   + stock change = stock value (with duty + freight) at the end - at the start,
     from StockValuation (worked back if no month-end snapshot is saved).
 Real profit = settlements (without ads/tax) - ppc ads + Etsy - purchases - freight
-  - Lagerpark - VAT - overheads + stock change."""
+  - Lagerpark - overheads + stock change. VAT is a pass-through (settlement sales
+  are without VAT), shown apart: collected by Amazon vs VAT returns paid."""
 import calendar
 import json
 from collections import defaultdict
@@ -99,6 +100,9 @@ def real_side(token, start, end):
     mflt = " || ".join(f"(year = {y} && month = {m})" for y, m in months)
     for e in pb_list_all(token, "amazon_expense_events", f"({mflt})", fields="category,amount,marketplace,currency"):
         cat = e["category"]
+        if cat == "Tax Collected":  # VAT / US sales tax inside the payouts - passed on, not income
+            t["taxCollected"] += usd(e.get("amount") or 0, e.get("currency") or CUR_OF_MP.get(e.get("marketplace"), "EUR"))
+            continue
         if cat in SKIP_CATS:
             continue
         v = usd(e.get("amount") or 0, e.get("currency") or CUR_OF_MP.get(e.get("marketplace"), "EUR"))
@@ -159,7 +163,10 @@ def real_side(token, start, end):
     t["stockChange"] = v1 - v0
     t["profit"] = (t["sales"] + t["refunds"] + t["fees"] + t["storage"] + t["returnsFee"] + t["importAmazon"]
                    + t["otherFees"] + t["ads"] + t["etsy"] + t["purchases"] + t["importInvoices"] + t["lagerpark"]
-                   + t["vatPaid"] + t["overheads"] + t["stockChange"])
+                   + t["overheads"] + t["stockChange"])
+    # VAT is a pass-through: settlement sales are without it ("Tax Collected" is
+    # apart), so VAT returns paid are not a cost here (2026-11-03 fix - they were
+    # subtracted on top, counting VAT twice).
     t["stockMethods"] = f"{s_start}: {m0}, {end}: {m1}"
     return t, dict(other)
 
@@ -169,9 +176,8 @@ def compare(start, end, token=None):
     mo = model_side(token, start, end)
     re_, other = real_side(token, start, end)
     rows = [  # label, model (cost negative), real, note
-        ("Sales after VAT", mo["netSales"], re_["sales"] + re_["vatPaid"],
-         "model: order dates, VAT taken out of EU/UK prices; real: settlement periods - VAT returns paid "
-         "(UK VAT Amazon collects itself is already outside the settlement sales)"),
+        ("Sales after VAT", mo["netSales"], re_["sales"],
+         "model: order dates, VAT taken out of EU/UK prices; real: settlement periods, Amazon reports sales without VAT"),
         ("Refunds / returns", -mo["returns"], re_["refunds"] + re_["returnsFee"],
          "model: lost value of returns (unit back in stock counted); real: money refunded + processing fee"),
         ("Referral + FBA fees", -mo["fees"], re_["fees"], "model: today's fee estimates"),
@@ -188,6 +194,7 @@ def compare(start, end, token=None):
     out = [{"label": l, "model": round(a, 0), "real": round(b, 0), "diff": round(b - a, 0), "note": n}
            for l, a, b, n in rows]
     return {"start": start, "end": end, "rows": out, "modelProfit": round(mo["profit"]),
+            "taxCollected": round(re_["taxCollected"]), "vatPaid": round(-re_["vatPaid"]),
             "realProfit": round(re_["profit"]), "owner": round(re_["owner"]),
             "otherFees": {k: round(v) for k, v in sorted(other.items(), key=lambda x: x[1])},
             "stockMethods": re_["stockMethods"], "modelUnits": round(mo["units"]),
@@ -203,6 +210,8 @@ def text_of(c, title):
     worst = list(c["otherFees"].items())[:8]
     if worst:
         lines.append("Other Amazon fees: " + ", ".join(f"{k} {v:,}" for k, v in worst))
+    lines.append(f"VAT / sales tax (pass-through, not in profit): collected by Amazon ${c['taxCollected']:,} · "
+                 f"VAT returns paid (invoices on /wise) ${c['vatPaid']:,}")
     lines.append(f"Your consulting receipts (not counted above): ${-c['owner']:,}")
     lines.append(f"Stock: {c['stockMethods']}")
     return "\n".join(lines)
