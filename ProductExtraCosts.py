@@ -14,12 +14,21 @@ FBA storage: fba_storage_monthly (Amazon's monthly fee per ASIN x FC x country),
 AWD (USA only - EU AWD fees aren't visible in settlements): each month's
   "AWD Fee" total, split over ASINs by AWD->FBA transferred units x item volume
   that month (fba_shipments is_awd_transfer); a month without transfers falls
-  back to US units sold x volume. Prorated like storage."""
+  back to US units sold x volume. Prorated like storage.
+Lagerpark (per the user 2026-11-03, "A"): the EU 3PL warehouse in Germany that
+  feeds Pan-EU FBA. Its invoices of the 365 days up to the range end (without
+  VAT, which is deductible) / the package volume of every unit sold in the EU
+  stores (not UK) in the same 365 days = cost per unit of volume; each EU unit
+  sold in the range carries that x its package volume (sku_statistics pkg_*_cm,
+  else its section's median). Added to "storage" and shown as "lagerpark"."""
 import calendar
 from collections import defaultdict
 from datetime import date
 
 from AsinAnalytics import pb_list_all
+
+LAGERPARK_MPS = {"de", "fr", "it", "es", "nl", "be", "ie", "se", "pl"}
+_lg_cache = {}
 
 RETURN_REGION = {"usa": "usa", "ca": "usa", "mex": "usa"}  # everything else -> "eu"
 STORAGE_COUNTRY = {"usa": "US", "ca": "CA", "mex": "MX", "uk": "GB", "de": "DE", "fr": "FR", "it": "IT",
@@ -42,6 +51,48 @@ def _overlap(y, m, start, end):
     a = max(date(y, m, 1), date.fromisoformat(start))
     b = min(date(y, m, days), date.fromisoformat(end))
     return max((b - a).days + 1, 0) / days
+
+
+def package_volumes(token):
+    """({asin: package volume in litres}, {section: median})."""
+    from ProductCost import _section_of_group
+    dims = {r["sku"]: r for r in pb_list_all(token, "sku_statistics", "",
+                                              fields="sku,pkg_length_cm,pkg_width_cm,pkg_height_cm")
+            if r.get("pkg_length_cm") and r.get("pkg_width_cm") and r.get("pkg_height_cm")}
+    vol, by_sec, sec_of = {}, defaultdict(list), {}
+    for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,sku,group"):
+        sec_of[r["asin"]] = _section_of_group(r.get("group")) or "other"
+        d = dims.get(r["sku"])
+        if d and r["asin"] not in vol:
+            vol[r["asin"]] = d["pkg_length_cm"] * d["pkg_width_cm"] * d["pkg_height_cm"] / 1000
+            by_sec[sec_of[r["asin"]]].append(vol[r["asin"]])
+    med = {k: sorted(v)[len(v) // 2] for k, v in by_sec.items()}
+    med["other"] = sorted(x for v in by_sec.values() for x in v)[sum(len(v) for v in by_sec.values()) // 2] if by_sec else 5.0
+    return {a: vol.get(a) or med.get(sec_of.get(a, "other")) or med["other"] for a in sec_of}, med
+
+
+def lagerpark_rate(token, end, usd):
+    """USD per litre of package volume sold in the EU stores, 365 days up to `end`."""
+    key = end[:7]
+    if key in _lg_cache:
+        return _lg_cache[key]
+    from datetime import timedelta
+    since = (date.fromisoformat(end) - timedelta(days=365)).isoformat()
+    cost = 0.0
+    for d in pb_list_all(token, "wise_documents", 'stored_path ~ "agerpark" && kind = "invoice"', fields="extracted"):
+        ex = d.get("extracted") or {}
+        if since < (ex.get("invoice_date") or "") <= end:
+            cost += usd(float(ex.get("total") or 0) - float(ex.get("tax_amount") or 0), (ex.get("currency") or "EUR").upper())
+    vols, _med = package_volumes(token)
+    sold = 0.0
+    flt = " || ".join(f'marketplace = "{m}"' for m in sorted(LAGERPARK_MPS))
+    for l in pb_list_all(token, "order_items", f'purchase_date > "{since}" && purchase_date <= "{end}" && ({flt}) '
+                                               f'&& order_status != "Cancelled"', fields="asin,qty"):
+        if l.get("asin"):
+            sold += (l.get("qty") or 0) * vols.get(l["asin"], _med.get("other", 5.0))
+    rate = (cost / sold if sold else 0.0, vols, _med.get("other", 5.0), cost)
+    _lg_cache[key] = rate
+    return rate
 
 
 def extra_costs(token, start, end, atomic, fee_lookup, landed_of, usd, vat_of, by_mp=False):
@@ -156,4 +207,18 @@ def extra_costs(token, start, end, atomic, fee_lookup, landed_of, usd, vat_of, b
             share = _overlap(y, m, start, end)
             for a, w in weights.items():
                 out[(a, "usa") if by_mp else a]["awd"] += total * share * w / wsum
+    # ---- Lagerpark (EU 3PL) ----
+    lg_mps = sorted(LAGERPARK_MPS & set(atomic))
+    if lg_mps:
+        rate, vols, vdef, _cost = lagerpark_rate(token, end, usd)
+        if rate:
+            flt = " || ".join(f'marketplace = "{m}"' for m in lg_mps)
+            for l in pb_list_all(token, "order_items", f'purchase_date >= "{start}" && purchase_date <= "{end}" && ({flt}) '
+                                                       f'&& order_status != "Cancelled"', fields="asin,marketplace,qty"):
+                if not l.get("asin") or not l.get("qty"):
+                    continue
+                c = rate * vols.get(l["asin"], vdef) * l["qty"]
+                o = out[(l["asin"], l["marketplace"]) if by_mp else l["asin"]]
+                o["lagerpark"] += c
+                o["storage"] += c
     return {a: {k: round(v, 2) for k, v in d.items()} for a, d in out.items()}

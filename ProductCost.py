@@ -28,10 +28,11 @@ import io
 import json
 import os
 import re
+import statistics
 import subprocess
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 import requests
 from sp_api.api import ProductFees
@@ -139,6 +140,84 @@ _REGION_OF = {"us": "usa", "usa": "usa", "ca": "usa", "mx": "usa", "mex": "usa",
               "de": "eu", "fr": "eu", "it": "eu", "es": "eu", "nl": "eu", "be": "eu", "ie": "eu", "se": "eu", "pl": "eu"}
 
 
+# Freight by weight (per the user 2026-11-03, "B"): real freight per kg per
+# route over the last 365 days x the product's package weight, instead of a flat
+# amount per unit (a pareo weighs a fraction of a pouf cover). Duty stays % of
+# the purchase price (REGION_IMPORT).
+#   usa: AGL freight (settlement "GlobalInboundTransportationFreight") + Xhipment /
+#        First Shipment invoices (wise_documents supplier-separate|xhipment) +
+#        courier freight on US shipments, / kg of US shipments shipped in the window
+#   eu / uk: freight_usd on the DE / GB shipments' documents (/shipments: Unicargo
+#        sea + air couriers), / their kg
+# kg of a shipment = its invoices' lines (qty x sku_statistics.pkg_weight_g, a line
+# without a weight uses its section's median). No rate -> REGION_IMPORT freight.
+FREIGHT_REGION_OF_DEST = {"US": "usa", "DE": "eu", "GB": "uk", "UK": "uk"}
+
+
+def product_weights(token):
+    """({ean: kg}, {section: median kg}) from sku_statistics.pkg_weight_g."""
+    def build():
+        grams = {r["sku"]: r["pkg_weight_g"] for r in pb_list_all(token, "sku_statistics", "", fields="sku,pkg_weight_g")
+                 if r.get("pkg_weight_g")}
+        by_ean, by_sec = {}, defaultdict(list)
+        for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="sku,ean,group"):
+            if r.get("ean") and r["sku"] in grams:
+                kg = grams[r["sku"]] / 1000
+                by_ean[r["ean"].lstrip("0")] = kg
+                by_sec[_section_of_group(r.get("group")) or "other"].append(kg)
+        med = {k: statistics.median(v) for k, v in by_sec.items()}
+        med["other"] = statistics.median([kg for v in by_sec.values() for kg in v]) if by_sec else 0.3
+        sec_of = {r["ean"].lstrip("0"): _section_of_group(r.get("group")) or "other"
+                  for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="ean,group") if r.get("ean")}
+        return by_ean, med, sec_of
+    return _cached("weights", 6, build)
+
+
+def weight_of(token, ean):
+    by_ean, med, sec_of = product_weights(token)
+    e = (ean or "").lstrip("0")
+    return by_ean.get(e) or med.get(sec_of.get(e, "other")) or med.get("other")
+
+
+def freight_rates(token, days=365):
+    """{region: {"perKg", "freightUsd", "kg", "shipments"}} from the real shipments."""
+    def build():
+        since = (date.today() - timedelta(days=days)).isoformat()
+        lines = defaultdict(list)
+        for ln in invoice_lines(token):
+            m = re.match(r"(MI/\d+|AF/E/\d+)", ln["invoice"])
+            lines[m.group(1) if m else ln["invoice"]].append(ln)
+        freight, kg, names = defaultdict(float), defaultdict(float), defaultdict(list)
+        for sh in pb_list_all(token, "import_shipments", ""):
+            reg = FREIGHT_REGION_OF_DEST.get((sh.get("destination") or "").upper())
+            if not reg or (sh.get("ship_date") or "") < since:
+                continue
+            w = sum(ln["qty"] * weight_of(token, ln["ean"])
+                    for inv in re.findall(r"(MI/\d+|AF/E/\d+)", sh.get("code") or "") for ln in lines.get(inv, []))
+            docs = sum((d.get("freight_usd") or 0) for d in (sh.get("docs") or []))
+            if reg == "usa":
+                # US sea freight is billed by Amazon (AGL, counted below) - the
+                # documents repeat it, so only courier shipments add theirs here
+                kg[reg] += w
+                if sh.get("route") == "supplier_courier":
+                    freight[reg] += docs
+            elif docs > 0 and w > 0:  # EU/UK shipments without freight documents yet are left out
+                freight[reg] += docs
+                kg[reg] += w
+            names[reg].append(sh.get("code"))
+        for e in pb_list_all(token, "amazon_expense_events", 'category ~ "GlobalInboundTransportationFreight"',
+                             fields="amount,currency,year,month"):
+            if f"{int(e['year']):04d}-{int(e['month']):02d}" >= since[:7]:
+                freight["usa"] += -usd(e.get("amount") or 0, e.get("currency") or "USD")
+        for d in pb_list_all(token, "wise_documents", 'group_key = "supplier-separate|xhipment"', fields="extracted,month"):
+            ex = d.get("extracted") or {}
+            if (ex.get("invoice_date") or d.get("month") or "") >= since[:7]:
+                freight["usa"] += usd(float(ex.get("total") or 0), (ex.get("currency") or "USD").upper())
+        return {r: {"perKg": round(freight[r] / kg[r], 3), "freightUsd": round(freight[r], 2), "kg": round(kg[r], 1),
+                    "shipments": names[r]} for r in kg if kg[r] > 0 and freight[r] > 0}
+    return _cached(f"freight_rates_{days}", 6, build)
+
+
 def landed_for(cost, mp):
     """Landed cost (USD) of a landed_cost() result for marketplace code mp."""
     regs = (cost or {}).get("regions") or {}
@@ -159,9 +238,14 @@ def landed_cost(token, ean):
     qty = sum(ln["qty"] for ln in recent)
     purchase = last["price"]
     regions = {}
+    rates = freight_rates(token)
+    kg = weight_of(token, ean)
     for reg, (duty, freight) in REGION_IMPORT.items():
         d = round(duty * purchase, 2)
-        regions[reg] = {"dutyPct": duty * 100, "duty": d, "freight": freight, "landed": round(purchase + d + freight, 2)}
+        if rates.get(reg) and kg:
+            freight = round(rates[reg]["perKg"] * kg, 2)
+        regions[reg] = {"dutyPct": duty * 100, "duty": d, "freight": freight, "weightKg": kg,
+                        "freightPerKg": (rates.get(reg) or {}).get("perKg"), "landed": round(purchase + d + freight, 2)}
     us = regions["usa"]
     return {
         "purchase": purchase, "invoice": last["invoice"], "invoiceDate": last["date"], "supplier": last["supplier"],
@@ -193,7 +277,9 @@ def fx_to(cur):
     try:
         return _cached(f"fx|{cur}", 12, get)
     except Exception:
-        return {"EUR": 0.92, "GBP": 0.78, "CAD": 1.38, "MXN": 18.5, "SEK": 10.6, "PLN": 3.95}.get(cur, 1.0)
+        # VND isn't published by the ECB; AED/JOD/SAR are pegged to USD
+        return {"EUR": 0.92, "GBP": 0.78, "CAD": 1.38, "MXN": 18.5, "SEK": 10.6, "PLN": 3.95, "VND": 26000.0,
+                "AED": 3.6725, "JOD": 0.709, "SAR": 3.75}.get(cur, 1.0)
 
 
 def amazon_fees(mp, cred, asin, price, cur):

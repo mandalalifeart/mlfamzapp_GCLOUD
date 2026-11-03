@@ -792,6 +792,11 @@ def GetPriceSimulation(request):
     return handler(request)
 
 
+def SendModelVsReal(request):
+    from ModelVsReal import SendModelVsReal as handler
+    return handler(request)
+
+
 def GetStockValuations(request):
     from StockValuation import GetStockValuations as handler
     return handler(request)

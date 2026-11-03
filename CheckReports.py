@@ -24,6 +24,7 @@ MONTHLY_JOBS = {  # notify job name -> label
     "accounting-check": "🧾 Accounting (Wise, invoices, suppliers)",
     "content-gap-check": "🖼 Content gaps (A+ / video / images)",
     "returns-monthly-check": "↩️ Returns",
+    "model-vs-real": "🔍 Model vs real profit",
 }
 # Written by hand (Claude) when the monthly reviews are done in the chat:
 #   save_report("monthly", "YYYY-MM", "ads-monthly-review", "📊 Ads monthly review", text)
