@@ -56,6 +56,9 @@ DEFAULTS = {
     "sbProfitPct": 15.0,       # SB = independent sales: profit on them (shown as "SB ACOS at profit%")
     "sbAcos": 20.0,            # SB ACOS limit used by the rules (per the user 2026-11-03, option C)
     "sbAcosOverrides": "DE home 15, FR home 15, ES home 15",  # "<market> <home|pareo> <acos>, ..."
+    "pauseSpend": 45.0,        # < minUnits orders even over 3 months and spent >= this (own currency) -> pause
+    "lowSpend": 15.0,          # < minUnits orders over 3 months and spent < this -> raise to give it a chance
+    "lowSpendRaise": 20.0,     # that raise %
     "kwMinClicks": 5,          # keyword clicks in the month: own ACOS > limit -> no raise, lower instead
     "historyDays": 60,         # history window before the month (pause temporary vs for good)
     "historyOrders": 3,        # orders in that window -> temporary pause
@@ -205,6 +208,35 @@ def change_pct(tacos, target, units, spend_local, cfg=None):
     return 0.0
 
 
+def window_decision(wins, limit, cfg, fx=1.0):
+    """Per the user 2026-11-03: < minUnits orders in the month -> look at 2
+    months, then 3 months; still < minUnits -> pause if it spent >= pauseSpend
+    with ACOS/TACOS above the limit (or no sales), raise lowSpendRaise% if it
+    spent < lowSpend, else leave. wins = [1-month, 2-month, 3-month] dicts
+    {units, sales, spend} (spend x fx = own currency).
+    -> (kind "change"|"pause"|"raise"|"none", pct, months used, ratio %)."""
+    if limit is None:
+        return "none", 0.0, 0, None
+    for i, w in enumerate(wins, 1):
+        units, sales, spend = w.get("units") or 0, w.get("sales") or 0, w.get("spend") or 0
+        ratio = 100 * spend / sales if sales else (math.inf if spend else 0.0)
+        if units >= cfg["minUnits"]:
+            cap = _cap(units, cfg)
+            if ratio < limit:
+                return "change", (cap if ratio <= 0 else min(limit / ratio - 1, cap)), i, ratio
+            if ratio > limit:
+                return "change", -min(1 - limit / ratio, cap), i, ratio
+            return "none", 0.0, i, ratio
+    w = wins[-1]
+    spend_local = (w.get("spend") or 0) * fx
+    ratio = 100 * w["spend"] / w["sales"] if w.get("sales") else (math.inf if w.get("spend") else 0.0)
+    if spend_local >= cfg["pauseSpend"] and ratio > limit:
+        return "pause", -1.0, len(wins), ratio
+    if spend_local < cfg["lowSpend"]:
+        return "raise", cfg["lowSpendRaise"] / 100, len(wins), ratio
+    return "none", 0.0, len(wins), ratio
+
+
 def bid_rule(token, y, m, today=None, api=None):
     """-> (lines, table, proposals) for the month y-m."""
     from AdsGrowth import Api, _campaigns, _dedupe, _recently_changed
@@ -218,23 +250,33 @@ def bid_rule(token, y, m, today=None, api=None):
            pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,group,sku")}
     sku_of = {r["asin"]: r["sku"] for r in pb_list_all(token, "asin_group_mapping", 'asin != ""', fields="asin,sku")}
 
-    # items per store and their change
+    # window starts: the month, 2 months, 3 months (2026-11-03 rule)
+    starts = [start, (start - timedelta(days=1)).replace(day=1)]
+    starts.append((starts[1] - timedelta(days=1)).replace(day=1))
+
+    # items per store and their change; wins[i] = cumulative over i+1 months
     items, dept = {}, defaultdict(lambda: defaultdict(float))
-    for mp in sorted(ATOMIC):
-        country = ATOMIC[mp][1]
-        for asin, v in product_ranking(start.isoformat(), end.isoformat(), atomic=[mp], _token=token)["byAsin"].items():
-            seg = sec.get(asin)
-            if not seg:
-                continue
-            k = (country, asin)
-            it = items.setdefault(k, {"units": 0.0, "sales": 0.0, "spend": 0.0, "seg": seg})
-            it["units"] += v.get("units") or 0
-            it["sales"] += v.get("sales") or 0
-            it["spend"] += v.get("ads") or 0          # SP + SD only - SB is judged on its own (2026-11-03)
-            d = dept[(country, seg)]
-            d["units"] += v.get("units") or 0
-            d["sales"] += v.get("sales") or 0
-            d["spend"] += (v.get("ads") or 0) + (v.get("sbAds") or 0)
+    for wi, ws in enumerate(starts):
+        for mp in sorted(ATOMIC):
+            country = ATOMIC[mp][1]
+            for asin, v in product_ranking(ws.isoformat(), end.isoformat(), atomic=[mp], _token=token)["byAsin"].items():
+                seg = sec.get(asin)
+                if not seg:
+                    continue
+                k = (country, asin)
+                it = items.setdefault(k, {"seg": seg, "wins": [defaultdict(float) for _ in starts]})
+                w = it["wins"][wi]
+                w["units"] += v.get("units") or 0
+                w["sales"] += v.get("sales") or 0
+                w["spend"] += v.get("ads") or 0       # SP + SD only - SB is judged on its own (2026-11-03)
+                if wi == 0:
+                    d = dept[(country, seg)]
+                    d["units"] += v.get("units") or 0
+                    d["sales"] += v.get("sales") or 0
+                    d["spend"] += (v.get("ads") or 0) + (v.get("sbAds") or 0)
+    for it in items.values():
+        w = it["wins"][0]
+        it.update(units=w["units"], sales=w["sales"], spend=w["spend"])
     winter = today.isoformat() < cfg["pareoSeasonRestart"]
 
     def decide(country, seg, units, sales, spend):
@@ -246,11 +288,15 @@ def bid_rule(token, y, m, today=None, api=None):
         return tacos, target, pct
 
     for (country, asin), it in items.items():
-        it["tacos"], it["target"], it["pct"] = decide(country, it["seg"], it["units"], it["sales"], it["spend"])
+        it["target"] = target_for(state, country, it["seg"])
+        kind, pct, months, ratio = window_decision(it["wins"], it["target"], cfg, fx_to(CUR.get(country, "EUR")))
+        if pct > 0 and it["seg"] == "pareo" and winter:
+            kind, pct = "none", 0.0
+        it.update(kind=kind, pct=pct, months=months, tacos=ratio, wunits=it["wins"][max(months, 1) - 1]["units"])
     dept_pct = {k: decide(k[0], k[1], d["units"], d["sales"], d["spend"]) for k, d in dept.items()}
 
     # SP ad groups -> spend-weighted change of the items they advertise
-    rows = pb_list_all(token, "ads_advertised_product_stats", f'date >= "{start}" && date <= "{end}"',
+    rows = pb_list_all(token, "ads_advertised_product_stats", f'date >= "{starts[-1]}" && date <= "{end}"',
                        fields="profile_id,campaign_id,ad_group_id,asin,country_code,date,spend")
     ag = defaultdict(lambda: [0.0, 0.0, []])
     for r in _dedupe(rows, lambda r: (r["campaign_id"], r["ad_group_id"], r["asin"], r["date"])):
@@ -266,7 +312,7 @@ def bid_rule(token, y, m, today=None, api=None):
 
     camps = _campaigns(token)
     changed = _recently_changed(token, today, days=int(cfg["skipChangedDays"]))
-    hist_end = start - timedelta(days=1)
+    hist_end = starts[-1] - timedelta(days=1)
     hist = defaultdict(float)
     for r in _dedupe(pb_list_all(token, "ads_keyword_stats",
                                  f'date >= "{hist_end - timedelta(days=int(cfg["historyDays"]) - 1)}" && date <= "{hist_end}"',
@@ -286,12 +332,20 @@ def bid_rule(token, y, m, today=None, api=None):
     # keyword texts + the month's numbers per keyword for the page (the live
     # list carries only ids; per the user 2026-11-03 "more info on bid raises")
     names, kw = {}, defaultdict(lambda: defaultdict(float))
-    for r in _dedupe(pb_list_all(token, "ads_keyword_stats", f'date >= "{start}" && date <= "{end}"',
+    kwin = defaultdict(lambda: [defaultdict(float) for _ in starts])
+    for r in _dedupe(pb_list_all(token, "ads_keyword_stats", f'date >= "{starts[-1]}" && date <= "{end}"',
                                  fields="profile_id,campaign_id,target_id,target_text,date,clicks,orders,spend,sales"),
                      lambda r: (r["campaign_id"], r["target_id"], r["date"])):
         names[r["target_id"]] = r.get("target_text") or r["target_id"]
-        for k in ("clicks", "orders", "spend", "sales"):
-            kw[r["target_id"]][k] += r.get(k) or 0
+        for wi, ws in enumerate(starts):
+            if r["date"] >= ws.isoformat():
+                w = kwin[r["target_id"]][wi]
+                for k in ("clicks", "spend", "sales"):
+                    w[k] += r.get(k) or 0
+                w["units"] += r.get("orders") or 0
+        if r["date"] >= start.isoformat():
+            for k in ("clicks", "orders", "spend", "sales"):
+                kw[r["target_id"]][k] += r.get(k) or 0
     for r in pb_list_all(token, "ads_keyword_stats", f'date > "{end}"', fields="target_id,target_text"):
         names.setdefault(r["target_id"], r.get("target_text") or r["target_id"])
     groups = defaultdict(list)
@@ -313,34 +367,47 @@ def bid_rule(token, y, m, today=None, api=None):
                 continue
             old = float(lv["bid"])
             k = kw.get(tid) or {}
+            kws = kwin.get(tid) or [defaultdict(float) for _ in starts]
             is_sb = pct == "sb"
+            force_pause, kbasis = False, ""
             if is_sb:
+                # SB keyword on its own ACOS, 1 -> 2 -> 3 months (2026-11-03)
                 sb_limit = sb_acos(state, cc, c["seg"])
                 if not sb_limit or sb_limit <= 0:
                     continue
-                kacos = 100 * k.get("spend", 0) / k["sales"] if k.get("sales") else (math.inf if k.get("spend") else 0.0)
-                pct = change_pct(kacos, sb_limit, k.get("orders") or 0, k.get("spend") or 0, cfg)
+                kind, pct, months, kacos = window_decision(kws, sb_limit, cfg)
                 if pct > 0 and c["seg"] == "pareo" and winter:
-                    pct = 0.0
-                if abs(pct) < 0.01:
                     continue
-            # Keyword guard (per the user 2026-11-03 "ok"): a raise comes from
-            # the products / department, but a keyword with >= kwMinClicks clicks
-            # whose OWN ACOS is above the ACOS limit is lowered instead
-            # (1 - limit/ACOS, capped by its orders like the TACOS rule); no
-            # orders: cut noSaleCut% once spend >= noSaleSpend, else left alone.
-            limit = acos_limit(state, cc, c["seg"])
-            if not is_sb and pct > 0 and limit and (k.get("clicks") or 0) >= cfg["kwMinClicks"]:
-                if k.get("sales"):
-                    kacos = 100 * k["spend"] / k["sales"]
-                    if kacos > limit:
-                        pct = -min(1 - limit / kacos, _cap(max(k.get("orders") or 0, cfg["minUnits"]), cfg))
-                elif (k.get("spend") or 0) >= cfg["noSaleSpend"]:  # keyword stats are in own currency
-                    pct = -cfg["noSaleCut"] / 100
-                else:
-                    pct = 0.0
-                if abs(pct) < 0.01:
+                if kind == "pause":
+                    force_pause = True
+                elif abs(pct) < 0.01:
                     continue
+                kbasis = f"{months} mo: {kws[months - 1]['units']:.0f} orders, ACOS " + \
+                         ("∞" if kacos == math.inf else f"{kacos:.0f}%") + f" vs {sb_limit:.0f}%" + \
+                         {"pause": " → pause", "raise": " → few clicks, raise"}.get(kind, "")
+            else:
+                if pct <= -0.95:   # every product in the ad group: no sales over 3 months, spent a lot
+                    force_pause = True
+                # Keyword guard: a raise from the products is checked against the
+                # keyword's OWN ACOS over 1 -> 2 -> 3 months (>= kwMinClicks clicks):
+                # above the ACOS limit -> lowered; no sales and spent >= pauseSpend -> pause.
+                limit = acos_limit(state, cc, c["seg"])
+                if pct > 0 and limit and (kws[-1].get("clicks") or 0) >= cfg["kwMinClicks"]:
+                    kind, kpct, months, kacos = window_decision(kws, limit, cfg)
+                    if kind == "pause":
+                        force_pause = True
+                    elif kind == "change" and kpct < 0:
+                        pct = kpct
+                    elif kind == "none" and kacos > limit:
+                        pct = 0.0
+                    if kind in ("change", "pause"):
+                        kbasis = f"keyword {months} mo: {kws[months - 1]['units']:.0f} orders, ACOS " + \
+                                 ("∞" if kacos == math.inf else f"{kacos:.0f}%") + f" vs {limit:.0f}%"
+                if not force_pause and abs(pct) < 0.01:
+                    continue
+                pct = max(pct, -0.5) if not force_pause else pct
+            if force_pause:
+                pct = -1.0
             new = round(old * (1 + pct), 2)
             if new == old:
                 continue
@@ -348,17 +415,22 @@ def bid_rule(token, y, m, today=None, api=None):
                    if not is_sb else f"SB own ACOS vs limit {sb_limit:.0f}%")
             if not is_sb:
                 drivers = "; ".join(
-                    f"{sku_of.get(a, a)} {items[(cc, a)]['units']:.0f}u TACOS "
-                    + ("∞" if items[(cc, a)]["tacos"] == math.inf else f"{items[(cc, a)]['tacos']:.0f}%")
+                    f"{sku_of.get(a, a)} {items[(cc, a)]['wunits']:.0f}u/{max(items[(cc, a)]['months'], 1)}mo TACOS "
+                    + ("∞" if items[(cc, a)]["tacos"] in (None, math.inf) else f"{items[(cc, a)]['tacos']:.0f}%")
                     for a in ag_items.get((cid, lv["ad_group_id"]), []) if (cc, a) in items)[:160]
+                if kbasis:
+                    drivers = f"{kbasis} | {drivers}"
             else:
-                drivers = f"SB: own ACOS {'∞' if kacos == math.inf else f'{kacos:.0f}%'} vs limit {sb_limit:.0f}% ({k.get('orders', 0):.0f} orders)"
+                drivers = f"SB {kbasis}"
             x = {"profile_id": c["profile_id"], "ad_product": c["ad_product"], "is_keyword": lv["is_keyword"],
                  "target_id": tid, "campaign_id": cid, "ad_group_id": lv["ad_group_id"], "campaign": c["campaign_name"],
                  "text": tid, "country": cc, "old_bid": old, "new_bid": new,
                  "reason": f"TACOS rule {y}-{m:02d}: {pct * 100:+.0f}% ({why})", "pct": pct, "drivers": drivers,
                  "ag_name": lv.get("ad_group_name") or ""}
-            if new < min_bid and pct > 0:
+            if force_pause:
+                x["pause"] = "temporary" if hist[tid] >= cfg["historyOrders"] else "for good"
+                x["new_bid"] = new = old
+            elif new < min_bid and pct > 0:
                 x["new_bid"] = new = min_bid
                 if new <= old:
                     continue
@@ -389,10 +461,11 @@ def bid_rule(token, y, m, today=None, api=None):
                         else f" – TACOS {tacos:.0f}% vs target {target_for(state, cc, seg)}%" if tacos is not None else ""),
             "detail": "; ".join(f"{x['text'][:35]} {x['old_bid']}→{'pause' if x.get('pause') else x['new_bid']}"
                                 for x in xs[:12]) + (" …" if len(xs) > 12 else ""),
-            "why": (f"{y}-{m:02d}: each SB keyword on its own: bid × SB ACOS limit ÷ its ACOS (capped by orders); "
-                    f"no orders & spend ≥ {cfg['noSaleSpend']:.0f} → −{cfg['noSaleCut']:.0f}%") if is_sb_group else
-                   (f"{y}-{m:02d}: bid × target ÷ TACOS (SP+SD spend) of the products the ad group sells "
-                    f"(capped by units sold); keywords with ≥ {cfg['kwMinClicks']:.0f} clicks and own ACOS above the limit are lowered"),
+            "why": (f"{y}-{m:02d}: each SB keyword on its own ACOS vs the SB limit; < {cfg['minUnits']:.0f} orders → 2, then 3 months; "
+                    f"still < {cfg['minUnits']:.0f}: spent ≥ {cfg['pauseSpend']:.0f} → pause, < {cfg['lowSpend']:.0f} → +{cfg['lowSpendRaise']:.0f}%") if is_sb_group else
+                   (f"{y}-{m:02d}: bid × target ÷ TACOS (SP+SD spend) of the products the ad group sells, capped by units; "
+                    f"< {cfg['minUnits']:.0f} units → 2, then 3 months; still < {cfg['minUnits']:.0f}: spent ≥ {cfg['pauseSpend']:.0f} → pause, "
+                    f"< {cfg['lowSpend']:.0f} → +{cfg['lowSpendRaise']:.0f}%; keywords with own ACOS above the limit are lowered"),
             "columns": ["Keyword / target", "Campaign", "Products (units, TACOS)", "Clicks", "Orders", "Spend", "Sales",
                         "ACOS", "Bid now", "New bid", "Change"],
             "rows": [[x["text"][:50], x["campaign"], x.get("drivers", ""),
@@ -400,7 +473,8 @@ def bid_rule(token, y, m, today=None, api=None):
                       round(kw[x["target_id"]]["spend"], 2), round(kw[x["target_id"]]["sales"], 2),
                       (f"{100 * kw[x['target_id']]['spend'] / kw[x['target_id']]['sales']:.0f}%"
                        if kw[x["target_id"]]["sales"] else ("no sales" if kw[x["target_id"]]["spend"] else "-")),
-                      x["old_bid"], "pause " + x["pause"] if x.get("pause") else x["new_bid"], f"{x['pct'] * 100:+.0f}%"]
+                      x["old_bid"], "pause " + x["pause"] if x.get("pause") else x["new_bid"],
+                      "pause" if x.get("pause") else f"{x['pct'] * 100:+.0f}%"]
                      for x in sorted(xs, key=lambda x: -kw[x["target_id"]]["spend"])],
             "action": {"type": "set_bids", "items": [{k: v for k, v in x.items() if k not in ("drivers", "pct", "ag_name")}
                                                      for x in xs]}})
