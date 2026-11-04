@@ -915,3 +915,13 @@ def RunReviewRequests(request):
 def SendReviewRequestsWeekly(request):
     from ReviewRequests import SendReviewRequestsWeekly as handler
     return handler(request)
+
+
+def UpdateGrowthData(request):
+    from GrowthTracker import UpdateGrowthData as handler
+    return handler(request)
+
+
+def GetGrowthData(request):
+    from GrowthTracker import GetGrowthData as handler
+    return handler(request)

@@ -63,7 +63,7 @@ TACOS_MARKETS = ("usa", "de", "uk", "fr", "it", "es", "nl", "se", "pl")
 TACOS_TARGET = {"usa": 20, "de": 20}  # others: 25
 SEGMENT_MARKETS = (("us", "USA"), ("de", "DE"), ("uk", "UK"), ("fr", "FR"), ("it", "IT"), ("es", "ES"))
 PAREO_WORDS = ("PAREO", "SARONG", "BEACH")
-PAREO_RESUME = "2027-02-20"  # pareo winter mode until the season review
+PAREO_RESUME = "2027-04-01"  # pareo winter mode until the season review
 
 
 def _json(body, status=200):

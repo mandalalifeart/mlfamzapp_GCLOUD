@@ -293,9 +293,9 @@ def no_ads_block(pb, end):
     sku_asin = {g["sku"]: (g["asin"], g["group"]) for g in pb_list_all(pb, "asin_group_mapping", 'asin != ""',
                                                                          fields="sku,asin,group")}
     stock = pb_list_all(pb, "sku_statistics", "", fields="sku,usa_balance_fba,de_balance_fba,uk_balance_fba")
-    winter = end < "2027-02-20"  # pareo winter mode (no pareo ads on purpose) - same date as ProductAdPauses
+    winter = end < "2027-04-01"  # pareo winter mode (no pareo ads on purpose) - same date as ProductAdPauses
     lines = [f"Products with FBA stock (≥ 5) but no ad impressions {s} – {end}"
-             + (" (pareos left out until the season restart 2027-02-20)" if winter else "")]
+             + (" (pareos left out until the season restart 2027-04-01)" if winter else "")]
     rows = []
     for field, countries in (("usa_balance_fba", ["US"]), ("de_balance_fba", ["DE", "FR", "IT", "ES"]),
                              ("uk_balance_fba", ["UK"])):

@@ -193,6 +193,8 @@ ROUTED_FUNCTIONS = [
     "GetCheckReports",
     "SetCheckProposal",
     "GetTodos",
+    "GetGrowthData",
+    "UpdateGrowthData",
     "SetTodo",
     "SendMonthlyAdsReview",
     "ApplyApprovedProposals",

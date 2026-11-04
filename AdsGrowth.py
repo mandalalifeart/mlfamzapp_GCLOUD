@@ -407,8 +407,107 @@ def comeback_block(pb, today):
     return lines, table, proposals
 
 
+# --------------------------------------------------------------- pareo budgets
+# Per the user 2026-11-04 ("ok"): a pareo campaign whose last 14 days had ACOS
+# within its limit (winter-scaled), >= 5 orders and spent >= 90% of the daily
+# budget on >= 5 days -> budget +20%, at most once per 14 days; in the winter
+# never above the budget it had before the winter cuts (job_state
+# pareo_summer_budgets {campaign_id: budget}; a campaign that was never cut has
+# its current budget there, so it stays put until the season).
+BUDGET_RAISE = 0.20
+BUDGET_DAYS, BUDGET_MIN_ORDERS, BUDGET_FULL_DAYS, BUDGET_FULL_SHARE = 14, 5, 5, 0.90
+SUMMER_BUDGETS_KEY = "pareo_summer_budgets"
+
+
+def budget_block(pb, today):
+    camps = _campaigns(pb)
+    budgets = {c["campaign_id"]: c for c in pb_list_all(pb, "ads_campaigns", 'campaign_status = "ENABLED"',
+                                                        fields="campaign_id,budget,profile_id")}
+    start = (today - timedelta(days=BUDGET_DAYS)).isoformat()
+    end = (today - timedelta(days=1)).isoformat()
+    rows = pb_list_all(pb, "ads_campaign_stats", f'date >= "{start}" && date <= "{end}"',
+                       fields="profile_id,campaign_id,date,spend,sales,orders,country_code,currency_code")
+    rows = _dedupe(rows, lambda r: (r["campaign_id"], r["date"]))
+    by = defaultdict(list)
+    for r in rows:
+        c = camps.get(r["campaign_id"])
+        if c and c["seg"] == "pareo" and c["campaign_status"] == "ENABLED" and c["campaign_id"] in budgets:
+            by[r["campaign_id"]].append(r)
+    since = (today - timedelta(days=BUDGET_DAYS)).isoformat()
+    recent = {r["campaign_id"] for r in pb_list_all(pb, "ads_bid_change_log",
+                                                    f'action = "budget" && changed_at >= "{since}"', fields="campaign_id")}
+    summer = json.loads(get_job_state(pb, SUMMER_BUDGETS_KEY) or "{}")
+    is_winter = winter(today, "pareo")
+    trows, items = [], []
+    for cid, rs in by.items():
+        c, budget = camps[cid], budgets[cid].get("budget") or 0
+        cc = (rs[0].get("country_code") or c.get("country_code") or "").upper()
+        spend, sales = sum(r.get("spend") or 0 for r in rs), sum(r.get("sales") or 0 for r in rs)
+        orders = sum(r.get("orders") or 0 for r in rs)
+        full = sum(1 for r in rs if budget and (r.get("spend") or 0) >= BUDGET_FULL_SHARE * budget)
+        acos = 100 * spend / sales if sales else None
+        limit = acos_target(pb, cc, "pareo", c["ad_product"])
+        cap = summer.get(cid, budget) if is_winter else None
+        new = round(budget * (1 + BUDGET_RAISE), 2)
+        if cap is not None:
+            new = min(new, cap)
+        why = []
+        if orders < BUDGET_MIN_ORDERS:
+            why.append(f"{orders} orders")
+        if acos is None or acos > limit:
+            why.append(f"ACOS {'-' if acos is None else round(acos)}% > {limit:g}%")
+        if full < BUDGET_FULL_DAYS:
+            why.append(f"budget spent on {full} days")
+        if cid in recent:
+            why.append("budget changed in the last 14 days")
+        if not why and new <= budget:
+            why.append(f"already at pre-winter budget {cap:g}")
+        if full < BUDGET_FULL_DAYS and not (acos is not None and acos <= limit and orders >= BUDGET_MIN_ORDERS):
+            continue  # not limited by budget and not good - nothing to say
+        status = "⬆️ raise" if not why else "– " + ", ".join(why)
+        trows.append([status, cc, c["campaign_name"], f"{budget:g}", f"{new:g}" if not why else "", round(spend, 2),
+                      orders, "-" if acos is None else f"{acos:.0f}%", f"{limit:g}%", f"{full}/{BUDGET_DAYS}",
+                      "" if cap is None else f"{cap:g}"])
+        if not why:
+            items.append({"profile_id": budgets[cid]["profile_id"], "campaign_id": cid, "campaign": c["campaign_name"],
+                          "ad_product": c["ad_product"], "country": cc, "old": budget, "new": new,
+                          "why": f"14 days: {orders} orders, ACOS {acos:.0f}% (limit {limit:g}%), budget spent on {full} days"})
+    trows.sort(key=lambda r: (not r[0].startswith("⬆️"), r[1], r[2]))
+    proposals = [{"section": "Pareo budgets", "title": f"{x['country']} {x['campaign']}: budget {x['old']:g} → {x['new']:g}",
+                  "detail": x["why"], "action": {"type": "set_budgets", "items": [x]}} for x in items]
+    lines = [f"💰 Pareo budgets ({start} – {end}): +{BUDGET_RAISE:.0%} when ACOS ≤ limit, ≥ {BUDGET_MIN_ORDERS} orders and "
+             f"≥ {BUDGET_FULL_SHARE:.0%} of the budget spent on ≥ {BUDGET_FULL_DAYS} days; once per 14 days"
+             + ("; winter: never above the pre-winter budget." if is_winter else ".")]
+    lines += [f"  {r[0]} {r[1]} {r[2]}: budget {r[3]}" + (f" → {r[4]}" if r[4] else "") + f", {r[6]} orders, ACOS {r[7]}"
+              for r in trows]
+    if not trows:
+        lines.append("  No pareo campaign is limited by its budget.")
+    table = {"title": "Pareo budgets", "rows": trows,
+             "columns": ["Status", "MP", "Campaign", "Budget", "New", "Spend 14d", "Orders", "ACOS", "Limit",
+                         "Days ≥90%", "Pre-winter"]}
+    return lines, table, proposals
+
+
+def _set_budget(api, pb, x, label):
+    from AdsBidWriter import record_bid_change
+    sp = x["ad_product"] == "SPONSORED_PRODUCTS"
+    path, media = ("/sp/campaigns", _media("spCampaign")) if sp else ("/sb/v4/campaigns", "application/vnd.sbcampaignresource.v4+json")
+    item = {"campaignId": x["campaign_id"], "budget": {"budget": x["new"], "budgetType": "DAILY"} if sp else x["new"]}
+    res = api.call(x["profile_id"], "PUT", path, {"campaigns": [item]}, media)
+    part = res.get("campaigns") or {}
+    if isinstance(part, dict) and part.get("error"):
+        raise RuntimeError(json.dumps(part["error"])[:200])
+    record_bid_change(pb, {"action": "budget", "ad_product": x["ad_product"], "campaign_id": x["campaign_id"],
+                           "campaign_name": x["campaign"], "changed_at": date.today().isoformat(), "country_code": x["country"],
+                           "profile_id": x["profile_id"], "target_id": x["campaign_id"], "target_text": x["campaign"],
+                           "old_bid": x["old"], "new_bid": x["new"], "status": "applied",
+                           "reason": f"{label}: pareo budget rule - {x['why']}, approved on the page",
+                           "amazon_response": json.dumps(res)[:2000]})
+
+
 # --------------------------------------------------------------------- actions
-ACTIONS = ("set_bids", "add_exact_keywords", "add_negative_exact", "unpause_product_ads", "restore_temp_cuts")
+ACTIONS = ("set_bids", "add_exact_keywords", "add_negative_exact", "unpause_product_ads", "restore_temp_cuts",
+           "set_budgets")
 
 
 def apply(pb, action, label):
@@ -514,6 +613,19 @@ def apply(pb, action, label):
                 except Exception as exc:
                     failed.append(f"{c['text']}: {str(exc)[:120]}")
         set_job_state(pb, "temp_cuts", json.dumps(cuts))
+    elif typ == "set_budgets":
+        since = (date.today() - timedelta(days=BUDGET_DAYS)).isoformat()
+        recent = {r["campaign_id"] for r in pb_list_all(pb, "ads_bid_change_log",
+                                                        f'action = "budget" && changed_at >= "{since}"', fields="campaign_id")}
+        for x in action["items"]:
+            if x["campaign_id"] in recent:
+                failed.append(f"{x['campaign']}: skipped - budget already changed in the last 14 days")
+                continue
+            try:
+                _set_budget(api, pb, x, label)
+                done.append(f"{x['country']} {x['campaign']} budget {x['old']:g}→{x['new']:g}")
+            except Exception as exc:
+                failed.append(f"{x['campaign']}: {str(exc)[:120]}")
     return done, failed
 
 
@@ -546,7 +658,15 @@ def comebacks_weekly(today=None, store=True):
     today = today or date.today()
     pb = pb_authenticate()
     lines, table, props = comeback_block(pb, today)
+    tables = [table]
+    try:
+        blines, btable, bprops = budget_block(pb, today)
+        lines += [""] + blines
+        tables.append(btable)
+        props += bprops
+    except Exception as exc:  # the comebacks must still go out
+        lines += ["", f"💰 Pareo budgets: failed ({str(exc)[:200]})"]
     text = "\n".join(lines)
     if store:
-        _weekly("SendComebacksWeekly", "▶️ Coming back (pauses / bid cuts)", text, [table], props, today)
+        _weekly("SendComebacksWeekly", "▶️ Coming back + 💰 pareo budgets", text, tables, props, today)
     return text, props

@@ -37,7 +37,7 @@ from JobState import get_job_state, set_job_state
 CUR = {"US": "$", "UK": "£", "CA": "C$", "MX": "MX$", "SE": "kr ", "PL": "zł "}
 SCALE = {"SE": 11, "PL": 4.3, "MX": 20, "CA": 1.4}
 PAREO_WORDS = ("PAREO", "SARONG", "BEACH")
-PAREO_RESUME = "2027-02-20"
+PAREO_RESUME = "2027-04-01"
 KEYWORD_TYPES = {"BROAD", "PHRASE", "EXACT"}
 CUT_PCT = 25
 RESTORE_DAYS = 14
