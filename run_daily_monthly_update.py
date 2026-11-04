@@ -311,7 +311,20 @@ def _num(v):
     return f"{v:,.0f}" if abs(v) < 10000 else f"{v / 1000:.1f}k" if abs(v) < 100000 else f"{v / 1000:.0f}k"
 
 
-def format_table(sales, ads, rates):
+def _promo_usd_totals(rows, rates):
+    units = sum(int(r.get("units") or 0) for r in rows)
+    usd = sum(u for u in (_usd(float(r.get("discount") or 0), r["marketplace"], rates) for r in rows) if u is not None)
+    return units, usd
+
+
+def _business_usd_totals(by_mp, rates):
+    real = {k: v for k, v in (by_mp or {}).items() if v.get("units")}
+    units = sum(v["units"] for v in real.values())
+    usd = sum(u for u in (_usd(v["sales"], mp, rates) for mp, v in real.items()) if u is not None)
+    return units, usd
+
+
+def format_table(sales, ads, rates, extra_rows=()):
     """sales: {code: {QUANTITY, AMOUNT}}, ads: {code: {spend, sales}} (local
     currency). One monospace row per marketplace + a USD total row."""
     codes = [c for c in set(sales) | set(ads) if c != "eu"
@@ -331,8 +344,20 @@ def format_table(sales, ads, rates):
             tot["u"] += u; tot["s"] += s / r; tot["sp"] += sp / r; tot["as"] += a / r
         lines.append(f"{SHORT_LABEL.get(c, c.upper()[:3]):4}{u:>5}{_num(s):>7}{_num(sp):>6}{_num(a):>6}{_pct(sp, a):>5}{_pct(sp, s):>6}")
     lines.append("-" * len(head))
+    eur = [c for c in codes if MARKETPLACE_LABELS.get(c, ("", "USD"))[1] == "EUR"]
+    if len(eur) > 1:
+        eu = {"u": 0, "s": 0.0, "sp": 0.0, "as": 0.0}
+        for c in eur:
+            eu["u"] += int((sales.get(c) or {}).get("QUANTITY") or 0)
+            eu["s"] += float((sales.get(c) or {}).get("AMOUNT") or 0)
+            eu["sp"] += float((ads.get(c) or {}).get("spend") or 0)
+            eu["as"] += float((ads.get(c) or {}).get("sales") or 0)
+        lines.append(f"{'EU€':4}{eu['u']:>5}{_num(eu['s']):>7}{_num(eu['sp']):>6}{_num(eu['as']):>6}"
+                     f"{_pct(eu['sp'], eu['as']):>5}{_pct(eu['sp'], eu['s']):>6}")
     lines.append(f"{'ALL$':4}{tot['u']:>5}{_num(tot['s']):>7}{_num(tot['sp']):>6}{_num(tot['as']):>6}"
                  f"{_pct(tot['sp'], tot['as']):>5}{_pct(tot['sp'], tot['s']):>6}")
+    for label, u, v in extra_rows:
+        lines.append(f"{label:4}{u:>5}{_num(v):>7}")
     return "\n".join(lines)
 
 
@@ -357,23 +382,29 @@ def build_combined_digest_text(result, year, month, marketplaces_used):
     currencies = {MARKETPLACE_LABELS.get(c, ("", "USD"))[1] for c in set(daily_sales) | set(month_sales) | set(ads_day) | set(ads_month)}
     rates = fetch_usd_rates(currencies)
 
-    parts = [f"🛒📊 <b>Sales &amp; Ads - {now_la.strftime('%Y-%m-%d')}</b>", "",
-             f"<b>Yesterday ({yesterday})</b>",
-             f"<pre>{_esc(format_table(daily_sales, ads_day, rates))}</pre>"]
-    if last_ads < yesterday:
-        parts.append(f"⚠️ ads data only up to {last_ads}")
-    parts += [f"<b>{'Month closed' if is_closed_month else 'Month to date'} ({month_start} to {month_end})</b>",
-              f"<pre>{_esc(format_table(month_sales, ads_month, rates))}</pre>",
-              "<i>Local currency per row, ALL$ = everything in USD. AdSpd/AdSal = Ads spend / Ads sales (7-day). "
-              "ACOS = AdSpd/AdSal, TACOS = AdSpd/Sales (all sales, excl. tax/shipping).</i>"]
-    names = fetch_promotion_names()
     promo_day = (result.get("dailyPromoTotals") or {}).get(yesterday, [])
     promo_month = result.get("promoRows") or []
     biz = result.get("businessTotals") or {}
+    biz_day, biz_month = (biz.get("daily") or {}).get(yesterday), biz.get("month")
     extra = {MARKETPLACE_LABELS.get(r["marketplace"], ("", "USD"))[1] for r in promo_day + promo_month}
-    extra |= {MARKETPLACE_LABELS.get(mp, ("", "USD"))[1] for d in [(biz.get("daily") or {}).get(yesterday) or {}, biz.get("month") or {}] for mp in d}
+    extra |= {MARKETPLACE_LABELS.get(mp, ("", "USD"))[1] for d in [biz_day or {}, biz_month or {}] for mp in d}
     if extra - set(rates) - {"USD"}:
         rates = {**rates, **fetch_usd_rates(extra - set(rates) - {"USD"})}
+
+    def extras(promo_rows, biz_rows):
+        return [("Cpn$", *_promo_usd_totals(promo_rows, rates)), ("B2B$", *_business_usd_totals(biz_rows, rates))]
+
+    parts = [f"🛒📊 <b>Sales &amp; Ads - {now_la.strftime('%Y-%m-%d')}</b>", "",
+             f"<b>Yesterday ({yesterday})</b>",
+             f"<pre>{_esc(format_table(daily_sales, ads_day, rates, extras(promo_day, biz_day)))}</pre>"]
+    if last_ads < yesterday:
+        parts.append(f"⚠️ ads data only up to {last_ads}")
+    parts += [f"<b>{'Month closed' if is_closed_month else 'Month to date'} ({month_start} to {month_end})</b>",
+              f"<pre>{_esc(format_table(month_sales, ads_month, rates, extras(promo_month, biz_month)))}</pre>",
+              "<i>Local currency per row, ALL$ = everything in USD. AdSpd/AdSal = Ads spend / Ads sales (7-day). "
+              "ACOS = AdSpd/AdSal, TACOS = AdSpd/Sales (all sales, excl. tax/shipping). EU€ = all € marketplaces. "
+              "Cpn$ = units sold with a coupon/promotion and the discount given (USD), B2B$ = Amazon Business units and sales (USD).</i>"]
+    names = fetch_promotion_names()
     promo = [format_promo_section(f"Yesterday:", promo_day, names, rates),
              format_promo_section("Month to date:" if not is_closed_month else "Month:", promo_month, names, rates)]
     try:
