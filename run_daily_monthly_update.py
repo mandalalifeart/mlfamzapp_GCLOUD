@@ -195,7 +195,13 @@ def fetch_promotion_names():
         return {}
 
 
-def format_promo_section(title, rows, names):
+def _usd(amount, mp, rates):
+    cur = MARKETPLACE_LABELS.get(mp, ("", "USD"))[1]
+    r = 1.0 if cur == "USD" else (rates or {}).get(cur)
+    return amount / r if r else None
+
+
+def format_promo_section(title, rows, names, rates=None):
     """rows: [{marketplace, promotion_id, kind, units, sales, discount}] -
     one line per (promotion, marketplace), most units first."""
     lines = [title]
@@ -213,10 +219,14 @@ def format_promo_section(title, rows, names):
         name = (names.get(pid) or {}).get("name") or (f"Coupon {pid[:12]}" if m["kind"] == "coupon" else pid)
         icon = "🎟" if m["kind"] == "coupon" else "🏷"
         lines.append(f"  {icon} {name} ({label}): {m['units']} units, {currency} {m['discount']:,.2f} off")
+    if rates is not None:
+        usd = [_usd(m["discount"], mp, rates) for (_, mp), m in merged.items()]
+        lines.append(f"  Σ Total: {sum(m['units'] for m in merged.values())} units, "
+                     f"USD {sum(u for u in usd if u is not None):,.2f} off")
     return "\n".join(lines)
 
 
-def format_business_section(title, by_mp):
+def format_business_section(title, by_mp, rates=None):
     """by_mp: {mp: {orders, units, sales}} - Amazon Business (B2B) orders."""
     lines = [title]
     real = {k: v for k, v in (by_mp or {}).items() if v.get("units")}
@@ -226,6 +236,10 @@ def format_business_section(title, by_mp):
     for mp, v in sorted(real.items(), key=lambda kv: -kv[1]["units"]):
         label, currency = MARKETPLACE_LABELS.get(mp, (mp.upper(), ""))
         lines.append(f"  🏢 {label}: {v['orders']} orders, {v['units']} units, {currency} {v['sales']:,.2f}")
+    if rates is not None:
+        usd = [_usd(v["sales"], mp, rates) for mp, v in real.items()]
+        lines.append(f"  Σ Total: {sum(v['orders'] for v in real.values())} orders, "
+                     f"{sum(v['units'] for v in real.values())} units, USD {sum(u for u in usd if u is not None):,.2f}")
     return "\n".join(lines)
 
 
@@ -353,8 +367,15 @@ def build_combined_digest_text(result, year, month, marketplaces_used):
               "<i>Local currency per row, ALL$ = everything in USD. AdSpd/AdSal = Ads spend / Ads sales (7-day). "
               "ACOS = AdSpd/AdSal, TACOS = AdSpd/Sales (all sales, excl. tax/shipping).</i>"]
     names = fetch_promotion_names()
-    promo = [format_promo_section(f"Yesterday:", (result.get("dailyPromoTotals") or {}).get(yesterday, []), names),
-             format_promo_section("Month to date:" if not is_closed_month else "Month:", result.get("promoRows") or [], names)]
+    promo_day = (result.get("dailyPromoTotals") or {}).get(yesterday, [])
+    promo_month = result.get("promoRows") or []
+    biz = result.get("businessTotals") or {}
+    extra = {MARKETPLACE_LABELS.get(r["marketplace"], ("", "USD"))[1] for r in promo_day + promo_month}
+    extra |= {MARKETPLACE_LABELS.get(mp, ("", "USD"))[1] for d in [(biz.get("daily") or {}).get(yesterday) or {}, biz.get("month") or {}] for mp in d}
+    if extra - set(rates) - {"USD"}:
+        rates = {**rates, **fetch_usd_rates(extra - set(rates) - {"USD"})}
+    promo = [format_promo_section(f"Yesterday:", promo_day, names, rates),
+             format_promo_section("Month to date:" if not is_closed_month else "Month:", promo_month, names, rates)]
     try:
         from AsinAnalytics import pb_list_all
         pend = pb_list_all(token, "order_items", f'order_status = "Pending" && purchase_date >= "{month_start}" '
@@ -367,10 +388,9 @@ def build_combined_digest_text(result, year, month, marketplaces_used):
     except Exception:
         pass
     parts += ["", "<b>Coupons &amp; promotions</b>", _esc("\n".join(promo))]
-    biz = result.get("businessTotals") or {}
     parts += ["", "<b>Business (Amazon Business) orders</b>",
-              _esc("\n".join([format_business_section("Yesterday:", (biz.get("daily") or {}).get(yesterday)),
-                               format_business_section("Month to date:" if not is_closed_month else "Month:", biz.get("month"))]))]
+              _esc("\n".join([format_business_section("Yesterday:", (biz.get("daily") or {}).get(yesterday), rates),
+                               format_business_section("Month to date:" if not is_closed_month else "Month:", biz.get("month"), rates)]))]
     parts.append(f"<i>reports: {_esc(marketplaces_used)}</i>")
     return "\n".join(parts)
 
