@@ -28,7 +28,7 @@ Monthly TACOS bid rule (last full month, per item and store):
   paused instead - "temporary" (re-proposed next month) if the target had >= 3
   orders in the 60 days before, else "for good".
   Skipped: targets changed in the last 14 days, Amazon theme targets, paused
-  (manually or not) targets, pareo raises before the season (2027-02-20)."""
+  (manually or not) targets, pareo winter (Oct-Apr): targets x80%, raises max +15% with >= 5 orders."""
 import json
 import math
 from collections import defaultdict
@@ -64,8 +64,32 @@ DEFAULTS = {
     "historyOrders": 3,        # orders in that window -> temporary pause
     "orangeBand": 3.0,         # TACOS up to target + this = orange, above = red
     "growBand": 5.0,           # TACOS this far under target -> raises/budget increases proposed
-    "pareoSeasonRestart": "2027-02-20",  # no pareo raises before
+    # Pareo winter (per the user 2026-11-04): from pareoWinterStart until pareoSeasonStart
+    # (MM-DD, every year) pareo targets / ACOS limits are pareoWinterAcosPct % of the
+    # summer ones, and raises are allowed only up to pareoWinterMaxRaise % per step with
+    # >= pareoWinterMinOrders orders in the window.
+    "pareoSeasonStart": "05-01",
+    "pareoWinterStart": "10-01",
+    "pareoWinterAcosPct": 80.0,
+    "pareoWinterMaxRaise": 15.0,
+    "pareoWinterMinOrders": 5.0,
 }
+
+
+def pareo_winter(today=None, cfg=None):
+    cfg = cfg or DEFAULTS
+    md = (today or date.today()).strftime("%m-%d")
+    a, b = cfg["pareoWinterStart"], cfg["pareoSeasonStart"]
+    return (md >= a or md < b) if a > b else (a <= md < b)
+
+
+def winter_raise(pct, orders, cfg):
+    """A pareo raise in winter: only with enough orders, capped."""
+    if pct <= 0:
+        return pct
+    if orders < cfg["pareoWinterMinOrders"]:
+        return 0.0
+    return min(pct, cfg["pareoWinterMaxRaise"] / 100)
 
 
 def config(token=None):
@@ -166,9 +190,25 @@ def compute_targets(token=None, end=None):
     return state
 
 
-def load_targets(token):
+def load_targets(token, today=None, summer=False):
+    """Stored targets; in the pareo winter the pareo targets / ACOS limits are
+    scaled to pareoWinterAcosPct % (summer=True gives the stored values)."""
     raw = get_job_state(token, STATE_KEY)
-    return json.loads(raw) if raw else compute_targets(token)
+    state = json.loads(raw) if raw else compute_targets(token)
+    cfg = config(token)
+    if summer or not pareo_winter(today, cfg):
+        return state
+    f = cfg["pareoWinterAcosPct"] / 100
+    state = json.loads(json.dumps(state))
+    for k, t in (state.get("targets") or {}).items():
+        if k.endswith("|pareo"):
+            for fld in ("targetTacos", "acosLimit", "acosLimitShare", "sbAcos"):
+                if isinstance(t.get(fld), (int, float)) and t[fld] > 0:
+                    t["summer" + fld[0].upper() + fld[1:]] = t[fld]
+                    t[fld] = round(t[fld] * f, 1)
+            t["winter"] = True
+    state["pareoWinter"] = {"active": True, "pct": cfg["pareoWinterAcosPct"], "until": cfg["pareoSeasonStart"]}
+    return state
 
 
 def target_for(state, country, seg):
@@ -283,22 +323,24 @@ def bid_rule(token, y, m, today=None, api=None):
     for it in items.values():
         w = it["wins"][0]
         it.update(units=w["units"], sales=w["sales"], spend=w["spend"])
-    winter = today.isoformat() < cfg["pareoSeasonRestart"]
+    winter = pareo_winter(today, cfg)
 
     def decide(country, seg, units, sales, spend):
         tacos = 100 * spend / sales if sales else (math.inf if spend else 0.0)
         target = target_for(state, country, seg)
         pct = change_pct(tacos, target, units, spend * fx_to(CUR.get(country, "EUR")), cfg)
-        if pct > 0 and seg == "pareo" and winter:
-            pct = 0.0
+        if seg == "pareo" and winter:
+            pct = winter_raise(pct, units, cfg)
         return tacos, target, pct
 
     for (country, asin), it in items.items():
         it["target"] = target_for(state, country, it["seg"])
         kind, pct, months, ratio = window_decision(it["wins"], it["target"], cfg, fx_to(CUR.get(country, "EUR")))
+        wunits = it["wins"][max(months, 1) - 1]["units"]
         if pct > 0 and it["seg"] == "pareo" and winter:
-            kind, pct = "none", 0.0
-        it.update(kind=kind, pct=pct, months=months, tacos=ratio, wunits=it["wins"][max(months, 1) - 1]["units"])
+            pct = winter_raise(pct, wunits, cfg)
+            kind = kind if pct > 0 else "none"
+        it.update(kind=kind, pct=pct, months=months, tacos=ratio, wunits=wunits)
     dept_pct = {k: decide(k[0], k[1], d["units"], d["sales"], d["spend"]) for k, d in dept.items()}
 
     # SP ad groups -> spend-weighted change of the items they advertise
@@ -383,7 +425,9 @@ def bid_rule(token, y, m, today=None, api=None):
                     continue
                 kind, pct, months, kacos = window_decision(kws, sb_limit, cfg)
                 if pct > 0 and c["seg"] == "pareo" and winter:
-                    continue
+                    pct = winter_raise(pct, kws[months - 1]["units"] if months else 0, cfg)
+                    if pct <= 0:
+                        continue
                 if kind == "pause":
                     force_pause = True
                 elif abs(pct) < 0.01:

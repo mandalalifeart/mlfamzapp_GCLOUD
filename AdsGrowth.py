@@ -8,7 +8,7 @@ on /checks (cron every 10 min).
    ago, SP + SB keywords/targets in ENABLED campaigns: >= 3 orders and ACOS <=
    70% of target (home decor 35%, pareo 30%) -> +15%; >= 5 orders and ACOS <=
    50% of target -> +25%. Not changed in the last 14 days, bid max 2.00, pareo
-   only from the season restart (2027-02-20). One proposal per campaign.
+   in winter (Oct-Apr) only with >= 5 orders, max +15%, against 80% targets. One proposal per campaign.
    Monthly review + every 2nd Monday.
 2. Keyword harvest (USA home decor plan rule, all countries): search terms of
    the last 30 days (ending 2 days ago) with >= 2 orders, >= 3 clicks, ACOS <=
@@ -48,7 +48,6 @@ def acos_target(pb, cc, seg, product=None, _cache={}):
         if sb and sb > 0:
             return sb
     return acos_limit(_cache["state"], cc, seg, TARGET[seg])
-SEASON_RESTART = "2027-02-20"
 MAX_BID = 2.0
 SCALE = {"SE": 11, "PL": 4.3, "MX": 20, "CA": 1.4}
 MIN_BID = {"US": 0.20, "CA": 0.20, "MX": 2.0, "SE": 1.5, "PL": 0.6}  # others 0.15
@@ -63,7 +62,10 @@ def seg_of(text):
 
 
 def winter(today, seg):
-    return seg == "pareo" and today.isoformat() < SEASON_RESTART
+    """Pareo winter (TargetTacos.pareo_winter, Oct-Apr by default): targets are
+    already scaled to 80% by load_targets; raises capped (winter_raise)."""
+    from TargetTacos import config, pareo_winter
+    return seg == "pareo" and pareo_winter(today, config())
 
 
 class Api:
@@ -163,12 +165,13 @@ def raise_block(pb, today, api=None):
         if a["match"] == "THEME" or "KEYWORDS_RELATED" in a["text"].upper() or "keywords-related" in a["text"].lower() \
                 or a["text"].strip() == "*":
             continue
-        if winter(today, c["seg"]):
-            continue
         acos = 100 * a["spend"] / a["sales"]
         t = acos_target(pb, a["cc"], c["seg"], a["product"])
         a["target"] = t
         pct = 25 if a["orders"] >= 5 and acos <= 0.5 * t else 15 if a["orders"] >= 3 and acos <= 0.7 * t else 0
+        if pct and winter(today, c["seg"]):
+            from TargetTacos import config, winter_raise
+            pct = round(100 * winter_raise(pct / 100, a["orders"], config()))
         if pct:
             cands[cid].append((tid, a, acos, pct))
     proposals, trows = [], []
@@ -210,7 +213,7 @@ def raise_block(pb, today, api=None):
                               "action": {"type": "set_bids", "items": acts}})
     trows.sort(key=lambda r: (r[0], -r[3]))
     lines = [f"📈 Bid raises – good keywords {start} – {end} (≥3 orders & ACOS ≤ 70% of target → +15%; ≥5 orders & ≤ 50% → +25%;"
-             f" not changed in 14 days; max {MAX_BID:.2f}; pareo from {SEASON_RESTART}): "
+             f" not changed in 14 days; max {MAX_BID:.2f}; pareo in winter: ACOS target x80%, max +15%, ≥5 orders): "
              f"{sum(len(p['action']['items']) for p in proposals)} in {len(proposals)} campaign(s)"]
     lines += [f"• {p['title']}: {p['detail']}" for p in proposals]
     table = {"title": f"Bid raises {start} – {end}", "rows": trows,
@@ -272,7 +275,7 @@ def harvest_block(pb, today, api=None):
         c = camps.get(cid) or {"seg": seg_of(a["camp"]), "campaign_name": a["camp"], "profile_id": None}
         acos = 100 * a["spend"] / a["sales"] if a["sales"] else None
         if (a["orders"] >= 2 and a["clicks"] >= 3 and acos is not None and acos <= acos_target(pb, cc, c["seg"])
-                and term not in exact[cc] and not winter(today, c["seg"])):
+                and term not in exact[cc]):
             prev = adds.get((cc, term))
             if not prev or a["orders"] > prev["orders"]:
                 adds[(cc, term)] = {**a, "cid": cid, "acos": acos, "seg": c["seg"]}
@@ -339,7 +342,7 @@ def harvest_block(pb, today, api=None):
                               "detail": "; ".join(f"{t} ({a['clicks']:.0f} clicks, {a['spend']:.2f}) - {w}" for t, a, w in manual[:12])})
     lines = [f"🌾 Keyword harvest {start} – {end}: ➕ {len(adds)} new exact keyword(s), "
              f"➖ {sum(len(v) for v in negs.values())} negative(s)"
-             + (f" (pareo additions wait for the season restart {SEASON_RESTART})" if today.isoformat() < SEASON_RESTART else ""),
+             + (" (pareo winter: ACOS limit x80%)" if winter(today, "pareo") else ""),
              "Rules: ➕ ≥2 orders, ≥3 clicks, ACOS ≤ 35% home decor / 30% pareo, not an exact keyword yet → exact in the "
              "EXACT campaign (bid = CPC +10%) + negative exact where it came from; ➖ ≥15 clicks, ≥10 spent, 0 orders, "
              "still spending in the last 14 days → negative exact in that campaign."]
