@@ -204,7 +204,7 @@ def raise_block(pb, today, api=None):
                                      f"≥5 orders & ACOS ≤ 50% of target → +25%",
                               "columns": ["Keyword / target", "Match", "Orders", "Clicks", "Spend", "Sales", "ACOS", "Target",
                                           "CPC", "Bid now", "New bid", "Raise"],
-                              "rows": prows,
+                              "rows": prows, "rowIds": [x["target_id"] for x in acts],
                               "detail": "; ".join(f"{x['text'][:40]} {x['old_bid']}→{x['new_bid']}" for x in acts[:10])
                                         + (" …" if len(acts) > 10 else ""),
                               "action": {"type": "set_bids", "items": acts}})

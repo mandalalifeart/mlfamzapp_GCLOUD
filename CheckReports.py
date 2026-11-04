@@ -134,7 +134,8 @@ def SetCheckProposal(request):
     try:
         body = request.get_json(silent=True) or {}
         status = body.get("status")
-        if status not in ("approved", "rejected", "proposed"):
+        edit = body.get("edit")
+        if not edit and status not in ("approved", "rejected", "proposed"):
             return json.dumps({"error": "bad status"}), 400, _cors_post()
         token = pb_authenticate()
         rec = pb_list_all(token, COLLECTION, f'id = "{body.get("reportId")}"')
@@ -147,12 +148,44 @@ def SetCheckProposal(request):
             return json.dumps({"error": "proposal not found"}), 404, _cors_post()
         if p.get("status") in ("applied", "applying"):
             return json.dumps({"error": "already applied"}), 409, _cors_post()
+        if edit:
+            # Per the user 2026-11-04: the % on a bid row can be edited before approving.
+            row = _edit_bid_row(p, edit.get("rowId"), float(edit.get("pct")))
+            pb_batch(token, [{"method": "PATCH", "url": f"/api/collections/{COLLECTION}/records/{rec['id']}",
+                              "body": {"proposals": props}}])
+            return json.dumps({"ok": True, "row": row}), 200, _cors_post()
         p["status"], p["decided_at"] = status, datetime.now().isoformat(timespec="seconds")
         pb_batch(token, [{"method": "PATCH", "url": f"/api/collections/{COLLECTION}/records/{rec['id']}",
                           "body": {"proposals": props}}])
         return json.dumps({"ok": True, "status": status}), 200, _cors_post()
     except Exception as exc:
         return json.dumps({"error": str(exc)}), 500, _cors_post()
+
+
+def _edit_bid_row(p, row_id, pct):
+    """Set a set_bids item's new bid = old bid x (1 + pct%) and update its row on the card."""
+    if not -95 <= pct <= 300:
+        raise ValueError("% must be between -95 and +300")
+    items = (p.get("action") or {}).get("items") or []
+    ids = p.get("rowIds") or []
+    x = next((i for i in items if i.get("target_id") == row_id), None)
+    if (p.get("action") or {}).get("type") != "set_bids" or x is None or row_id not in ids:
+        raise ValueError("row not found")
+    if p.get("status") != "proposed":
+        raise ValueError("undo the decision first")
+    floor = 0.25 if x.get("ad_product") == "SPONSORED_BRANDS" else 0.02
+    x["new_bid"] = max(floor, round(float(x["old_bid"]) * (1 + pct / 100), 2))
+    x.pop("pause", None)
+    x["edited_pct"] = pct
+    cols = p.get("columns") or []
+    row = p["rows"][ids.index(row_id)]
+    label = f"{pct:+.0f}%"
+    for i, c in enumerate(cols):
+        if c == "New bid":
+            row[i] = x["new_bid"]
+        elif c in ("Change", "Raise"):
+            row[i] = label
+    return row
 
 
 def _apply_action(pb, action, label):

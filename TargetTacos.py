@@ -123,6 +123,9 @@ def compute_targets(token=None, end=None):
                 # Per the user 2026-11-03: SB sales are independent, ACOS = TACOS,
                 # and SB should make sbProfitPct (15%) on them.
                 "sbAcos": round(100 * (before - cfg["sbProfitPct"] / 100 * d["netSales"] - gap * s) / s, 1),
+                # SP keyword ACOS limit = break-even on the ad sale itself (user's option B
+                # 2026-11-04): profit before ads - gap, the organic lift is the profit.
+                "breakEvenAcos": round(100 * (before - gap * s) / s, 1),
                 "tacos": round(100 * (d["ads"] + d["sbAds"]) / s, 1)}
 
     overrides = {}
@@ -143,6 +146,7 @@ def compute_targets(token=None, end=None):
             if reg and reg["sales"]:
                 row["targetTacos"] = calc(reg)["targetTacos"]
                 row["sbAcos"] = calc(reg)["sbAcos"]  # replaced below by the configured limit
+                row["breakEvenAcos"] = calc(reg)["breakEvenAcos"]
                 row["source"] = _region(country)
         row.setdefault("source", "own")
         # SB limit used by the rules: flat sbAcos with per-market overrides
@@ -151,8 +155,10 @@ def compute_targets(token=None, end=None):
         row["sbAcos"] = overrides.get(f"{country}|{seg}", float(cfg["sbAcos"]))
         # 12 months, not the last 90 days: pareo's off-season ad share is tiny
         row["adShare"] = round(100 * d.get("adSales", 0) / d["sales"], 1) if d.get("sales") else None
-        row["acosLimit"] = (round(min(100.0, row["targetTacos"] / row["adShare"] * 100), 1)
-                            if row["adShare"] and row["targetTacos"] > 0 else None)
+        # old limit (target TACOS / ad share) kept for reference only
+        row["acosLimitShare"] = (round(min(100.0, row["targetTacos"] / row["adShare"] * 100), 1)
+                                 if row["adShare"] and row["targetTacos"] > 0 else None)
+        row["acosLimit"] = row["breakEvenAcos"] if row["breakEvenAcos"] > 0 else None
         targets[f"{country}|{seg}"] = row
     state = {"asOf": date.today().isoformat(), "from": start.isoformat(), "to": end.isoformat(),
              "profitPct": cfg["profitPct"], "gapPct": cfg["gapPct"], "targets": targets}
@@ -476,6 +482,7 @@ def bid_rule(token, y, m, today=None, api=None):
                       x["old_bid"], "pause " + x["pause"] if x.get("pause") else x["new_bid"],
                       "pause" if x.get("pause") else f"{x['pct'] * 100:+.0f}%"]
                      for x in sorted(xs, key=lambda x: -kw[x["target_id"]]["spend"])],
+            "rowIds": [x["target_id"] for x in sorted(xs, key=lambda x: -kw[x["target_id"]]["spend"])],
             "action": {"type": "set_bids", "items": [{k: v for k, v in x.items() if k not in ("drivers", "pct", "ag_name")}
                                                      for x in xs]}})
     # temporary pauses of earlier months come back for a decision
