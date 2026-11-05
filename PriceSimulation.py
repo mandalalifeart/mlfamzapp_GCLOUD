@@ -21,6 +21,8 @@ from ProductCost import (MARKETS, ATOMIC, fee_table, fx_to, landed_cost, landed_
                          _section_of_group)
 
 MP_ATOMIC = {"US": "usa", "UK": "uk", "DE": "de", "FR": "fr", "IT": "it", "ES": "es"}
+# Stock region per marketplace (sku_statistics.<region>_balance; FR/IT/ES are served from the Pan-EU pool)
+MP_STOCK = {"US": "usa", "UK": "uk", "DE": "de", "FR": "de", "IT": "de", "ES": "de"}
 _cache = {}
 
 
@@ -44,10 +46,15 @@ def simulation(mp="US", segment="home", days=90):
                if (r.get("group") or "").upper() != "IGNORE"]
     want = "pareo" if segment == "pareo" else "home"
     mapping = [r for r in mapping if _section_of_group(r.get("group")) == want]
-    prices = {}
+    prices, n_rows = {}, {}
     for r in pb_list_all(token, "price_history", f'marketplace = "{mp}"', fields="asin,price,since"):
+        n_rows[r["asin"]] = n_rows.get(r["asin"], 0) + 1
         if r["asin"] not in prices or r["since"] >= prices[r["asin"]]["since"]:
             prices[r["asin"]] = r
+    stock_field = f"{MP_STOCK[mp]}_balance"
+    stock = {}
+    for r in pb_list_all(token, "sku_statistics", "", fields=f"sku,{stock_field}"):
+        stock[r["sku"]] = r.get(stock_field) or 0
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=days - 1)
     ranking = product_ranking(start.isoformat(), end.isoformat(), atomic=[MP_ATOMIC[mp]], _token=token)["byAsin"]
@@ -69,7 +76,9 @@ def simulation(mp="US", segment="home", days=90):
             "sku": r["sku"], "asin": asin, "group": r.get("group"), "endOfLife": bool(r.get("end_of_life")),
             "purchase": lc.get("purchase"), "invoice": lc.get("invoice"),
             "landed": round(landed_usd * rate, 2) if landed_usd else None,
-            "price": prices[asin]["price"], "referralPct": round(f.get("referralPct", 0.15), 4),
+            "price": prices[asin]["price"], # a single price_history row is the 2026-10-25 seed, not a change
+            "priceSince": (prices[asin].get("since") or "")[:10] if n_rows.get(asin, 0) > 1 else None,
+            "stock": stock.get(r["sku"]), "referralPct": round(f.get("referralPct", 0.15), 4),
             "fba": round(f.get("fbaUsd", 0) * rate, 2), "feesEstimated": bool(f),
             "units": units, "adsPerUnit": per((rk.get("ads") or 0) + (rk.get("sbAds") or 0)),
             "otherPerUnit": per((rk.get("returns") or 0) + (rk.get("storage") or 0) + (rk.get("awd") or 0)),
