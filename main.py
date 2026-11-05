@@ -917,6 +917,11 @@ def SendReviewRequestsWeekly(request):
     return handler(request)
 
 
+def SendPriceWatch(request):
+    from PriceWatch import SendPriceWatch as handler
+    return handler(request)
+
+
 def UpdateGrowthData(request):
     from GrowthTracker import UpdateGrowthData as handler
     return handler(request)

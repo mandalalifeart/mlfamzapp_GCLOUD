@@ -66,3 +66,17 @@ def check():
 
 if __name__ == "__main__":
     print(check())
+
+
+def SendPriceWatch(request):
+    """Daily Telegram (@baba_update_bot) with the price watch; dry=1 returns the text only."""
+    from NotificationRouting import notify
+    args = getattr(request, "args", {}) or {}
+    try:
+        text = check()
+        if args.get("dry") != "1":
+            notify("price-watch-daily", "amzbot", text)
+        return json.dumps({"text": text}), 200, {"Content-Type": "application/json"}
+    except Exception as exc:
+        notify("price-watch-daily", "amzbot", f"🚨 Price watch failed: {exc}", is_error=True)
+        return json.dumps({"error": str(exc)}), 500, {"Content-Type": "application/json"}
