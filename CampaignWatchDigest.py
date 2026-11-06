@@ -113,14 +113,17 @@ def build_watch_text(pb, watch, day, days=7):
     total = _sum(camp_rows)
     lines.append(f"\nSince {since}: {_line(total, cur)}")
 
-    if watch.get("sku"):
-        adv = _dedupe(pb_list_all(pb, "ads_advertised_product_stats",
-                                  f'({ids}) && date >= "{since}" && date <= "{day}"'),
-                      ("campaign_id", "ad_group_id", "sku", "date"))
-        adv = [r for r in adv if r.get("sku") == watch["sku"]]
-        same_day = sum(r.get("same_sku_units") or 0 for r in adv if w_start <= r["date"] <= day)
-        same_all = sum(r.get("same_sku_units") or 0 for r in adv)
-        lines.append(f"Units of {watch['sku']} sold via these ads: {same_day} {'this week' if days > 1 else 'on ' + day}, {same_all} since {since}")
+    # "skus" (list) for a watch covering several products, else the single "sku"
+    skus = watch.get("skus") or ([watch["sku"]] if watch.get("sku") else [])
+    if skus:
+        all_adv = _dedupe(pb_list_all(pb, "ads_advertised_product_stats",
+                                      f'({ids}) && date >= "{since}" && date <= "{day}"'),
+                          ("campaign_id", "ad_group_id", "sku", "date"))
+        for sku in skus:
+            adv = [r for r in all_adv if r.get("sku") == sku]
+            same_day = sum(r.get("same_sku_units") or 0 for r in adv if w_start <= r["date"] <= day)
+            same_all = sum(r.get("same_sku_units") or 0 for r in adv)
+            lines.append(f"Units of {sku} sold via these ads: {same_day} {'this week' if days > 1 else 'on ' + day}, {same_all} since {since}")
 
     terms = _dedupe(pb_list_all(pb, "ads_search_term_stats", f'({ids}) && date >= "{since}" && date <= "{day}"'),
                     ("campaign_id", "ad_group_id", "target_id", "search_term", "date"))
@@ -135,25 +138,27 @@ def build_watch_text(pb, watch, day, days=7):
         for term, a in top:
             lines.append(f"  {term}: {a['clicks']} clicks, {a['orders']} orders, {cur}{a['spend']:.2f}")
 
-    if watch.get("sku") and watch.get("region") == "de":
-        try:
-            fba, coming = eu_stock(watch["sku"])
-            st = pb_list_all(pb, "sku_statistics", f'sku = "{watch["sku"]}"',
-                             fields="de_balance_lg,de_on_the_way")
-            lg = (st[0].get("de_balance_lg") or 0) if st else 0
-            otw = (st[0].get("de_on_the_way") or 0) if st else 0
-            lines.append(f"\n📦 EU stock: {fba} FBA available + {coming} FC transfer / inbound to FBA"
-                         f" + {lg} in LG warehouse + {otw} on the way to Germany = {fba + coming + lg + otw}")
-        except Exception as exc:
-            lines.append(f"\n📦 stock check failed: {exc}")
-    elif watch.get("sku"):
-        try:
-            fba, awd, otw = usa_stock(watch["sku"], with_inbound=True)
-            lines.append(f"\n📦 USA stock: {fba} FBA + {awd} AWD on hand + {otw} on the way to AWD = "
-                         f"{fba + awd + otw} (stock guard pauses when FBA + AWD on hand ≤ "
-                         f"{watch.get('guard_threshold', 10)})")
-        except Exception as exc:
-            lines.append(f"\n📦 stock check failed: {exc}")
+    for sku in skus:
+        if watch.get("region") == "de":
+            try:
+                fba, coming = eu_stock(sku)
+                st = pb_list_all(pb, "sku_statistics", f'sku = "{sku}"',
+                                 fields="de_balance_lg,de_on_the_way")
+                lg = (st[0].get("de_balance_lg") or 0) if st else 0
+                otw = (st[0].get("de_on_the_way") or 0) if st else 0
+                lines.append(f"\n📦 {sku} EU stock: {fba} FBA available + {coming} FC transfer / inbound to FBA"
+                             f" + {lg} in LG warehouse + {otw} on the way to Germany = {fba + coming + lg + otw}")
+            except Exception as exc:
+                lines.append(f"\n📦 stock check failed: {exc}")
+        else:
+            try:
+                fba, awd, otw = usa_stock(sku, with_inbound=True)
+                guard = (f" (stock guard pauses when FBA + AWD on hand ≤ {watch['guard_threshold']})"
+                         if watch.get("guard_threshold") else "")
+                lines.append(f"\n📦 {sku} USA stock: {fba} FBA + {awd} AWD on hand + {otw} on the way to AWD = "
+                             f"{fba + awd + otw}{guard}")
+            except Exception as exc:
+                lines.append(f"\n📦 stock check failed: {exc}")
     return "\n".join(lines)
 
 
