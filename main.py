@@ -930,3 +930,8 @@ def UpdateGrowthData(request):
 def GetGrowthData(request):
     from GrowthTracker import GetGrowthData as handler
     return handler(request)
+
+
+def SendEtsyWeekly(request):
+    from EtsyWeekly import SendEtsyWeekly as handler
+    return handler(request)

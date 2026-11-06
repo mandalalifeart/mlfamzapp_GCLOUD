@@ -41,6 +41,7 @@ LABELS = [
     ("SendOffAmazonWeekly", "🌐 Off-Amazon ads"),
     ("SendOrganicRankWeekly", "🔍 Organic search share"),
     ("SendCampaignWatchDigest", "🍄 Campaign watch"),
+    ("SendEtsyWeekly", "🛍 Etsy ads + sales"),
     ("SendWeeklyReturnRateDigest", "↩️ Returns"),
     ("SendArcherWeekly", "🤝 Archer affiliates"),
     ("SendReviewRequestsWeekly", "⭐ Review requests"),
