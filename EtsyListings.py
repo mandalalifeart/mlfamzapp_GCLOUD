@@ -178,7 +178,37 @@ def pull_and_store_listings():
     for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
         pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
 
-    return {"listingsWritten": len(bodies), "errors": errors}
+    try:
+        snapshotted = write_views_snapshot(pb_token, bodies)
+    except Exception as exc:  # the listings pull itself already succeeded
+        snapshotted = 0
+        errors.append(f"views snapshot: {exc}")
+    return {"listingsWritten": len(bodies), "viewsSnapshot": snapshotted, "errors": errors}
+
+
+VIEWS_DAILY_COLLECTION = "etsy_listing_views_daily"
+
+
+def write_views_snapshot(pb_token, bodies):
+    """Daily lifetime views/favourites/price per listing (per the user
+    2026-11-06): Etsy's API only has lifetime views, so the day-to-day
+    difference gives views per period -> conversion per listing for pricing.
+    Re-running on the same day replaces that day's rows."""
+    from datetime import date
+    today = date.today().isoformat()
+    url = f"{POCKETBASE_URL}/api/collections/{VIEWS_DAILY_COLLECTION}/records"
+    old = requests.get(url, headers={"Authorization": pb_token},
+                       params={"filter": f'date = "{today}"', "perPage": 500, "fields": "id"}, timeout=30)
+    old.raise_for_status()
+    ops = [{"method": "DELETE", "url": f"/api/collections/{VIEWS_DAILY_COLLECTION}/records/{r['id']}"}
+           for r in old.json().get("items", [])]
+    ops += [{"method": "POST", "url": f"/api/collections/{VIEWS_DAILY_COLLECTION}/records",
+             "body": {"date": today, "listing_id": str(b.get("listing_id")), "views": b.get("views") or 0,
+                      "num_favorers": b.get("num_favorers") or 0, "price": b.get("price_amount") or 0}}
+            for b in bodies]
+    for i in range(0, len(ops), POCKETBASE_BATCH_SIZE):
+        pb_batch(pb_token, ops[i:i + POCKETBASE_BATCH_SIZE])
+    return len(bodies)
 
 
 def UpdateEtsyListings(request):
