@@ -18,11 +18,13 @@ def _cors(methods="GET, POST, OPTIONS"):
             "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json"}
 
 
-def add_todo(title, detail="", area="", marketplace="", source="chat", token=None):
+def add_todo(title, detail="", area="", marketplace="", source="chat", token=None, created_by="claude"):
+    """created_by: "user" when the user asked for the item ("add to todo"),
+    "claude" when Claude added it on its own (page split, per the user 2026-11-16)."""
     token = token or pb_authenticate()
     pb_batch(token, [{"method": "POST", "url": f"/api/collections/{COLLECTION}/records",
                       "body": {"title": title, "detail": detail, "area": area, "marketplace": marketplace,
-                               "status": "open", "source": source}}])
+                               "status": "open", "source": source, "created_by": created_by}}])
 
 
 def GetTodos(request):
@@ -32,7 +34,7 @@ def GetTodos(request):
         rows = pb_list_all(pb_authenticate(), COLLECTION, "")
         rows.sort(key=lambda r: (r.get("status") == "done", r.get("done_at") or "", r.get("created") or ""), reverse=False)
         items = [{k: r.get(k) for k in ("id", "title", "detail", "area", "marketplace", "status", "source", "done_at",
-                                         "note", "created")} for r in rows]
+                                         "note", "created", "created_by")} for r in rows]
         return json.dumps({"items": items}), 200, _cors()
     except Exception as exc:
         return json.dumps({"error": str(exc)}), 500, _cors()
@@ -50,12 +52,14 @@ def SetTodo(request):
         if not b.get("id"):
             if not (b.get("title") or "").strip():
                 return json.dumps({"error": "title required"}), 400, _cors("POST, OPTIONS")
-            add_todo(b["title"].strip(), b.get("detail", ""), b.get("area", ""), b.get("marketplace", ""), "page", token)
+            add_todo(b["title"].strip(), b.get("detail", ""), b.get("area", ""), b.get("marketplace", ""), "page", token, "user")
             return json.dumps({"ok": True}), 200, _cors("POST, OPTIONS")
         if b.get("delete"):
             pb_batch(token, [{"method": "DELETE", "url": f"/api/collections/{COLLECTION}/records/{b['id']}"}])
             return json.dumps({"ok": True}), 200, _cors("POST, OPTIONS")
         body = {k: b[k] for k in ("title", "detail", "area", "marketplace", "note") if k in b}
+        if b.get("created_by") in ("user", "claude"):
+            body["created_by"] = b["created_by"]
         if b.get("status") in ("open", "done"):
             body["status"] = b["status"]
             body["done_at"] = datetime.now().isoformat(timespec="seconds") if b["status"] == "done" else ""
