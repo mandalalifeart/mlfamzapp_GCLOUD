@@ -83,7 +83,7 @@ def save_monthly_from_notify(job_name, text):
 # 2026-11-03). GetCheckReports?area=ads|business (no area = everything).
 ADS_JOBS = {"SendWeeklyChangesReview", "SendWeeklyBidChangeSummary", "SendComebacksWeekly", "SendSearchTermHarvest",
             "SendOffAmazonWeekly", "SendCampaignWatchDigest", "ads-monthly-review", "ads-monthly-auto",
-            "losing-products", "products-no-ads", "tacos-bids", "SendEtsyWeekly"}
+            "losing-products", "products-no-ads", "tacos-bids", "SendEtsyWeekly", "red-flag-fixes"}
 
 
 def _in_area(job, area):

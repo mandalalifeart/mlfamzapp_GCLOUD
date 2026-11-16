@@ -501,7 +501,7 @@ def _set_budget(api, pb, x, label):
                            "campaign_name": x["campaign"], "changed_at": date.today().isoformat(), "country_code": x["country"],
                            "profile_id": x["profile_id"], "target_id": x["campaign_id"], "target_text": x["campaign"],
                            "old_bid": x["old"], "new_bid": x["new"], "status": "applied",
-                           "reason": f"{label}: pareo budget rule - {x['why']}, approved on the page",
+                           "reason": f"{label}: {x.get('rule', 'pareo budget rule')} - {x['why']}, approved on the page",
                            "amazon_response": json.dumps(res)[:2000]})
 
 

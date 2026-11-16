@@ -352,7 +352,15 @@ def build_report(today=None, group=None, since_launch=False, save_proposals=Fals
             if not since_launch and (prev7["spend"] or prev7["sales"]):
                 lines.append(f"  prev week: {_fmt(prev7, cur)}")
             lines += [f"  {f}" for f in fl]
-    alerts = []
+    alerts, red_ids = [], set()
+    for cid in watched_ids:
+        c = camps.get(cid)
+        rows = by_camp.get(cid, [])
+        if c and c.get("campaign_status") == "ENABLED" and rows:
+            cur7, days = window(rows, w_start, end)
+            prev7, _ = window(rows, p_start, w_start)
+            if any(f.startswith("🔴") for f in flags(cur7, prev7, days, c.get("budget"), 99, False, c.get("country_code", ""))):
+                red_ids.add(cid)
     for cid, rows in by_camp.items():
         c = camps.get(cid)
         if cid in watched_ids or not c or c["campaign_status"] != "ENABLED":
@@ -360,6 +368,8 @@ def build_report(today=None, group=None, since_launch=False, save_proposals=Fals
         cur7, days = window(rows, w_start, end)
         prev7, _ = window(rows, p_start, w_start)
         fl = [f for f in flags(cur7, prev7, days, c.get("budget"), 99, False, c["country_code"]) if f[0] in "🔴🟠"]
+        if any(f.startswith("🔴") for f in fl):
+            red_ids.add(cid)
         if fl:
             alerts.append((cur7["spend"], f"• {c['country_code']} {c['campaign_name']}: {_fmt(cur7, CUR.get(c['country_code'], '€'))}\n  " + " | ".join(fl)))
     if not since_launch:
@@ -367,6 +377,16 @@ def build_report(today=None, group=None, since_launch=False, save_proposals=Fals
         lines += [a for _, a in sorted(alerts, reverse=True)[:15]]
         if not alerts:
             lines.append("none - nothing going crazy 👍")
+        # 🔴 campaigns get ready fix proposals (2026-11-16, per the user)
+        try:
+            import RedFlagFixes
+            rf_lines, rf_props = RedFlagFixes.build(pb, today, sorted(red_ids))
+            lines += rf_lines
+            data["redFlagProposals"] = len(rf_props)
+            if save_proposals and rf_lines:
+                RedFlagFixes.save(pb, today, "\n".join(rf_lines), rf_props)
+        except Exception as exc:
+            lines.append(f"\n🔴 red-flag fix proposals failed: {exc}")
         tacos_lines, data["tacos"] = tacos_section(pb, today)
         seg_lines, data["segments"] = segment_section(pb, today)
         lost_lines, data["lostExposure"] = lost_exposure_section(pb, today)

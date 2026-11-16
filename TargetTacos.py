@@ -279,7 +279,12 @@ def window_decision(wins, limit, cfg, fx=1.0):
     if spend_local >= cfg["pauseSpend"] and ratio > limit:
         return "pause", -1.0, len(wins), ratio
     if spend_local < cfg["lowSpend"]:
-        return "raise", cfg["lowSpendRaise"] / 100, len(wins), ratio
+        # 2026-11-16: only raise a target that gets no traffic (no spend) or that
+        # sells within the limit - the 2026-11-04 run raised ~30 IT SB keywords
+        # with clicks and 0 orders, and the campaign's spend went 4x with 1 order.
+        if not (w.get("spend") or 0) or ratio <= limit:
+            return "raise", cfg["lowSpendRaise"] / 100, len(wins), ratio
+        return "none", 0.0, len(wins), ratio
     return "none", 0.0, len(wins), ratio
 
 
