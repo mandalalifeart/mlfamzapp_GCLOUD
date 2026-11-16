@@ -34,8 +34,10 @@ SOURCE = {  # German master docs in the DE marketplace
     "velvet": "f6b2f8f5-4412-4a3e-b016-e6eb7ab99306",
     "wool": "685c519a-ec58-400d-99a2-2ec89cdb49d1",
     "story": "e8c3841d-b2e8-47a7-b9df-a67d5eaf3921",
+    "beach": "dac32247-52aa-4d72-9783-500da941f735",  # BEACH brand story (pareos), user 2026-11-16
+    "blockprint": "b5886bf4-edbd-45d3-8e65-b78d327805a1",  # 2026 DE PAREO Block Print (Premium), user 2026-11-16
 }
-NAMES = {"vintage": "Vintage", "boho": "Boho", "velvet": "Velvet", "wool": "WOOL", "story": "HOME DECOR BRAND STORY"}
+NAMES = {"vintage": "Vintage", "boho": "Boho", "velvet": "Velvet", "wool": "WOOL", "story": "HOME DECOR BRAND STORY", "beach": "BEACH BRAND STORY", "blockprint": "PAREO Block Print"}
 WOOL_ASIN = "B08FH9ZH5Y"
 LANG = {"en-GB": "British English", "en-US": "American English", "nl-NL": "Dutch", "nl-BE": "Dutch (Belgium)",
         "pl-PL": "Polish", "tr-TR": "Turkish", "cs-CZ": "Czech", "da-DK": "Danish", "fr-FR": "French",
@@ -45,7 +47,7 @@ SHARE_TRANSLATION = {"nl-BE": "nl-NL", "fr-BE": "fr-FR"}
 US_VIDEO = {"vintage": "b2102229-4816-4bfc-84eb-5fd0cd43d7f7", "boho": "20124737-5ae2-43a5-a934-4a8e53703d74",
             "wool": "db2af94b-f16f-414e-8bd8-7128df345fc1",
             "velvet": "b2102229-4816-4bfc-84eb-5fd0cd43d7f7"}  # placeholder until the user's English velvet video is picked in the UI
-NO_TRANSLATE_KEYS = {"productAsin", "asin", "comparisonType", "positionType"}
+NO_TRANSLATE_KEYS = {"productAsin", "asin", "comparisonType", "positionType", "brandStoreId"}
 
 
 def load_state():
@@ -95,7 +97,14 @@ def collect(o, path, out):
             collect(v, f"{path}[{i}]", out)
 
 
-def translate(texts, locale, shorten=None, avoid=None):
+PAREO_KW = (" This is the PAREO / beachwear brand story: write it like a native Amazon listing copywriter for that "
+            "marketplace and use the words real shoppers search there for these products (e.g. pareo, sarong, beach wrap, "
+            "bikini cover up, beach towel / pareo, paréo, sarong, paréo de plage / pareo, copricostume, telo mare / pareo, "
+            "fular, pareo playa, salida de baño / pareo, sarong, strandlaken / pareo, sarong, strandhandduk / pareo, "
+            "chusta plażowa, sarong ...), keep 'block print' as the local term for hand block printing.")
+
+
+def translate(texts, locale, shorten=None, avoid=None, topic=None):
     lang = LANG[locale]
     units = ""
     if locale in ("en-US", "es-US"):
@@ -107,6 +116,7 @@ def translate(texts, locale, shorten=None, avoid=None):
              "Keep product facts exactly (sizes, kg, materials, 'cover only / no filling'). Keep each item about as short "
              "as the German or shorter (Amazon has hard length limits). No claims that are not in the German text. "
              "Short table values (Eckig, Rund, Baumwolle, Samt, Polyester, ...) stay short." + units +
+             (PAREO_KW if topic in ("beach", "blockprint") else "") +
              " Answer with ONLY a JSON array of strings, same length and order as the input.")
     payload = texts
     if avoid:
@@ -197,7 +207,8 @@ def catalog_main(ci, mid, asin):
     return best[0]["link"].replace("https://m.media-amazon.com", "") if best else None
 
 
-def fix_links(doc, live, fam_live, ci, mid, notes):
+def fix_links(doc, live, fam_live, ci, mid, notes, group_of=None):
+    group_of = group_of or {}
     for m in doc["contentModuleList"]:
         car = m.get("premiumImageCarousel")
         if car:
@@ -227,6 +238,7 @@ def fix_links(doc, live, fam_live, ci, mid, notes):
             for x in fa["asinImages"]:
                 a = x["asinImage"]["productAsin"]["value"]
                 if a not in live:
+                    spare.sort(key=lambda b: group_of.get(b) != group_of.get(a))  # same product group first
                     while spare:
                         b = spare.pop(0); img = catalog_main(ci, mid, b)
                         if img:
@@ -270,7 +282,7 @@ def main():
     rows = pb_list_all(pb_authenticate(), "asin_group_mapping", 'asin != ""', fields="asin,sku,group")
     by_sku = {r["sku"]: r["group"] for r in rows}; by_asin = {r["asin"]: r["group"] for r in rows}
     lst = listings(mpc, "summaries")
-    live, fam = set(), {"vintage": [], "boho": [], "velvet": [], "wool": [], "story": []}
+    live, fam = set(), {"vintage": [], "boho": [], "velvet": [], "wool": [], "story": [], "beach": [], "blockprint": []}
     for sku, l in lst.items():
         a = l["asin"]
         if not a or not ({"BUYABLE", "DISCOVERABLE"} & set(l["status"])):
@@ -282,6 +294,10 @@ def main():
             f = "wool"
         if f and a not in fam[f]:
             fam[f].append(a)
+        if g == "PAREO_B" and a not in fam["blockprint"]:
+            fam["blockprint"].append(a)
+        if g.startswith("PAREO") and a not in fam["beach"]:
+            fam["beach"].append(a)
         if g in ("COVER_VINTAGE", "COVER_BOHO", "VELVET", "STUFFED") and a not in fam["story"]:
             fam["story"].append(a)
     print(mpc, locale, {k: len(v) for k, v in fam.items()})
@@ -292,9 +308,9 @@ def main():
         src = call(ap_de.get_content_document, SOURCE[name], marketplaceId=DE_MID, includedDataSet=["CONTENTS"]).payload["contentRecord"]["contentDocument"]
         doc = copy.deepcopy(src)
         doc["locale"] = locale
-        doc["name"] = f"2026 {mpc} {NAMES[name]} {locale}" if name != "story" else f"HOME DECOR BRAND STORY 2026 {locale}"
+        doc["name"] = f"2026 {mpc} {NAMES[name]} {locale}" if name not in ("story", "beach") else f"{NAMES[name]} 2026 {locale}"
         notes = []
-        fix_links(doc, live, fam["story"] if name == "story" else fam[name], ci, mid, notes)
+        fix_links(doc, live, fam[name], ci, mid, notes, by_asin)
         if mpc == "US":
             remap_media_us(doc["contentModuleList"], st, cred, mp, name)
         # translate
@@ -307,7 +323,7 @@ def main():
             if cached and cached.get("src") == srcs:
                 outs = cached["out"]
             else:
-                outs = translate(srcs, SHARE_TRANSLATION.get(locale, locale))
+                outs = translate(srcs, SHARE_TRANSLATION.get(locale, locale), topic=name)
                 st["tr"][tkey] = {"src": srcs, "out": outs}; save_state(st)
             for (_, h, k), t in zip(items, outs):
                 h[k] = t
