@@ -288,6 +288,19 @@ IDEAS = [
      "price": "$18-25 set of 3", "bundle": "Hook set as an add-on to the Magic535 mushroom pouf / mushroom lamp",
      "notes": "User's photo 2026-11-17: red / yellow / green toadstool caps with white dots, white stem curving into the hook, distressed hand-painted look (cast iron or resin), for keys / bags / scarves.",
      "images": ["/research/mushroom_hooks_1.jpg"]},
+    {"id": "oversize-fabric-bag", "kind": "bag", "name": "Oversized fabric / puffer (down-style) tote bag for women",
+     "keywords": ["puffer tote bag", "oversized puffer tote bag", "quilted puffer tote bag for women", "large fabric tote bag for women",
+                  "oversized tote bag for women", "boho tote bag"],
+     "match": ["tote"],
+     "theme": ["puffer", "quilted", "padded", "down", "fabric", "cotton", "canvas", "boho", "oversized", "large"],
+     "categories": ["Clothing, Shoes & Jewelry", "Handmade Products", "Home & Kitchen"],
+     "price": "$25-45", "bundle": "Bag + matching pareo (beach set) / pouf-fabric bag",
+     "notes": "User's idea 2026-11-17: oversized fabric 'down' (puffer / quilted) bag for women. Could reuse our block-print / mandala fabrics for a quilted oversized tote.",
+     "findings": ["US market 2026-11-17 (Best Sellers Rank in Clothing, Shoes & Jewelry; sales are rough estimates): the puffer tote is a hot trend - Bagstellar Puffer Tote #504 (#1 Women's Tote Handbags, $30-36) ~4,000-6,000/month, BAGSMART Puffy Tote #928 (#2, $21-22) ~3,000/month, Uselike quilted puffer #4,242 (#5) ~800-1,000/month, TOPDesign / BAGSMART 2-set ~700/month; about 10 more puffer totes at #12k-60k (~60-400/month).",
+                  "Puffer totes are all nylon/polyester, $20-36, dominated by big Chinese bag brands with thousands of reviews - hard to win head-on.",
+                  "Our angle = cotton quilted / block-print oversized tote (made in India, same workshops as our pareos): Third Eye Export 100% cotton quilted tote 18x16 #41k (~100-150/month), Marubhumi #76k, block-print quilted totes (AUZURE, Makarisa, ATOSII, tiger block print) #80k-260k (~10-50/month each). Small niche but on-brand and matches the pareo / beach collection.",
+                  "Boho / corduroy totes (Miss Adola, TOPASION) sell well in Kitchen > Reusable Grocery Bags at $9-15 - low price.",
+                  "Verdict: puffer = big but crowded and cheap; a quilted cotton block-print oversized tote as a beach-bag add-on to pareos ($25-35) is the realistic fit - test small."]},
 ]
 
 
