@@ -478,7 +478,8 @@ def GetProductResearch(request):
             ideas.append({**idea, "research": research, "score": idea_score(research),
                           "status": (status.get(idea["id"]) or {}).get("status", "idea"),
                           "userNotes": (status.get(idea["id"]) or {}).get("notes", ""),
-                          "pool": (status.get(idea["id"]) or {}).get("pool") or default_pool(idea)})
+                          "pool": (status.get(idea["id"]) or {}).get("pool") or default_pool(idea),
+                          "marked": bool((status.get(idea["id"]) or {}).get("marked"))})
         ideas.sort(key=lambda i: -((i["score"] or {}).get("score") or -1))
         for n, i in enumerate(ideas, 1):
             i["rank"] = n
@@ -517,6 +518,8 @@ def SetProductResearchStatus(request):
             cur["notes"] = str(body["notes"])[:2000]
         if body.get("pool") is not None:
             cur["pool"] = body["pool"]
+        if body.get("marked") is not None:  # per the user 2026-11-17: mark the ideas we go for
+            cur["marked"] = bool(body["marked"])
         status[idea_id] = cur
         set_job_state(token, "product_research_status", json.dumps(status))
         return _json({"ok": True, "id": idea_id, **cur})
