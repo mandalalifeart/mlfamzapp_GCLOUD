@@ -606,7 +606,8 @@ def deductible_vat_by_country(year):
     for d in W.pb_list_all(token, W.DOCUMENTS_COLLECTION, filter_str="kind = 'invoice'"):
         ex = d.get("extracted") or {}
         tax = ex.get("tax_amount") or 0
-        if not tax or (d.get("group_key") or "").split("|")[0] in W.GROUP_INVOICE_CLASSES.values():
+        if not tax or (d.get("group_key") or "").split("|")[0] in W.GROUP_INVOICE_CLASSES.values() \
+                or d.get("group_key") == "other-home" or (d.get("group_key") or "").startswith("home|"):
             continue
         if d.get("ledger_key") in tax_payment_keys:
             continue

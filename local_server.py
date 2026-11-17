@@ -162,6 +162,9 @@ ROUTED_FUNCTIONS = [
     "GetWiseDocument",
     "AutoMatchWiseInvoice",
     "GetWiseSupplierBalances",
+    "GetWiseOtherExpensesTotal",
+    "GetHomeExpenses",
+    "SetHomeExpense",
     "SetWiseSupplierOpening",
     "SetWiseDocumentCoverage",
     "SetWiseNoDocument",
@@ -225,6 +228,9 @@ ROUTED_FUNCTIONS = [
     "SetAdsChecklistItem",
     "SendWeeklyChangesReview",
     "SendWeeklyBidChangeSummary",
+    "EbayAccountDeletion",
+    "EbayOAuthCallback",
+    "EbayPrivacy",
 ]
 
 app = Flask(__name__)

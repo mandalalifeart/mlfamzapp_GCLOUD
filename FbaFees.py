@@ -50,6 +50,9 @@ def _f(x):
         return None
 
 
+BIG_ITEMS = {"coverpoufrectpatch111": "large patchwork pouf cover"}
+
+
 def product_type(sku, group):
     s, g = (sku or "").lower(), (group or "").upper()
     if "_set" in s:
@@ -66,6 +69,8 @@ def product_type(sku, group):
         return "stool"
     if s.startswith("coverpillow") or "pillow" in s:
         return "pillow cover"
+    if s in BIG_ITEMS:  # bigger/heavier by design (per the user 2026-11-12): own type, not vs normal covers
+        return BIG_ITEMS[s]
     if s.startswith("coverpouf") or "pouf" in s:
         return "pouf cover"
     return g.lower() or "other"

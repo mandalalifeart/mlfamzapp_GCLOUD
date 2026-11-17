@@ -173,7 +173,7 @@ def upload_image(cred, mp, data):
 
 def us_hero(fam):
     d = json.load(open(os.path.join(HERE, "logs/aplus_us_premium_docs_2026_11_16.json")))
-    src = {"vintage": "2024 Vintage Pouf", "boho": "2024 Boho Pouf", "wool": "2024 WOOL", "velvet": "2024 Vintage Pouf"}[fam]
+    src = {"vintage": "2024 Vintage Pouf", "boho": "2024 Boho Pouf", "wool": "2024 WOOL", "velvet": "2024 Vintage Pouf", "blockprint": "2024 Vintage Pouf"}[fam]
     for m in d[src]["doc"]["contentModuleList"]:
         if (m.get("premiumHeroVideo") or {}).get("heroVideo"):
             return copy.deepcopy(m["premiumHeroVideo"]["heroVideo"])

@@ -89,7 +89,7 @@ INCOME_CLASSES = [
     "Tax refund",
     "Owner capital / loan",
     "Currency conversion",
-    "Refund / reversal",
+    "Refunded / cancelled",
     "Cashback",
     "Other income",
     "Unclassified",
@@ -100,7 +100,12 @@ INCOME_CLASSES = [
 # their refunds both belong to the Amazon payment balance.
 # Etsy too (per the user 2026-10-07: Etsy card charges belong to the Etsy
 # payout balance, like Amazon's).
-NET_AGAINST_INCOME_CLASSES = ["Amazon payout", "Etsy payout"]
+# A payment that came back in full (same Wise id out and in on one balance,
+# same amount - a card check, a refunded card payment or a cancelled transfer)
+# is "Refunded / cancelled" on both sides (per the user 2026-11-08), netted on
+# the Incoming side so the pair totals 0. Amazon/Etsy pairs keep their payout class.
+REFUNDED_CLASS = "Refunded / cancelled"
+NET_AGAINST_INCOME_CLASSES = ["Amazon payout", "Etsy payout", REFUNDED_CLASS]
 EXPENSE_CLASSES = [
     "Amazon payout",
     "Inventory / suppliers",
@@ -112,13 +117,12 @@ EXPENSE_CLASSES = [
     "Business services",
     "Equipment / hardware",
     "Travel",
-    "Amazon charges",
     "Owner withdrawal",
-    "Transfer to own account",
     "Currency conversion",
     "Other expense",
-    # One group for both directions (per the user 2026-10-03: "same group, merge them").
-    "Refund / reversal",
+    # One group for both directions (per the user 2026-10-03: "same group, merge them");
+    # "Refund / reversal" was merged into it 2026-11-08 (per the user).
+    "Refunded / cancelled",
     "Unclassified",
 ]
 FEES_CLASS = "Wise fees"
@@ -148,7 +152,7 @@ DEFAULT_RULES = [
     # Amazon payment balance, not a generic card-refund bucket.
     ("in", {"CARD"}, r"amazon|amzn", "Amazon payout"),
     ("in", {"CARD"}, r"\betsy\b", "Etsy payout"),
-    ("in", {"CARD"}, r".", "Refund / reversal"),
+    ("in", {"CARD"}, r".", REFUNDED_CLASS),
     ("in", None, r"etsy|^payout\b|\| *payout", "Etsy payout"),
     ("in", None, r"vat refund|erstatt|remb\. dgfip|tax refund|finanzamt", "Tax refund"),
     ("in", None, r"loan into an entity", "Owner capital / loan"),
@@ -164,7 +168,7 @@ DEFAULT_RULES = [
     # Card payments for hotels / flights / stays (per the user, 2026-10-01:
     # "Jai Niwas Jaipur" is a hotel in India -> travel, not the supplier).
     ("out", {"CARD"}, r"hotel|hostel|resort|airindia|air india|airline|airways|indigo|booking\.com|agoda|airbnb|niwas|make ?my ?trip|goibibo|cleartrip|yatra|12go|irctc|redbus", "Travel"),
-    ("out", None, r"mandala life art", "Transfer to own account"),
+    ("out", None, r"mandala life art", "Owner withdrawal"),  # was "Transfer to own account" (removed per the user 2026-11-08)
     ("out", None, r"malani|acacia fashion|zinnia|om and sons|new rain|shrinath|sara ?a?gems|jai niwas", "Inventory / suppliers"),
     ("out", None, r"unicargo|lagerpark|ifulfillyou", "Logistics & warehousing"),
     ("out", None, r"bbk rostock|\bsiee\b|irish tax|belastingdienst|financni urad|ministero dell|hmrc|maksu- ja tolliamet|nbp o/okr|dgfip",
@@ -938,6 +942,52 @@ def UploadWiseInvoice(request):
         ledger_key = body.get("ledgerKey") or ""
         group_key, month = body.get("groupKey") or "", body.get("month") or ""
         data = base64.b64decode(body.get("contentBase64") or "")
+        if group_key.startswith("home|") and data:
+            # Home bill for one cell of the home-expenses table (per the user 2026-11-11).
+            category = group_key.split("|", 1)[1]
+            if category not in HOME_CATEGORIES or not re.fullmatch(r"\d{4}-\d{2}", month):
+                return json_response({"error": "Unknown category or month"}, 400)
+            token = pb_authenticate()
+            dup = find_duplicate(token, data)
+            if dup:
+                return json_response({"error": f"Already uploaded ({dup['filename']}, {dup['attachedTo']})"}, 409)
+            try:
+                extracted = extract_invoice_fields(body.get("filename"), data)
+            except Exception:
+                extracted = None
+            cell = _home_cell(token, int(month[:4]), int(month[5:]), category)
+            if cell and cell.get("doc_id"):
+                for d in pb_list_all(token, DOCUMENTS_COLLECTION, filter_str=f"id = {json.dumps(cell['doc_id'])}"):
+                    _delete_document(token, d)  # one bill per cell - a new upload replaces it
+            stored = store_document(token, "invoice", month, body.get("filename") or "bill", data,
+                                    prefix=f"Home-{category}_{month}_", group_key=group_key, extracted=extracted)
+            doc = pb_list_all(token, DOCUMENTS_COLLECTION,
+                              filter_str=f"stored_path = {json.dumps(os.path.join(WISE_DOCS_DIR, stored))}")
+            update = {"doc_id": doc[0]["id"] if doc else ""}
+            # The bill's amount fills the cell unless the user already typed one.
+            if extracted and extracted.get("total") and not (cell or {}).get("amount"):
+                update.update({"amount": extracted["total"], "currency": HOME_CURRENCY})
+            _home_save(token, int(month[:4]), int(month[5:]), category, update, cell)
+            return json_response({"ok": True, "storedAs": stored, "extracted": extracted})
+        if group_key in OTHER_EXTRA_GROUPS and data:
+            # Home expenses (50% claimed) / invoices paid outside Wise (per the
+            # user 2026-11-11) - never replaced, filed by invoice-date month.
+            token = pb_authenticate()
+            dup = find_duplicate(token, data)
+            if dup:
+                return json_response({"error": f"Already uploaded ({dup['filename']}, {dup['attachedTo']})"}, 409)
+            try:
+                extracted = extract_invoice_fields(body.get("filename"), data)
+            except Exception:
+                extracted = None
+            try:
+                inv_month = datetime.strptime((extracted or {}).get("invoice_date") or "", "%Y-%m-%d").strftime("%Y-%m")
+            except ValueError:
+                inv_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
+            stored = store_document(token, "invoice", inv_month, body.get("filename") or "invoice", data,
+                                    prefix=f"{OTHER_EXTRA_GROUPS[group_key]['prefix']}_", group_key=group_key,
+                                    extracted=extracted)
+            return json_response({"ok": True, "storedAs": stored})
         if group_key.startswith("supplier|") and data:
             supplier_id = group_key.split("|", 1)[1]
             if supplier_id not in SUPPLIER_BALANCES:
@@ -1074,6 +1124,63 @@ def attach_supplier_invoice(token, supplier_id, filename, data, extracted=None):
                           prefix=prefix, group_key=f"supplier|{supplier_id}", extracted=extracted)
 
 
+def _payee_norm(name):
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())[:12]
+
+
+def last_base(rows, key):
+    return next(r for r in reversed(rows) if r["key"] == key)
+
+
+def match_late_card_refunds(ledger, reversed_card_ids, days=60):
+    """Card payments refunded later under a NEW card transaction id (per the
+    user 2026-11-08, real case: Next Insurance 26.3.2025 $738.88 paid from the
+    USD + EUR balances, refunded 11.4.2025 as $691 + $47.88 into USD). A payment
+    matches 1-4 later incoming card rows of the same payee within `days` days
+    whose sum equals the card amount (in the card's currency). Returns the
+    ledger keys of both sides."""
+    from itertools import combinations
+    outs, ins = {}, []
+    for r in ledger:
+        if (r.get("details_type") or "").upper() != "CARD" or r.get("wise_id") in reversed_card_ids or not r.get("_local"):
+            continue
+        if r.get("direction") == "out":
+            outs.setdefault(r.get("wise_id"), []).append(r)
+        elif r.get("direction") == "in":
+            ins.append(r)
+    used, keys, fx = set(), set(), {}
+    for wid, parts in outs.items():
+        exch = [p for p in parts if p.get("exchange_currency") and p.get("exchange_amount")]
+        cur = exch[0]["exchange_currency"] if exch else parts[0].get("currency")
+        total = exch[0]["exchange_amount"] if exch else sum(p.get("amount") or 0 for p in parts)
+        when = min(p["_local"] for p in parts)
+        payee = _payee_norm(parts[0].get("counterparty"))
+        if not payee or not total:
+            continue
+        end = (datetime.strptime(when[:10], "%Y-%m-%d") + timedelta(days=days)).strftime("%Y-%m-%d")
+        cands = [r for r in ins if r["ledger_key"] not in used and r.get("currency") == cur and
+                 _payee_norm(r.get("counterparty")) == payee and when < r["_local"] and r["_local"][:10] <= end]
+        hit = next((c for n in range(1, min(4, len(cands)) + 1) for c in combinations(cands, n)
+                    if abs(sum(x.get("amount") or 0 for x in c) - total) < 0.01), None)
+        if hit:
+            used |= {x["ledger_key"] for x in hit}
+            keys |= used | {p["ledger_key"] for p in parts}
+            # Parts paid from another balance came back in the card currency
+            # (Next Insurance: EUR 91.27 part refunded as USD 97.99). Per the
+            # user 2026-11-08: the refund stays 0 per balance and the exchange
+            # difference is lost money = negative cashback, so book the foreign
+            # part as Cashback in both currencies (net = the FX loss in EUR).
+            foreign = [p for p in parts if p.get("currency") != cur]
+            if len(foreign) == 1:
+                f = foreign[0]
+                back = round(total - sum(p.get("amount") or 0 for p in parts if p.get("currency") == cur), 2)
+                last = max(hit, key=lambda x: x["_local"])
+                desc = f"{f['amount']:.2f} {f['currency']} part refunded as {back:.2f} {cur} - exchange difference"
+                fx[last["ledger_key"]] = [(f["currency"], f["amount"], REFUNDED_CLASS, desc), (cur, -back, REFUNDED_CLASS, desc),
+                                          (f["currency"], -f["amount"], "Cashback", desc), (cur, back, "Cashback", desc)]
+    return keys, fx
+
+
 def invoice_required(row, reversed_card_ids):
     """Per the user (2026-10-01): every transaction needs an invoice except Wise
     fees (booked inside the transfer row, never their own row) and cashback.
@@ -1120,7 +1227,7 @@ def classify(row, user_rules):
         return row_rule, "row"
     rule = user_rules.get(rule_key(row.get("direction"), row.get("counterparty")))
     if rule and row.get("counterparty"):
-        return rule, "rule"
+        return (REFUNDED_CLASS if rule == "Refund / reversal" else rule), "rule"
     return default_classification(row), "default"
 
 
@@ -1233,6 +1340,13 @@ def GetWiseLedger(request):
             if row.get("wise_id"):
                 id_dirs.setdefault((row.get("wise_id"), row.get("currency")), set()).add(row.get("direction"))
         reversed_card_ids = {wid for (wid, _cur), dirs in id_dirs.items() if dirs == {"in", "out"}}
+        id_sums = {}
+        for row in ledger:
+            if (row.get("wise_id"), row.get("currency")) in id_dirs and len(id_dirs[(row.get("wise_id"), row.get("currency"))]) == 2:
+                s_ = id_sums.setdefault((row.get("wise_id"), row.get("currency")), {"in": 0.0, "out": 0.0})
+                s_[row.get("direction")] += row.get("amount") or 0
+        refunded_pairs = {k: round(v["in"] - v["out"], 2) for k, v in id_sums.items()}
+        late_refund_keys, late_refund_fx = match_late_card_refunds(ledger, reversed_card_ids)
 
         month_keys = {f"{year}-{month:02d}"} if month else {f"{year}-{m:02d}" for m in range(1, 13)}
         docs = [d for d in pb_list_all(token, DOCUMENTS_COLLECTION, sort="uploaded_at") if d.get("month") in month_keys]
@@ -1264,7 +1378,11 @@ def GetWiseLedger(request):
             cls, cls_source = classify(row, rules)
             if row.get("wise_id") in reversed_card_ids and cls_source == "default" and \
                     (row.get("details_type") or "").upper() != "CARD":
-                cls = "Refund / reversal"
+                cls = REFUNDED_CLASS
+            pair_diff = refunded_pairs.get((row.get("wise_id"), row.get("currency")))
+            if (pair_diff == 0 or row["ledger_key"] in late_refund_keys) and cls_source != "row" and \
+                    cls not in ("Amazon payout", "Etsy payout"):
+                cls = REFUNDED_CLASS
             rows.append({
                 "key": row["ledger_key"], "wiseId": row.get("wise_id"), "source": row.get("source"),
                 "date": row.get("_local"), "currency": row.get("currency"), "direction": row.get("direction"),
@@ -1275,7 +1393,9 @@ def GetWiseLedger(request):
                 "isAtm": is_atm(row),
                 "exchangeCurrency": row.get("exchange_currency") or "", "exchangeAmount": row.get("exchange_amount") or 0,
                 "classification": cls, "classificationSource": cls_source,
-                "invoiceRequired": invoice_required(row, reversed_card_ids) and cls not in BALANCE_CLASSIFICATIONS
+                # money in - money out for a reversed pair (0 = fully refunded)
+                "refundPairDiff": pair_diff,
+                "invoiceRequired": invoice_required(row, reversed_card_ids) and cls not in BALANCE_CLASSIFICATIONS and cls != REFUNDED_CLASS
                 and f"noinv|{row['ledger_key']}" not in rules,
                 "noDocument": f"noinv|{row['ledger_key']}" in rules,
                 "balanceAccount": next((sid for sid, cfg in SUPPLIER_BALANCES.items()
@@ -1288,16 +1408,37 @@ def GetWiseLedger(request):
                 "report": (reports.get((f"{row['_y']}-{row['_m']:02d}", amazon_report_key(row.get("currency"))))
                            if cls == AMAZON_CLASS else None),
             })
+            for i, (fcur, famt, fcls, fdesc) in enumerate(late_refund_fx.get(row["ledger_key"], [])):
+                rows.append({**last_base(rows, row["ledger_key"]), "key": f"{row['ledger_key']}|fx{i}",
+                             "currency": fcur, "direction": "in", "amount": famt, "fee": 0, "classification": fcls,
+                             "classificationSource": "auto", "refundPairDiff": None, "description": fdesc,
+                             "exchangeCurrency": "", "exchangeAmount": 0, "invoiceRequired": False, "noDocument": False,
+                             "balanceAccount": "", "invoiceGroup": None, "invoices": [], "report": None})
+            # A refunded/cancelled payment whose Wise fee was NOT given back:
+            # the fee is money lost - booked as negative cashback (per the user
+            # 2026-11-08), so the pair itself stays at 0.
+            last = rows[-1]
+            if cls == REFUNDED_CLASS and last["direction"] == "out" and last["fee"]:
+                rows.append({**last, "key": f"{last['key']}|lostfee", "direction": "in", "amount": -last["fee"], "fee": 0,
+                             "classification": "Cashback", "classificationSource": "auto", "refundPairDiff": None,
+                             "description": "Wise fee not refunded on a refunded / cancelled payment",
+                             "invoiceRequired": False, "noDocument": False, "balanceAccount": "", "invoiceGroup": None,
+                             "invoices": [], "report": None})
+                last["fee"] = 0
 
         if rows:
             days = sorted(r["date"][:10] for r in rows)
             try:
-                eur_rates_for({r["currency"] for r in rows}, days[0], days[-1])
+                eur_rates_for({r["currency"] for r in rows} | {"USD"}, days[0], days[-1])
             except requests.RequestException:
                 pass  # page still works per-currency; EUR totals just show as unavailable
         for r in rows:
             r["eurAmount"] = to_eur(r["amount"], r["currency"], r["date"][:10])
             r["eurFee"] = to_eur(r["fee"], r["currency"], r["date"][:10]) if r["fee"] else 0
+            # USD value (page "All" tab total in dollars): native for USD, else via EUR at the same day's ECB rate
+            usd_rate = _EUR_RATE_CACHE.get(("USD", r["date"][:10]))
+            r["usdAmount"] = (round(r["amount"], 2) if r["currency"] == "USD" else
+                              round(r["eurAmount"] * usd_rate, 2) if r["eurAmount"] is not None and usd_rate else None)
 
         confirmed = confirmed_currency_months(pb_list_all(token, IMPORTS_COLLECTION))
         currencies_in_view = sorted({r["currency"] for r in rows} | {c for (c, y, m) in confirmed if y == year and (not month or m == month)})
@@ -1332,6 +1473,8 @@ def GetWiseLedger(request):
             tax = ex.get("tax_amount") or 0
             if d.get("kind") != "invoice" or not tax or (d.get("group_key") or "").split("|")[0] in GROUP_INVOICE_CLASSES.values():
                 continue  # invoices TO Amazon are sales (output VAT), not VAT the user paid
+            if d.get("group_key") == "other-home" or (d.get("group_key") or "").startswith("home|"):
+                continue  # private home bills (50% counted as expense) - not input VAT
             cur = (ex.get("currency") or "").upper()
             kind = "Paid to tax office" if d.get("ledger_key") in tax_payment_keys else "Input VAT on purchases"
             key = (kind, (ex.get("tax_country") or "??").upper(), (ex.get("tax_type") or "Tax").upper(), cur)
@@ -1355,8 +1498,66 @@ def GetWiseLedger(request):
         unread_invoices = sum(1 for d in docs if d.get("kind") == "invoice" and not d.get("group_key", "").startswith("amazon|")
                               and not (d.get("extracted") or {}).get("vendor"))
 
+        # Documents not linked to any Wise transaction (per the user 2026-11-08): one list on the Summary tab.
+        unlinked_where = {"amazon": "Amazon monthly sales invoice", "etsy": "Etsy monthly sales invoice",
+                          "supplier": "Supplier invoice (Malani / Acacia)", "supplier-ledger": "Supplier's own statement",
+                          "supplier-ledger-old": "Supplier's statement (old copy)", "supplier-credit": "Supplier credit note",
+                          "supplier-separate": "Freight invoice (Xhipment / First Shipment)", "supplier-superseded": "Replaced - not counted",
+                          "supplier-unconfirmed": "Parked - not counted", "annual-report": "Annual report",
+                          "shipment": "Shipment document (/shipments)"}
+        unlinked = []
+        # From the start of the chosen year up to the chosen month (per the user 2026-11-08).
+        ytd_keys = {f"{year}-{m:02d}" for m in range(1, (month or 12) + 1)}
+        for d in [x for x in pb_list_all(token, DOCUMENTS_COLLECTION, filter_str='group_key ~ "supplier-separate|"')
+                  if x.get("month") in ytd_keys]:
+            if d.get("ledger_key") or d.get("kind") == "statement" or (d.get("group_key") or "").startswith("amazon-report|"):
+                continue
+            ex = d.get("extracted") or {}
+            gk = d.get("group_key") or ""
+            # Only documents that go into the annual report (per the user 2026-11-08): own sales
+            # invoices + supplier / owner / other-expense invoices and credit notes. Statements,
+            # shipment docs, freight billed to Malani, replaced / parked copies are left out.
+            # Malani / Acacia invoices live only in their running balances, owner / other-expense
+            # receipts in the paid-vs-receipts section (per the user 2026-11-08).
+            if gk.split("|")[0] != "supplier-separate":  # only these (per the user 2026-11-08)
+                continue
+            where = {"supplier|owner": "Owner balance receipt",
+                     "supplier|other": "Other expenses receipt"}.get(gk) or unlinked_where.get(gk.split("|")[0], gk)
+            unlinked.append({"id": d["id"], "kind": d.get("kind"), "month": d.get("month"), "filename": d.get("filename"),
+                             "groupKey": gk, "where": where,
+                             "vendor": ex.get("vendor") or "", "number": ex.get("invoice_number") or "",
+                             "date": ex.get("invoice_date") or "", "total": ex.get("total"),
+                             "currency": (ex.get("currency") or "").upper()})
+        unlinked.sort(key=lambda x: (x["date"] or x["month"] or ""), reverse=True)
+        # Receipts on the owner / other-expenses running balances in this period
+        # vs what was paid (per the user 2026-11-08: "out vs invoices" on Summary).
+        balance_receipts = {}
+        for d in docs:
+            gk = d.get("group_key") or ""
+            cls = {"supplier|owner": "Owner withdrawal", "supplier|other": "Other expense"}.get(gk)
+            if not cls or d.get("kind") != "invoice":
+                continue
+            ex = d.get("extracted") or {}
+            cur = (ex.get("currency") or "").upper()
+            day = (ex.get("invoice_date") or f"{d.get('month')}-15")[:10]
+            total = ex.get("total") or 0
+            try:
+                eur_rates_for({PEGGED_CURRENCIES.get(cur, (cur,))[0]}, day, day)
+            except requests.RequestException:
+                pass
+            eur = to_eur(total, cur, day) if cur else None
+            b = balance_receipts.setdefault(cls, {"count": 0, "eur": 0.0, "eurMissing": 0, "byCurrency": {}})
+            b["count"] += 1
+            b["byCurrency"][cur] = round(b["byCurrency"].get(cur, 0) + total, 2)
+            if eur is None:
+                b["eurMissing"] += 1
+            else:
+                b["eur"] = round(b["eur"] + eur, 2)
+
         return json_response({
             "year": year, "month": month, "rows": rows, "periods": period_list, "confirmation": confirmation,
+            "unlinkedDocs": unlinked,
+            "balanceReceipts": balance_receipts,
             "vatSummary": vat_summary, "invoicesNotRead": unread_invoices,
             "incomeClasses": INCOME_CLASSES, "expenseClasses": EXPENSE_CLASSES, "feesClass": FEES_CLASS,
             "netAgainstIncomeClasses": NET_AGAINST_INCOME_CLASSES,
@@ -1865,8 +2066,8 @@ def GetWiseSupplierBalances(request):
     try:
         token = pb_authenticate()
         ledger = pb_list_all(token, LEDGER_COLLECTION, sort="occurred_at")
-        docs = [d for d in pb_list_all(token, DOCUMENTS_COLLECTION, sort="uploaded_at")
-                if (d.get("group_key") or "").startswith("supplier|")]
+        every_doc = pb_list_all(token, DOCUMENTS_COLLECTION, sort="uploaded_at")
+        docs = [d for d in every_doc if (d.get("group_key") or "").startswith("supplier|")]
         settings = {r["supplier_id"]: r for r in pb_list_all(token, SUPPLIER_SETTINGS_COLLECTION)}
         rules = {r["rule_key"]: r["classification"] for r in pb_list_all(token, RULES_COLLECTION)}
         # A payment that came straight back (same wise_id out + in on one
@@ -1888,6 +2089,10 @@ def GetWiseSupplierBalances(request):
                     continue
                 if not balance_matches(cfg, row, classify(row, rules)[0] if cfg.get("classification") else None):
                     continue
+                # A transfer to the owner moved by hand to another class (e.g. Other expense)
+                # leaves the owner balance (per the user 2026-11-08).
+                if sid == "owner" and classify(row, rules)[0] != "Owner withdrawal":
+                    continue
                 # Payments before the balance start date don't count in the
                 # balance but are kept so the supplier's own full-history ledger
                 # can still be matched line by line (Acacia, 2026-10-06).
@@ -1896,8 +2101,10 @@ def GetWiseSupplierBalances(request):
                 # converted to INR/USD); card / ATM rows whose foreign amount wasn't
                 # captured (exchange_amount 0, e.g. from PDF statements) fall back
                 # to what left the Wise balance - never count them as 0.
-                if cfg.get("value_sent"):  # the receipts are for the full amount sent (incl. Wise's fee)
-                    received_cur, received = row.get("currency"), row.get("amount") or 0
+                # Owner: valued in the currency sent, WITHOUT Wise's fee - the fee is
+                # booked on the "Wise fees" line (per the user 2026-11-10, receipt 10002).
+                if cfg.get("value_sent"):
+                    received_cur, received = row.get("currency"), (row.get("amount") or 0) - (row.get("fee") or 0)
                 elif row.get("exchange_currency") and (row.get("exchange_amount") or 0) > 0:
                     received_cur, received = row["exchange_currency"], row["exchange_amount"]
                 elif (row.get("details_type") or "").upper() == "CARD":
@@ -1915,9 +2122,14 @@ def GetWiseSupplierBalances(request):
             all_payments = payments
             payments = [p for p in all_payments if not p["beforeStart"]]
             invoices = []
-            for d in docs:
-                if d.get("group_key") != f"supplier|{sid}":
-                    continue
+            # Owner / other expenses: invoices attached straight to one of the balance's
+            # payments count as well (per the user 2026-11-08 - the owner's tax invoices).
+            own_docs = [d for d in docs if d.get("group_key") == f"supplier|{sid}"]
+            if sid in ("owner", "other"):
+                pay_keys = {p["key"] for p in all_payments}
+                own_docs += [d for d in every_doc if d.get("kind") == "invoice" and not d.get("group_key")
+                             and ({d.get("ledger_key")} | set(d.get("extra_ledger_keys") or [])) & pay_keys]
+            for d in own_docs:
                 ex = d.get("extracted") or {}
                 # booked_date: the accounts book an invoice in a later period than
                 # its own date (per the user 2026-11-03: MI/198 of 26.09.2025 goes to 2026).
@@ -2381,3 +2593,188 @@ def find_payment_combination(fields, scored, documented):
         if hits:
             return None  # ambiguous - let the user pick
     return None
+
+
+# Last section of the /wise Summary tab (per the user 2026-11-11):
+# TOTAL = Other expenses balance (paid on Wise - receipts)
+#         - 50% x home expenses - invoices not paid through Wise.
+OTHER_EXTRA_GROUPS = {
+    "other-home": {"prefix": "Home-expense", "share": 0.5},
+    "other-nonwise": {"prefix": "Not-via-Wise", "share": 1.0},
+}
+NONWISE_ALSO = {"supplier-separate|xhipment"}
+
+
+def GetWiseOtherExpensesTotal(request):
+    """Per year + all years: the Other expenses running balance, the home
+    expenses (50% counted) and the invoices paid outside Wise, all in EUR
+    (ECB rate of each invoice's date), and TOTAL = balance - 50% home -
+    non-Wise. Lists the documents of both groups."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    try:
+        token = pb_authenticate()
+        body, status, _ = GetWiseSupplierBalances(request)
+        if status != 200:
+            return body, status, cors_headers()
+        other = next(s for s in json.loads(body)["suppliers"] if s["id"] == "other")
+        # Xhipment / First Shipment freight invoices (billed to Malani, not paid
+        # through Wise) also count as "not via Wise" (per the user 2026-11-11).
+        # Their group_key stays - ProductCost freight rates and ModelVsReal read it.
+        docs = [d for d in pb_list_all(token, DOCUMENTS_COLLECTION, sort="uploaded_at")
+                if d.get("group_key") in OTHER_EXTRA_GROUPS or d.get("group_key") in NONWISE_ALSO]
+        items = []
+        for d in docs:
+            if d.get("group_key") in NONWISE_ALSO:
+                d = {**d, "group_key": "other-nonwise", "_freight": True}
+            ex = d.get("extracted") or {}
+            day = ex.get("booked_date") or ex.get("invoice_date") or f"{d.get('month')}-01"
+            items.append({"id": d["id"], "group": d["group_key"], "filename": d.get("filename"), "date": day[:10],
+                          "freight": bool(d.get("_freight")),
+                          "vendor": ex.get("vendor") or "", "number": ex.get("invoice_number") or "",
+                          "description": ex.get("description") or ex.get("summary") or "",
+                          "total": ex.get("total"), "currency": (ex.get("currency") or "").upper()})
+        readable = [i for i in items if i["total"] and i["currency"]]
+        if readable:
+            dates = [i["date"] for i in readable]
+            eur_rates_for({PEGGED_CURRENCIES.get(i["currency"], (i["currency"],))[0] for i in readable},
+                          min(dates), max(dates))
+        for i in items:
+            i["eur"] = to_eur(i["total"], i["currency"], i["date"]) if i["total"] and i["currency"] else None
+            i["counted"] = round(i["eur"] * OTHER_EXTRA_GROUPS[i["group"]]["share"], 2) if i["eur"] is not None else None
+        per = {}
+
+        def bucket(y):
+            return per.setdefault(y, {"year": y, "paid": 0.0, "receipts": 0.0, "home": 0.0, "homeCounted": 0.0,
+                                      "nonWise": 0.0})
+        for r in other.get("years") or []:
+            if r["currency"] == "EUR":
+                b = bucket(r["year"])
+                b["paid"] += r["paid"]
+                b["receipts"] += r["invoiced"]
+        for r in pb_list_all(token, HOME_COLLECTION):
+            if not r.get("amount"):
+                continue
+            cur, day = (r.get("currency") or "EUR").upper(), _home_rate_day(int(r["year"]), int(r["month"]))
+            eur_rates_for({PEGGED_CURRENCIES.get(cur, (cur,))[0]}, day, day)
+            e = to_eur(r["amount"], cur, day)
+            if e is None:
+                continue
+            b = bucket(str(int(r["year"])))
+            b["home"] += e
+            b["homeCounted"] += e * HOME_SHARE
+        for i in items:
+            if i["counted"] is None:
+                continue
+            b = bucket(i["date"][:4])
+            if i["group"] == "other-home":
+                b["home"] += i["eur"]
+                b["homeCounted"] += i["counted"]
+            else:
+                b["nonWise"] += i["counted"]
+        years = []
+        for y in sorted(per):
+            b = per[y]
+            b["balance"] = b["paid"] - b["receipts"]
+            b["total"] = b["balance"] - b["homeCounted"] - b["nonWise"]
+            years.append({k: (round(v, 2) if isinstance(v, float) else v) for k, v in b.items()})
+        all_years = {k: round(sum(y[k] for y in years), 2) for k in
+                     ("paid", "receipts", "balance", "home", "homeCounted", "nonWise", "total")}
+        return json_response({"currency": "EUR", "years": years, "all": all_years,
+                              "documents": sorted(items, key=lambda i: i["date"], reverse=True),
+                              "notRead": sum(1 for i in items if i["eur"] is None)})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+# Home expenses table (per the user 2026-11-11): one amount + one bill per
+# category and month; 50% of the total counts against the Other expenses balance.
+HOME_COLLECTION = "home_expenses"
+HOME_CATEGORIES = ["rent", "municipality", "electricity", "water", "gas", "mobile", "internet"]
+HOME_LABELS = {"rent": "Rent", "municipality": "Municipality bill", "electricity": "Electricity", "water": "Water",
+               "gas": "Gas", "mobile": "Mobile", "internet": "Internet"}
+HOME_SHARE = 0.5
+HOME_CURRENCY = "ILS"  # home bills are always in shekels (per the user 2026-11-11)
+
+
+def _home_rate_day(year, month):
+    """ECB rate day for a home bill: the 15th of its month, or the last
+    published business day for a month still in the future (rent entered ahead)."""
+    today = datetime.now(LOCAL_TZ).date() - timedelta(days=1)
+    return min(f"{year}-{month:02d}-15", f"{today:%Y-%m-%d}")
+
+
+def _home_cell(token, year, month, category):
+    found = pb_list_all(token, HOME_COLLECTION,
+                        filter_str=f"year = {year} && month = {month} && category = {json.dumps(category)}")
+    return found[0] if found else None
+
+
+def _home_save(token, year, month, category, update, cell=None):
+    if cell:
+        op = {"method": "PATCH", "url": f"/api/collections/{HOME_COLLECTION}/records/{cell['id']}", "body": update}
+    else:
+        op = {"method": "POST", "url": f"/api/collections/{HOME_COLLECTION}/records",
+              "body": {"year": year, "month": month, "category": category, "currency": HOME_CURRENCY, **update}}
+    pb_batch(token, [op])
+
+
+def GetHomeExpenses(request):
+    """?year=YYYY - the home-expenses table: per category and month amount,
+    currency, EUR value (ECB rate of the 15th) and the attached bill."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    try:
+        year = int((getattr(request, "args", {}) or {}).get("year") or datetime.now(LOCAL_TZ).year)
+        token = pb_authenticate()
+        rows = pb_list_all(token, HOME_COLLECTION, filter_str=f"year = {year}")
+        docs = {d["id"]: d for d in pb_list_all(token, DOCUMENTS_COLLECTION, filter_str='group_key ~ "home|"')}
+        cells = {}
+        for r in rows:
+            cur = (r.get("currency") or "EUR").upper()
+            day = _home_rate_day(year, int(r["month"]))
+            eur = None
+            if r.get("amount"):
+                try:
+                    eur_rates_for({PEGGED_CURRENCIES.get(cur, (cur,))[0]}, day, day)
+                except requests.RequestException:
+                    pass
+                eur = to_eur(r["amount"], cur, day)
+            d = docs.get(r.get("doc_id") or "")
+            ex = (d or {}).get("extracted") or {}
+            cells.setdefault(r["category"], {})[str(int(r["month"]))] = {
+                "amount": r.get("amount") or 0, "currency": cur, "eur": eur,
+                "docId": d["id"] if d else "", "filename": (d or {}).get("filename") or "",
+                "billTotal": ex.get("total"), "billCurrency": (ex.get("currency") or "").upper()}
+        return json_response({"year": year, "share": HOME_SHARE,
+                              "categories": [{"id": c, "label": HOME_LABELS[c]} for c in HOME_CATEGORIES],
+                              "cells": cells})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)
+
+
+def SetHomeExpense(request):
+    """{year, month, category, amount, currency, removeBill?} (+ key) - edits one cell."""
+    if request.method == "OPTIONS":
+        return "", 204, cors_headers()
+    body = request.get_json(silent=True) or {}
+    if not _key_ok(request, body):
+        return json_response({"error": "Unauthorized"}, 401)
+    try:
+        year, month, category = int(body.get("year")), int(body.get("month")), body.get("category")
+        if category not in HOME_CATEGORIES or not 1 <= month <= 12:
+            return json_response({"error": "Unknown category or month"}, 400)
+        token = pb_authenticate()
+        cell = _home_cell(token, year, month, category)
+        update = {}
+        if "amount" in body:
+            update["amount"] = float(body.get("amount") or 0)
+        update["currency"] = HOME_CURRENCY
+        if body.get("removeBill") and cell and cell.get("doc_id"):
+            for d in pb_list_all(token, DOCUMENTS_COLLECTION, filter_str=f"id = {json.dumps(cell['doc_id'])}"):
+                _delete_document(token, d)
+            update["doc_id"] = ""
+        _home_save(token, year, month, category, update, cell)
+        return json_response({"ok": True})
+    except Exception as exc:
+        return json_response({"error": str(exc), "type": exc.__class__.__name__}, 500)

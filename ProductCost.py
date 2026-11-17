@@ -449,7 +449,7 @@ def sb_per_unit_monthly(token, months):
 
 # ---------- endpoint ----------
 
-def product_cost(sku="", asin=""):
+def product_cost(sku="", asin="", period="last_3m"):
     token = pb_authenticate()
     mapping = pb_list_all(token, "asin_group_mapping", f"sku = {json.dumps(sku)}" if sku else f"asin = {json.dumps(asin)}")
     if not mapping:
@@ -458,7 +458,7 @@ def product_cost(sku="", asin=""):
     asin = row["asin"]
     dept = "pareo" if "PAREO" in (row.get("group") or "").upper() else "home"
     cost = landed_cost(token, row.get("ean"))
-    months = last_full_months(3)
+    months = period_months(period if period in PERIODS else "last_3m")
     p_spend, p_sales = product_tacos(token, asin, months)
     d_spend, d_sales = department_tacos(token, months)
     prices = current_prices(token, asin)
@@ -544,7 +544,7 @@ def product_cost(sku="", asin=""):
             m[key]["margin"] = round((base - ad) / m["netPrice"] * 100, 1) if m["netPrice"] else None
         markets.append(m)
     return {"sku": row["sku"], "asin": asin, "ean": row.get("ean"), "department": dept,
-            "months": [f"{y}-{m:02d}" for y, m in reversed(months)],
+            "months": [f"{y}-{m:02d}" for y, m in sorted(months)], "period": period,
             "cost": cost, "markets": markets,
             "assumptions": {"regions": {k: {"dutyPct": v[0] * 100, "freight": v[1]} for k, v in REGION_IMPORT.items()}}}
 
@@ -552,7 +552,8 @@ def product_cost(sku="", asin=""):
 def GetProductCost(request):
     args = getattr(request, "args", {}) or {}
     try:
-        res = product_cost((args.get("sku") or "").strip(), (args.get("asin") or "").strip())
+        res = product_cost((args.get("sku") or "").strip(), (args.get("asin") or "").strip(),
+                           (args.get("period") or "last_3m").strip())
         return _json(res, 404 if "error" in res else 200)
     except Exception as exc:
         return _json({"error": str(exc)}, 500)
@@ -568,12 +569,14 @@ OTHER_VAT = {"nl": 0.21, "be": 0.21, "ie": 0.23, "se": 0.25, "pl": 0.23, "ca": 0
 FEE_PROXY = {"ca": "US", "mx": "US", "nl": "DE", "be": "DE", "ie": "DE", "se": "DE", "pl": "DE"}
 ADS_CODE = {"us": "US", "uk": "UK", "de": "DE", "fr": "FR", "it": "IT", "es": "ES", "nl": "NL", "be": "BE",
             "se": "SE", "pl": "PL", "ie": "IE", "ca": "CA", "mx": "MX"}
-PERIODS = {"last_month": "Last month", "last_3m": "Last 3 months", "ytd": "This year",
+PERIODS = {"this_month": "This month", "last_month": "Last month", "last_3m": "Last 3 months", "ytd": "This year",
            "last_12m": "Last 12 months", "last_year": "Last year"}
 
 
 def period_months(period):
     today = date.today()
+    if period == "this_month":
+        return [(today.year, today.month)]
     if period == "last_month":
         return last_full_months(1)
     if period == "last_3m":

@@ -62,6 +62,7 @@ MIN_TARGETS = {
 USD_PEGS = {"AED": 3.6725, "SAR": 3.75}
 BUSINESS_GROUPS = {"VELVET", "COVER_BOHO", "COVER_VINTAGE", "STUFFED"}  # + every PAREO_* group
 BUSINESS_MPS = ["US", "CA", "MX", "UK", "DE", "FR", "IT", "ES"]  # NL/BE/PL/SE/IE/JP reject B2B offers
+BUSINESS_FX_MPS, BUSINESS_FX_TOLERANCE = {"CA", "MX"}, 0.03
 FALLBACK_RATES = {("EUR", "PLN"): 4.25, ("EUR", "SEK"): 11.0, ("EUR", "USD"): 1.12,
                   ("USD", "CAD"): 1.38, ("USD", "MXN"): 18.5}
 
@@ -249,8 +250,12 @@ def run_check(fees_override=None, pb_token=None, prev_formula=None):
     for mp in BUSINESS_MPS if ours else []:
         rows = {k: v for k, v in prices(mp).items() if v.get("buyable") and v.get("asin") in ours}
         missing = sorted(k for k, v in rows.items() if v.get("b2b") is None)
+        # CA/MX normal prices move with the exchange rate every day (BIL) while the
+        # B2B price is fixed - only gaps above 3% count there (per the user 2026-11-11).
+        tol = (lambda p: p * BUSINESS_FX_TOLERANCE) if mp in BUSINESS_FX_MPS else (lambda p: 0.005)
         differ = sorted(({"sku": k, "price": v["price"], "b2b": v["b2b"]} for k, v in rows.items()
-                         if v.get("b2b") is not None and abs(v["b2b"] - v["price"]) > 0.005), key=lambda x: x["sku"])
+                         if v.get("b2b") is not None and abs(v["b2b"] - v["price"]) > tol(v["price"])),
+                        key=lambda x: x["sku"])
         result["business"][mp] = {"checked": len(rows), "missing": missing, "differ": differ}
     if pb_token:
         prices("UK")

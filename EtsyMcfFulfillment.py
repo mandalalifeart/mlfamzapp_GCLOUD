@@ -218,7 +218,13 @@ def build_fulfillment_plan(receipts, sku_map, mcf_status_map):
         # Etsy's own receipt "status" field (e.g. "Paid", "Canceled") -
         # a cancelled order isn't pending, so it's dropped entirely rather
         # than showing up as "not fulfillable".
-        if receipt.get("status") == "Canceled":
+        if receipt.get("status") in ("Canceled", "Fully Refunded"):
+            continue
+        # Only orders the buyer has actually paid (per the user 2026-11-15:
+        # receipt 4234101640 was "Payment Processing" / is_paid=false and the
+        # wet run tried to create an MCF order for it). Skipped silently -
+        # it comes back on a later run once Etsy marks it Paid.
+        if not receipt.get("is_paid") or receipt.get("status") in ("Payment Processing", "Open", "Unpaid"):
             continue
         # Already has a real MCF order created for it (by hand, by
         # CreateMcfOrderForReceipt, or by a previous wet run) - Amazon
