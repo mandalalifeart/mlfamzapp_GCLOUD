@@ -45,10 +45,12 @@ DEFAULT = {
     },
     "context": ["lamp", "lamps", "light", "lights", "night light", "nightlight", "lampshade", "shade", "lantern", "bedside",
                 "table lamp", "decor", "lampe", "lampen", "leuchte", "licht", "nachtlicht", "tischlampe", "nachttischlampe",
-                "lampenschirm", "deko", "lumière", "lumiere", "veilleuse", "lampada", "lampade", "luce", "lume", "abat-jour",
+                "lampenschirm", "deko", "lumière", "lumiere", "veilleuse", "lampada", "lampade", "luce", "abat-jour",
                 "lámpara", "lampara", "luz", "decoración", "decorazione", "décoration", "decoration", "led"],
     "marketplaces": ["US", "UK", "DE", "FR", "IT", "ES"],
-    "exclude": ["drink", "drink mix", "pimax", "headset", "powder", "on the go"],
+    "exclude": ["drink", "drink mix", "pimax", "headset", "powder", "on the go", "crystal light", "packets", "pitcher",
+                "lemonade", "punch", "coconut milk", "milk", "chanel", "cocoa", "hot coco", "deodorant", "body wash",
+                "ceiling", "chandelier", "chandeliers", "decke", "deckenleuchte", "techo", "colgante", "pendant"],
 }
 TERM_RE = re.compile(r'"searchTerm"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
