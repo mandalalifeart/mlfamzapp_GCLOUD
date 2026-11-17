@@ -281,6 +281,13 @@ IDEAS = [
      "price": "$25-60", "bundle": "Mushroom lamp + Magic535 mushroom pouf cover",
      "notes": "Fits the mushroom collection (Magic535 pouf). Search tracking per the user 2026-11-17.",
      "findings": ["Search tracking started 2026-11-17 (NewProductKeywords) - results after the first weekly run."]},
+    {"id": "mushroom-wall-hooks", "pool": "addon", "name": "Mushroom wall hooks (hand-painted cast iron / resin, set of 3)",
+     "keywords": ["mushroom wall hooks", "mushroom hooks", "mushroom key holder for wall", "mushroom coat hooks"],
+     "match": ["mushroom", "hook"],
+     "theme": ["mushroom", "toadstool", "fungi"],
+     "price": "$18-25 set of 3", "bundle": "Hook set as an add-on to the Magic535 mushroom pouf / mushroom lamp",
+     "notes": "User's photo 2026-11-17: red / yellow / green toadstool caps with white dots, white stem curving into the hook, distressed hand-painted look (cast iron or resin), for keys / bags / scarves.",
+     "images": ["/research/mushroom_hooks_1.jpg"]},
 ]
 
 
