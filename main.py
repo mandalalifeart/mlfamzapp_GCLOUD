@@ -388,6 +388,21 @@ def GetWiseSupplierBalances(request):
     return _impl(request)
 
 
+def GetWiseOtherExpensesTotal(request):
+    from WiseLedger import GetWiseOtherExpensesTotal as _impl
+    return _impl(request)
+
+
+def GetHomeExpenses(request):
+    from WiseLedger import GetHomeExpenses as _impl
+    return _impl(request)
+
+
+def SetHomeExpense(request):
+    from WiseLedger import SetHomeExpense as _impl
+    return _impl(request)
+
+
 def SetWiseSupplierOpening(request):
     from WiseLedger import SetWiseSupplierOpening as _impl
     return _impl(request)
@@ -934,4 +949,29 @@ def GetGrowthData(request):
 
 def SendEtsyWeekly(request):
     from EtsyWeekly import SendEtsyWeekly as handler
+    return handler(request)
+
+
+def EbayAccountDeletion(request):
+    from EbayAccountDeletion import EbayAccountDeletion as handler
+    return handler(request)
+
+
+def EbayOAuthCallback(request):
+    from EbayOAuth import EbayOAuthCallback as handler
+    return handler(request)
+
+
+def EbayPrivacy(request):
+    from EbayOAuth import EbayPrivacy as handler
+    return handler(request)
+
+
+def RunEbayMcfFulfillment(request):
+    from EbayMcfFulfillment import RunEbayMcfFulfillment as handler
+    return handler(request)
+
+
+def SendNewProductKeywords(request):
+    from NewProductKeywords import SendNewProductKeywords as handler
     return handler(request)

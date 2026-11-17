@@ -252,6 +252,32 @@ IDEAS = [
      "theme": ["boho", "bohemian", "ceramic", "brass", "mushroom", "hand painted", "vintage", "moroccan", "floral"],
      "price": "$15-25 set", "bundle": "Knob set as a gift add-on (e.g. mushroom knobs + mushroom pouf cover)",
      "notes": "Bundle component - Indian ceramic / brass knobs; not fabric, may need another supplier."},
+    # Lamps (per the user 2026-11-17, moved here from the to-do list): not fabric -
+    # other suppliers. Ranked in Tools & Home Improvement on Amazon US, so they
+    # use "categories". Photos in amazon-report-app/public/research/.
+    {"id": "crystal-lamp", "kind": "lamp", "name": "Crystal lamp (raw crystals on a wooden LED base / amethyst ring night light)",
+     "keywords": ["crystal lamp", "amethyst crystal lamp", "crystal night light", "selenite lamp"], "match": ["crystal", "lamp"],
+     "theme": ["crystal", "amethyst", "citrine", "quartz", "selenite", "gemstone", "healing"],
+     "categories": ["Tools & Home Improvement", "Home & Kitchen"],
+     "price": "$25-45", "bundle": "Crystal lamp + matching crystal-tone pillow cover / pouf",
+     "notes": "User's photos: raw crystal clusters (citrine, clear quartz, amethyst, mixed) on round wooden LED bases; a faceted quartz point on a wooden LED base; a pink/orange crystal sphere bedside lamp; amethyst chips in a black ring (USB, 3 colours + dimmer).",
+     "images": ["/research/crystal_1.jpg", "/research/crystal_2.jpg", "/research/crystal_3.jpg", "/research/crystal_4.jpg"],
+     "findings": ["Searches (Brand Analytics, week 8-14 Nov 2026, rank = search popularity, lower = more searched): UK crystal lamp #68,619, crystal bedside lamps #267,519, crystal table lamp / selenite lamp #292,091; DE amethyst lampe #486,963, crystal lamp #503,526 (salt lamp: UK #3,018, DE #76,933). Weekly tracking: NewProductKeywords.",
+                  "Sales estimate from Best Sellers Rank (rough): US leader Runyangshi amethyst/citrine crystal night lamps (~8 listings, Night-Lights #368, Tools & Home #16k) ~250-450/month per top listing; other raw-crystal lamps a few to ~20/month; selenite lamps a few/month.",
+                  "UK: Caossuixin Natural Crystal Lamp (Night Lights #1,494) ~30-90/month; selenite lamps ~1-2/day. DE: NNOVAT Kristalllampe (Nachtlichter #373) ~1-2/day; amethyst on LED wooden base (Handmade #7.8k) ~1/day - almost the same as photo 1.",
+                  "Verdict so far: small but real niche - test as an add-on product, not a big seller."]},
+    {"id": "coconut-lamp-3", "kind": "lamp", "name": "Lamp with 3 coconut shells (flexible legs or glass / ceramic leg, wood / crystal beads)",
+     "keywords": ["coconut shell lamp", "coconut lamp", "coconut shell table lamp"], "match": ["coconut", "lamp"],
+     "theme": ["coconut"], "categories": ["Tools & Home Improvement", "Home & Kitchen"],
+     "price": "$45-70", "bundle": "With a coconut pendant / single lamp",
+     "notes": "User's idea 2026-11-17: 3 coconut-shell shades on flexible (gooseneck) legs, or a glass / ceramic leg, decorated with wooden or crystal beads. Related to the coconut lamp plan (plans/coconut-lamp-plan.md).",
+     "findings": ["Search tracking started 2026-11-17 (NewProductKeywords) - results after the first weekly run."]},
+    {"id": "mushroom-lamp", "kind": "lamp", "name": "Mushroom lamp (table / night light)",
+     "keywords": ["mushroom lamp", "mushroom night light", "mushroom table lamp"], "match": ["mushroom", "lamp"],
+     "theme": ["mushroom", "toadstool", "fungi"], "categories": ["Tools & Home Improvement", "Home & Kitchen"],
+     "price": "$25-60", "bundle": "Mushroom lamp + Magic535 mushroom pouf cover",
+     "notes": "Fits the mushroom collection (Magic535 pouf). Search tracking per the user 2026-11-17.",
+     "findings": ["Search tracking started 2026-11-17 (NewProductKeywords) - results after the first weekly run."]},
 ]
 
 
@@ -351,14 +377,15 @@ def research_idea(idea, ci, pr, bench, demand):
             c["onTheme"] = any(w in t for w in THEME_WORDS) and not (COLOUR_RE.search(t) and "mushroom" not in COLOUR_RE.sub("", t))
         comps.append(c)
     others = [c for c in comps if not c["ours"]]
-    hk = sorted(c["rank"] for c in others if c["rank"] and c["rankCategory"] == "Home & Kitchen")
-    other_cat = [c for c in others if c["rank"] and c["rankCategory"] != "Home & Kitchen"]
+    cats = idea.get("categories") or ["Home & Kitchen"]
+    hk = sorted(c["rank"] for c in others if c["rank"] and c["rankCategory"] in cats)
+    other_cat = [c for c in others if c["rank"] and c["rankCategory"] not in cats]
     price_vals = [c["price"] for c in others if c["price"]]
     terms = [(t, v) for t, v in demand.items() if all(w in t for w in idea["match"])]
     terms.sort(key=lambda x: -x[1]["impressions"])
     tot = {k: sum(v[k] for _, v in terms) for k in ("impressions", "clicks", "orders")}
     comps.sort(key=lambda c: (c["rank"] is None, c["rank"] or 0))
-    theme_hk = sorted(c["rank"] for c in others if c["onTheme"] and c["rank"] and c["rankCategory"] == "Home & Kitchen")
+    theme_hk = sorted(c["rank"] for c in others if c["onTheme"] and c["rank"] and c["rankCategory"] in cats)
     theme_prices = [c["price"] for c in others if c["onTheme"] and c["price"]]
     return {
         "id": idea["id"], "results": len(comps),
