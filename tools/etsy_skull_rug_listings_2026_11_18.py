@@ -33,7 +33,7 @@ SPECS = {
 ✨ Details:
 • Lightweight, soft rayon - drapes beautifully and dries fast
 • Hand-printed skull / mandala design with tied fringe edges
-• One size, approx. 180 x 115 cm (71 x 45 in)
+• One size, large wrap that fits most
 
 👙 Many ways to wear:
 Knot it as a dress, skirt or halter top, throw it over your shoulders on cool evenings, or use it as a beach or picnic throw.
@@ -52,7 +52,7 @@ Knot it as a dress, skirt or halter top, throw it over your shoulders on cool ev
 ✨ Details:
 • Lightweight rayon fabric with a hand-printed skull / mandala design
 • Tied fringe on the edges for a boho look
-• Approx. 180 x 115 cm (71 x 45 in) - large enough to cover a wall, bed headboard area or window
+• Large size - big enough to cover a wall section, headboard area or window
 
 🏴 Ideas:
 Wall hanging or flag in a bedroom, dorm room, studio, man cave or bar; Halloween decoration; window curtain; festival or camping banner. It also doubles as a beach sarong!
