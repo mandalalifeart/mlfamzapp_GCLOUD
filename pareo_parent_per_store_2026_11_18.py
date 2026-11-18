@@ -27,11 +27,16 @@ APPLY = "--apply" in sys.argv
 CC = next((a.split("=")[1] for a in sys.argv if a.startswith("MP=")), "NL")
 LANG = {"NL": "nl_NL", "FR": "fr_FR", "IT": "it_IT", "ES": "es_ES", "BE": "fr_BE", "SE": "sv_SE", "PL": "pl_PL", "IE": "en_IE"}[CC]
 NEW_PARENT = f"PAREO_PARENT_{CC}"
-DE_KIDS = ["B06Y22LRTP", "B072BB24WX", "B07B921LZY", "B07B939QZK", "B07CBMX9BS", "B07QMQKS5J", "B07Q4FKR8C", "B07Q4FM2CL",
-           "B07Q5JDW16", "B07Q5JHJRJ", "B08GC3B7C1", "B09ZPQT14V", "B09ZPRF5NW", "B0B59W8L1P"]
+# Skull pareo + the 2 kaftans stay standalone (per the user 2026-11-18 "remove the kaftans and the skull")
+DE_KIDS = ["B072BB24WX", "B07B921LZY", "B07B939QZK", "B07CBMX9BS", "B07QMQKS5J", "B07Q4FKR8C", "B07Q4FM2CL",
+           "B07Q5JDW16", "B07Q5JHJRJ", "B08GC3B7C1", "B0B59W8L1P"]
 # colour overrides where the store's value is missing or duplicated inside the family
 COLOR_FIX = {"NL": {"B0B59W8L1P": "Mandala blauw", "B07CBMX9BS": "Zwart wit", "B06Y22LRTP": "Schedel",
-                    "B09ZPQT14V": "Kaftan blauw", "B09ZPRF5NW": "Kaftan paars"}}
+                    "B09ZPQT14V": "Kaftan blauw", "B09ZPRF5NW": "Kaftan paars"},
+             # BE (fr_BE): the FR listings' colour names, Pareo4BlackNew has none in FR
+             "BE": {"B072BB24WX": "Jaipur", "B07B921LZY": "Pushkar", "B07B939QZK": "Jodpur", "B07CBMX9BS": "Noir blanc",
+                    "B07QMQKS5J": "Saphir", "B07Q4FKR8C": "Pourpre", "B07Q4FM2CL": "Demi Bleu", "B07Q5JDW16": "Demi Pourpre",
+                    "B07Q5JHJRJ": "Demi Rouge", "B08GC3B7C1": "Varansi", "B0B59W8L1P": "Bleue"}}
 FABRIC = {"NL": "Rayon", "FR": "Rayonne", "IT": "Rayon", "ES": "Rayón", "BE": "Rayonne", "SE": "Rayon", "PL": "Wiskoza", "IE": "Rayon"}
 SELLER = os.environ["AMAZON_SELLER_ID_EU"]
 KEEP_PARENT = ("brand", "bullet_point", "item_name", "product_description", "recommended_browse_nodes", "condition_type")
@@ -43,7 +48,13 @@ def main():
     mid = m.marketplace_id
     li = ListingsItems(credentials=cred, marketplace=m, timeout=120)
     kw = {} if APPLY else {"mode": "VALIDATION_PREVIEW"}
-    old = li.get_listings_item(SELLER, "PAREO_PARENT", marketplaceIds=[mid], includedData=["attributes"]).payload["attributes"]
+    try:
+        old = li.get_listings_item(SELLER, "PAREO_PARENT", marketplaceIds=[mid], includedData=["attributes"]).payload.get("attributes") or {}
+    except Exception:
+        old = {}
+    if not old.get("item_name") and os.path.exists(f"logs/pareo_parent_{CC}_before_delete_2026_11_18.json"):
+        # old PAREO_PARENT deleted in this store (NL/BE 2026-11-18) - texts from the backup taken before the delete
+        old = json.load(open(f"logs/pareo_parent_{CC}_before_delete_2026_11_18.json"))["attributes"]
     attrs = {k: v for k, v in old.items() if k in KEEP_PARENT}
     attrs.update({"parentage_level": [{"marketplace_id": mid, "value": "parent"}],
                   "child_parent_sku_relationship": [{"marketplace_id": mid, "child_relationship_type": "variation"}],
