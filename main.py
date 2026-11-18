@@ -975,3 +975,8 @@ def RunEbayMcfFulfillment(request):
 def SendNewProductKeywords(request):
     from NewProductKeywords import SendNewProductKeywords as handler
     return handler(request)
+
+
+def SendLgZeroStockAlert(request):
+    from LgStockWatch import SendLgZeroStockAlert as handler
+    return handler(request)
