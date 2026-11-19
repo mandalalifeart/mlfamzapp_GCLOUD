@@ -534,6 +534,28 @@ def cached_ads_and_totals(token, today):
     return ads, totals
 
 
+def seasonal_days_left(asin_sales, stock, today, trailing_months, stock_months, covered_months, max_days=730):
+    """Pareos only (per the user 2026-11-19): days until the stock runs out,
+    selling each coming day at the in-stock rate of the same calendar month
+    last year (the last 3 months' rate where there's no history that far
+    back)."""
+    earliest = min(asin_sales.keys()) if asin_sales else None
+    recent = window_rate(asin_sales, trailing_months, stock_months, covered_months, today)[0]
+    rates = {}
+    left, d = float(stock), 0
+    while d < max_days:
+        day = today + timedelta(days=d)
+        ym = (day.year - 1, day.month)
+        if ym not in rates:
+            rates[ym] = (window_rate(asin_sales, [ym], stock_months, covered_months, today)[0]
+                         if earliest is not None and earliest <= ym else recent)
+        left -= rates[ym]
+        if left < 0:
+            return d
+        d += 1
+    return max_days
+
+
 def recommended_shipment_dates(runouts, today):
     recommended_dates = {}
     for region, lst in runouts.items():
@@ -685,7 +707,12 @@ def GetNextOrderData(request):
                         rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
                                              covered_days[region], today)[0]
                         if rate12 > 0:
-                            entry = (already_covered / rate12, rate12, row["sku"])
+                            days_left = already_covered / rate12
+                            if row["group"].startswith("PAREO"):
+                                days_left = seasonal_days_left(asin_sales, already_covered, today, trailing_months,
+                                                               stock_days[region].get(row["asin"], {}),
+                                                               covered_days[region])
+                            entry = (days_left, rate12, row["sku"])
                             runouts[region].append(entry)
                             # Acacia (PAREO_ACA/ZEN, shipped once a year) vs
                             # Malani - per the user 2026-11-19 each supplier
