@@ -650,11 +650,25 @@ def GetNextOrderData(request):
                 acc += rate
                 if acc >= RUNOUT_SALES_SHARE * total_rate:
                     when = today + timedelta(days=int(days))
+                    out = [r for d, r, _s in lst if d <= 0]
+                    if days <= 0:
+                        recommended_dates[region] = {
+                            "date": when.isoformat(),
+                            "why": (f"Already late: {len(out)} of {len(lst)} selling products are out of stock today "
+                                    f"(Bal + OTW = 0), {round(sum(out) / total_rate * 100)}% of daily sales "
+                                    f"(sales of the last 12 months on in-stock days, {round(total_rate, 1)} units/day "
+                                    f"in total). Ship as soon as possible."),
+                        }
+                        break
                     recommended_dates[region] = {
                         "date": when.isoformat(),
-                        "why": (f"By {when.isoformat()} the first {i + 1} of {len(lst)} products (in run-out order, "
-                                f"last: {sku}) are out of stock = {round(acc / total_rate * 100)}% of daily sales "
-                                f"({round(total_rate, 1)} units/day, 12-month rate, Bal + OTW)."),
+                        "why": (f"{i + 1} of {len(lst)} selling products run out by this date (last one: {sku}); "
+                                f"together they are {round(acc / total_rate * 100)}% of daily sales. "
+                                + (f"{sum(1 for d, _r, _s in lst if d <= 0)} are already out of stock. "
+                                   if any(d <= 0 for d, _r, _s in lst) else "")
+                                + f"Based on Bal + OTW and sales of the last 12 months on in-stock days "
+                                f"({round(total_rate, 1)} units/day in total). Arrive by this date so that no more "
+                                f"than {round(RUNOUT_SALES_SHARE * 100)}% of sales are out of stock."),
                     }
                     break
 
