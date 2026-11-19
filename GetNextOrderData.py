@@ -317,6 +317,7 @@ def sum_window(asin_sales, months):
 
 MIN_IN_STOCK_DAYS = 7
 RUNOUT_SALES_SHARE = 0.10
+ACACIA_GROUP = "PAREO_ACA"   # Acacia's pareos (ACA + ZEN), as on the page
 
 
 def window_rate(asin_sales, months, stock_months, covered_months, today):
@@ -533,6 +534,50 @@ def cached_ads_and_totals(token, today):
     return ads, totals
 
 
+def recommended_shipment_dates(runouts, today):
+    recommended_dates = {}
+    for region, lst in runouts.items():
+        lst.sort()
+        total_rate = sum(r for _d, r, _s in lst)
+        acc = 0.0
+        for i, (days, rate, sku) in enumerate(lst):
+            acc += rate
+            if acc >= RUNOUT_SALES_SHARE * total_rate:
+                when = today + timedelta(days=int(days))
+                out = [r for d, r, _s in lst if d <= 0]
+                if days <= 0:
+                    recommended_dates[region] = {
+                        "date": when.isoformat(),
+                        "why": (f"Already late: {len(out)} of {len(lst)} selling products are out of stock today "
+                                f"(Bal + OTW = 0), {round(sum(out) / total_rate * 100)}% of daily sales "
+                                f"(sales of the last 12 months on in-stock days, {round(total_rate, 1)} units/day "
+                                f"in total). Ship as soon as possible."),
+                    }
+                    break
+                recommended_dates[region] = {
+                    "date": when.isoformat(),
+                    "why": (f"{i + 1} of {len(lst)} selling products run out by this date (last one: {sku}); "
+                            f"together they are {round(acc / total_rate * 100)}% of daily sales. "
+                            + (f"{sum(1 for d, _r, _s in lst if d <= 0)} are already out of stock. "
+                               if any(d <= 0 for d, _r, _s in lst) else "")
+                            + f"Based on Bal + OTW and sales of the last 12 months on in-stock days "
+                            f"({round(total_rate, 1)} units/day in total). Arrive by this date so that no more "
+                            f"than {round(RUNOUT_SALES_SHARE * 100)}% of sales are out of stock."),
+                }
+                break
+
+    # Products behind each date (per the user 2026-11-19 "show me those"):
+    # the ones out of stock now and the ones running out by the date.
+    for region, rec in recommended_dates.items():
+        limit = date.fromisoformat(rec["date"])
+        rec["products"] = [
+            {"sku": sku, "perMonth": round(rate * 30.4, 1),
+             "runOut": (today + timedelta(days=int(d))).isoformat() if d > 0 else None}
+            for d, rate, sku in runouts[region] if today + timedelta(days=int(max(d, 0))) <= limit
+        ]
+    return recommended_dates
+
+
 def _acos(spend, sales):
     return round(100 * spend / sales, 1) if sales else None
 
@@ -612,6 +657,7 @@ def GetNextOrderData(request):
         # daily sales have run out.
         months_12 = trailing_months_with_current(12, today)
         runouts = defaultdict(list)
+        supplier_runouts = {"malani": defaultdict(list), "acacia": defaultdict(list)}
 
         groups = defaultdict(list)
         for row in unique_product_rows(mapping_rows, stats_by_sku):
@@ -639,7 +685,12 @@ def GetNextOrderData(request):
                         rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
                                              covered_days[region], today)[0]
                         if rate12 > 0:
-                            runouts[region].append((already_covered / rate12, rate12, row["sku"]))
+                            entry = (already_covered / rate12, rate12, row["sku"])
+                            runouts[region].append(entry)
+                            # Acacia (PAREO_ACA/ZEN, shipped once a year) vs
+                            # Malani - per the user 2026-11-19 each supplier
+                            # filter gets its own date.
+                            supplier_runouts["acacia" if row["group"] == ACACIA_GROUP else "malani"][region].append(entry)
                     # Per the user (2026-10-03): yearly units (this year to date,
                     # last year, 2 years ago) - every region (GENERAL sums them).
                     item[f"{region}_yearly_sales"] = [
@@ -681,46 +732,8 @@ def GetNextOrderData(request):
 
             groups[row["group"]].append(item)
 
-        recommended_dates = {}
-        for region, lst in runouts.items():
-            lst.sort()
-            total_rate = sum(r for _d, r, _s in lst)
-            acc = 0.0
-            for i, (days, rate, sku) in enumerate(lst):
-                acc += rate
-                if acc >= RUNOUT_SALES_SHARE * total_rate:
-                    when = today + timedelta(days=int(days))
-                    out = [r for d, r, _s in lst if d <= 0]
-                    if days <= 0:
-                        recommended_dates[region] = {
-                            "date": when.isoformat(),
-                            "why": (f"Already late: {len(out)} of {len(lst)} selling products are out of stock today "
-                                    f"(Bal + OTW = 0), {round(sum(out) / total_rate * 100)}% of daily sales "
-                                    f"(sales of the last 12 months on in-stock days, {round(total_rate, 1)} units/day "
-                                    f"in total). Ship as soon as possible."),
-                        }
-                        break
-                    recommended_dates[region] = {
-                        "date": when.isoformat(),
-                        "why": (f"{i + 1} of {len(lst)} selling products run out by this date (last one: {sku}); "
-                                f"together they are {round(acc / total_rate * 100)}% of daily sales. "
-                                + (f"{sum(1 for d, _r, _s in lst if d <= 0)} are already out of stock. "
-                                   if any(d <= 0 for d, _r, _s in lst) else "")
-                                + f"Based on Bal + OTW and sales of the last 12 months on in-stock days "
-                                f"({round(total_rate, 1)} units/day in total). Arrive by this date so that no more "
-                                f"than {round(RUNOUT_SALES_SHARE * 100)}% of sales are out of stock."),
-                    }
-                    break
-
-        # Products behind each date (per the user 2026-11-19 "show me those"):
-        # the ones out of stock now and the ones running out by the date.
-        for region, rec in recommended_dates.items():
-            limit = date.fromisoformat(rec["date"])
-            rec["products"] = [
-                {"sku": sku, "perMonth": round(rate * 30.4, 1),
-                 "runOut": (today + timedelta(days=int(d))).isoformat() if d > 0 else None}
-                for d, rate, sku in runouts[region] if today + timedelta(days=int(max(d, 0))) <= limit
-            ]
+        recommended_dates = recommended_shipment_dates(runouts, today)
+        recommended_by_supplier = {k: recommended_shipment_dates(v, today) for k, v in supplier_runouts.items()}
 
         group_list = []
         for group, items in groups.items():
@@ -737,7 +750,9 @@ def GetNextOrderData(request):
                     items[it["sku"]] = {k: v for k, v in it.items()
                                         if k not in skip and not k.endswith("_balance") and not k.endswith("_balance_parts")}
             return json_response({"status": "success", "items": items,
-                                  "recommendedShipmentDates": recommended_dates, "salesYears": sales_years})
+                                  "recommendedShipmentDates": recommended_dates,
+                                  "recommendedShipmentDatesBySupplier": recommended_by_supplier,
+                                  "salesYears": sales_years})
 
         return json_response({
             "status": "success",
@@ -755,6 +770,7 @@ def GetNextOrderData(request):
             "seasonalYear2Months": year2_months,
             "salesYears": sales_years,
             "recommendedShipmentDates": recommended_dates,
+            "recommendedShipmentDatesBySupplier": recommended_by_supplier,
         })
 
     except Exception as exc:
