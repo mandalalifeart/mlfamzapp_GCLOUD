@@ -315,6 +315,7 @@ def sum_window(asin_sales, months):
 
 
 MIN_IN_STOCK_DAYS = 7
+RUNOUT_SALES_SHARE = 0.10
 
 
 def window_rate(asin_sales, months, stock_months, covered_months, today):
@@ -571,6 +572,15 @@ def GetNextOrderData(request):
         sales_years = [today.year, today.year - 1, today.year - 2]
         total_sales_by_region = fetch_total_sales_by_region_asin(token, today.year)
 
+        # Recommended next-shipment arrival date per region (2026-11-19, the
+        # user's option A, 12-month rate): each product's run-out date = today
+        # + (Bal + OTW) / its daily sales over the last 12 months (in-stock
+        # days only); taking products in run-out order, the recommended date
+        # is when the ones that make up RUNOUT_SALES_SHARE of the region's
+        # daily sales have run out.
+        months_12 = trailing_months_with_current(12, today)
+        runouts = defaultdict(list)
+
         groups = defaultdict(list)
         for row in unique_product_rows(mapping_rows, stats_by_sku):
             stats = stats_by_sku.get(row["sku"]) or stats_by_asin.get(row["asin"]) or {}
@@ -603,6 +613,11 @@ def GetNextOrderData(request):
                 item[f"{region}_seasonal_1yr_source"] = reco["seasonal_1yr_source"]
                 item[f"{region}_seasonal_2yr_source"] = reco["seasonal_2yr_source"]
                 item[f"{region}_reco_debug"] = reco["debug"]
+                if asin_sales and not row.get("end_of_life"):
+                    rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
+                                         covered_days[region], today)[0]
+                    if rate12 > 0:
+                        runouts[region].append((already_covered / rate12, rate12, row["sku"]))
                 # Per the user (2026-10-03): yearly units (this year to date,
                 # last year, 2 years ago) + ad ACOS for the region view.
                 item[f"{region}_yearly_sales"] = [
@@ -626,6 +641,23 @@ def GetNextOrderData(request):
 
             groups[row["group"]].append(item)
 
+        recommended_dates = {}
+        for region, lst in runouts.items():
+            lst.sort()
+            total_rate = sum(r for _d, r, _s in lst)
+            acc = 0.0
+            for i, (days, rate, sku) in enumerate(lst):
+                acc += rate
+                if acc >= RUNOUT_SALES_SHARE * total_rate:
+                    when = today + timedelta(days=int(days))
+                    recommended_dates[region] = {
+                        "date": when.isoformat(),
+                        "why": (f"By {when.isoformat()} the first {i + 1} of {len(lst)} products (in run-out order, "
+                                f"last: {sku}) are out of stock = {round(acc / total_rate * 100)}% of daily sales "
+                                f"({round(total_rate, 1)} units/day, 12-month rate, Bal + OTW)."),
+                    }
+                    break
+
         group_list = []
         for group, items in groups.items():
             items.sort(key=lambda i: i["sku"])
@@ -647,6 +679,7 @@ def GetNextOrderData(request):
             "seasonalYear1Months": year1_months,
             "seasonalYear2Months": year2_months,
             "salesYears": sales_years,
+            "recommendedShipmentDates": recommended_dates,
         })
 
     except Exception as exc:
