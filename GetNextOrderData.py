@@ -83,7 +83,11 @@ def apply_category_min_order(sku, reco):
 REGION_RECO_CONFIGS = {
     "usa": {"balance": "usa_balance", "otw": "usa_on_the_way", "next": "usa_next_shipment", "sales_marketplaces": ("usa", "ca", "mex")},
     "uk": {"balance": "uk_balance", "otw": "uk_on_the_way", "next": "uk_next_shipment", "sales_marketplaces": ("uk",)},
-    "de": {"balance": "de_balance", "otw": "de_on_the_way", "next": "de_next_shipment", "sales_marketplaces": ("de",)},
+    # DE = the Pan-EU stock (FBA DE + LG + AWD), which serves every EU store,
+    # so its demand is all EU sales except UK (per the user 2026-11-19 - it
+    # was amazon.de only before, about half of the real EU demand).
+    "de": {"balance": "de_balance", "otw": "de_on_the_way", "next": "de_next_shipment",
+           "sales_marketplaces": ("de", "fr", "it", "es", "nl", "be", "se", "pl", "ie")},
     # Added 2026-10-20 per the user; the page hides AU while AU has no sellable stock.
     "au": {"balance": "au_balance", "otw": "au_on_the_way", "next": "au_next_shipment", "sales_marketplaces": ("au",)},
     # Added 2026-10-30 per the user; collapsed by default on the page. JP
@@ -432,11 +436,12 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
 # Ads countries per Next Order region - same scope as each region's sales
 # marketplaces in REGION_RECO_CONFIGS (USA folds in CA/MX; DE and UK are
 # single marketplaces). Added 2026-10-03 per the user (ACOS per product).
-REGION_ADS_COUNTRIES = {"usa": ("US", "CA", "MX"), "de": ("DE",), "uk": ("UK", "GB"), "au": ("AU",), "jp": ("JP",)}
+REGION_ADS_COUNTRIES = {"usa": ("US", "CA", "MX"), "de": ("DE", "FR", "IT", "ES", "NL", "BE", "SE", "PL", "IE"), "uk": ("UK", "GB"), "au": ("AU",), "jp": ("JP",)}
 # Only used to put CA/MX spend+sales on the USD scale before taking the
 # spend/sales ratio - ACOS itself is unit-free, so an approximate rate only
 # shifts the weighting of these tiny marketplaces, never a single-currency ACOS.
-APPROX_TO_USD = {"USD": 1.0, "CAD": 0.73, "MXN": 0.055, "EUR": 1.0, "GBP": 1.0, "AUD": 1.0, "JPY": 1.0}
+APPROX_TO_USD = {"USD": 1.0, "CAD": 0.73, "MXN": 0.055, "EUR": 1.0, "GBP": 1.0, "AUD": 1.0, "JPY": 1.0,
+                 "SEK": 0.087, "PLN": 0.23}   # SEK/PLN onto the EUR scale of the DE (EU) region
 
 
 def fetch_ads_acos_by_region_asin(token, year, recent_since):
@@ -487,7 +492,7 @@ def fetch_ads_acos_by_region_asin(token, year, recent_since):
     return out
 
 
-REGION_TRAFFIC_MARKETPLACES = {"usa": ("us", "ca", "mx"), "de": ("de",), "uk": ("uk",), "au": ("au",), "jp": ("jp",)}
+REGION_TRAFFIC_MARKETPLACES = {"usa": ("us", "ca", "mx"), "de": ("de", "fr", "it", "es", "nl", "be", "se", "pl", "ie"), "uk": ("uk",), "au": ("au",), "jp": ("jp",)}
 
 
 def fetch_total_sales_by_region_asin(token, year):
