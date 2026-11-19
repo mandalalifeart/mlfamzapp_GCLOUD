@@ -539,70 +539,114 @@ def cached_ads_and_totals(token, today):
     return ads, totals
 
 
-def seasonal_days_left(asin_sales, stock, today, trailing_months, stock_months, covered_months, max_days=730):
-    """Pareos only (per the user 2026-11-19): days until the stock runs out,
-    selling each coming day at the in-stock rate of the same calendar month
-    last year (the last 3 months' rate where there's no history that far
-    back)."""
+def monthly_rate_fn(asin_sales, today, trailing_months, stock_months, covered_months, seasonal):
+    """Daily sales rate of a product for a coming (year, month). Pareos
+    (seasonal, per the user 2026-11-19): the in-stock rate of the same month
+    last year, the last 3 months' rate where there's no history that far
+    back. Everything else: the 12-month in-stock rate."""
+    rate12 = window_rate(asin_sales, trailing_months_with_current(12, today), stock_months, covered_months, today)[0]
+    if not seasonal:
+        return lambda ym: rate12, rate12
     earliest = min(asin_sales.keys()) if asin_sales else None
     recent = window_rate(asin_sales, trailing_months, stock_months, covered_months, today)[0]
-    rates = {}
+    cache = {}
+
+    def rate(ym):
+        prev = (ym[0] - 1, ym[1])
+        if prev not in cache:
+            cache[prev] = (window_rate(asin_sales, [prev], stock_months, covered_months, today)[0]
+                           if earliest is not None and earliest <= prev else recent)
+        return cache[prev]
+    return rate, rate12
+
+
+def days_until_empty(stock, rate, today, max_days=730):
     left, d = float(stock), 0
     while d < max_days:
         day = today + timedelta(days=d)
-        ym = (day.year - 1, day.month)
-        if ym not in rates:
-            rates[ym] = (window_rate(asin_sales, [ym], stock_months, covered_months, today)[0]
-                         if earliest is not None and earliest <= ym else recent)
-        left -= rates[ym]
+        left -= rate((day.year, day.month))
         if left < 0:
             return d
         d += 1
     return max_days
 
 
-def recommended_shipment_dates(runouts, today):
+def recommended_shipment_dates(runouts, today, max_days=730):
+    """Per the user 2026-11-19: recommended arrival = the first day on which
+    the products already out of stock make up RUNOUT_SALES_SHARE of the
+    MONEY the region sells that day - each product counted at units/day of
+    that month (pareos seasonal) x its current price, since a pouf cover
+    earns 2-3x a pareo."""
     recommended_dates = {}
     for region, lst in runouts.items():
-        lst.sort()
-        total_rate = sum(r for _d, r, _s in lst)
-        acc = 0.0
-        for i, (days, rate, sku) in enumerate(lst):
-            acc += rate
-            if acc >= RUNOUT_SALES_SHARE * total_rate:
-                when = today + timedelta(days=int(days))
-                out = [r for d, r, _s in lst if d <= 0]
-                if days <= 0:
-                    recommended_dates[region] = {
-                        "date": when.isoformat(),
-                        "why": (f"Already late: {len(out)} of {len(lst)} selling products are out of stock today "
-                                f"(Bal + OTW = 0), {round(sum(out) / total_rate * 100)}% of daily sales "
-                                f"(sales of the last 12 months on in-stock days, {round(total_rate, 1)} units/day "
-                                f"in total). Ship as soon as possible."),
-                    }
-                    break
-                recommended_dates[region] = {
-                    "date": when.isoformat(),
-                    "why": (f"{i + 1} of {len(lst)} selling products run out by this date (last one: {sku}); "
-                            f"together they are {round(acc / total_rate * 100)}% of daily sales. "
-                            + (f"{sum(1 for d, _r, _s in lst if d <= 0)} are already out of stock. "
-                               if any(d <= 0 for d, _r, _s in lst) else "")
-                            + f"Based on Bal + OTW and sales of the last 12 months on in-stock days "
-                            f"({round(total_rate, 1)} units/day in total). Arrive by this date so that no more "
-                            f"than {round(RUNOUT_SALES_SHARE * 100)}% of sales are out of stock."),
-                }
+        if not lst:
+            continue
+        lst.sort(key=lambda e: e["days"])
+        found = None
+        for d in range(max_days):
+            day = today + timedelta(days=d)
+            ym = (day.year, day.month)
+            total = sum(e["rate"](ym) * e["price"] for e in lst)
+            out = [e for e in lst if e["days"] <= d]
+            out_value = sum(e["rate"](ym) * e["price"] for e in out)
+            if total > 0 and out_value >= RUNOUT_SALES_SHARE * total:
+                found = (d, day, out, out_value, total)
                 break
-
-    # Products behind each date (per the user 2026-11-19 "show me those"):
-    # the ones out of stock now and the ones running out by the date.
-    for region, rec in recommended_dates.items():
-        limit = date.fromisoformat(rec["date"])
-        rec["products"] = [
-            {"sku": sku, "perMonth": round(rate * 30.4, 1),
-             "runOut": (today + timedelta(days=int(d))).isoformat() if d > 0 else None}
-            for d, rate, sku in runouts[region] if today + timedelta(days=int(max(d, 0))) <= limit
-        ]
+        if not found:
+            continue
+        d, day, out, out_value, total = found
+        cur = lst[0]["currency"]
+        share = round(out_value / total * 100)
+        now_out = sum(1 for e in lst if e["days"] <= 0)
+        if d == 0:
+            why = (f"Already late: {len(out)} of {len(lst)} selling products are out of stock today (Bal + OTW = 0), "
+                   f"{share}% of the sales value of this month ({round(total * 30.4):,} {cur}/month at current prices). "
+                   f"Ship as soon as possible.")
+        else:
+            why = (f"By this date {len(out)} of {len(lst)} selling products are out of stock"
+                   + (f" ({now_out} already now)" if now_out else "")
+                   + f" = {share}% of the sales value expected in {day.strftime('%b %Y')} "
+                   f"({round(total * 30.4):,} {cur}/month at current prices). Sales value = units/day x price, so a "
+                   f"pouf cover counts 2-3x a pareo; pareos at last year's sales of that month, other products at "
+                   f"their 12-month average (in-stock days). Arrive by this date so that no more than "
+                   f"{round(RUNOUT_SALES_SHARE * 100)}% of sales value is out of stock.")
+        ym = (day.year, day.month)
+        recommended_dates[region] = {
+            "date": day.isoformat(),
+            "why": why,
+            # Products behind the date (per the user 2026-11-19 "show me those")
+            "products": [
+                {"sku": e["sku"], "perMonth": round(e["rate"](ym) * 30.4, 1), "price": e["price"],
+                 "valuePerMonth": round(e["rate"](ym) * e["price"] * 30.4),
+                 "runOut": (today + timedelta(days=int(e["days"]))).isoformat() if e["days"] > 0 else None}
+                for e in out
+            ],
+        }
     return recommended_dates
+
+
+def latest_prices(token):
+    """{price_history marketplace: {asin: latest price}}."""
+    out = defaultdict(dict)
+    since = {}
+    page = 1
+    while True:
+        r = requests.get(f"{POCKETBASE_URL}/api/collections/price_history/records", headers={"Authorization": token},
+                         params={"perPage": 500, "page": page, "fields": "marketplace,asin,price,since"}, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        for x in data.get("items", []):
+            k = (x.get("marketplace"), x.get("asin"))
+            if x.get("price") and (k not in since or (x.get("since") or "") > since[k]):
+                since[k] = x.get("since") or ""
+                out[k[0]][k[1]] = float(x["price"])
+        if page >= data.get("totalPages", 1):
+            break
+        page += 1
+    return out
+
+
+REGION_PRICE_MP = {"usa": ("US", "USD"), "de": ("DE", "EUR"), "uk": ("UK", "GBP"), "au": ("AU", "AUD"), "jp": ("JP", "JPY")}
 
 
 def _acos(spend, sales):
@@ -684,6 +728,7 @@ def GetNextOrderData(request):
         # daily sales have run out.
         months_12 = trailing_months_with_current(12, today)
         runouts = defaultdict(list)
+        prices = latest_prices(token) if "reco" in parts else {}
         supplier_runouts = {"malani": defaultdict(list), "acacia": defaultdict(list)}
 
         groups = defaultdict(list)
@@ -712,12 +757,13 @@ def GetNextOrderData(request):
                         rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
                                              covered_days[region], today)[0]
                         if rate12 > 0:
-                            days_left = already_covered / rate12
-                            if row["group"].startswith("PAREO"):
-                                days_left = seasonal_days_left(asin_sales, already_covered, today, trailing_months,
-                                                               stock_days[region].get(row["asin"], {}),
-                                                               covered_days[region])
-                            entry = (days_left, rate12, row["sku"])
+                            rate_fn, _r12 = monthly_rate_fn(asin_sales, today, trailing_months,
+                                                            stock_days[region].get(row["asin"], {}), covered_days[region],
+                                                            row["group"].startswith("PAREO"))
+                            mp, cur = REGION_PRICE_MP[region]
+                            entry = {"sku": row["sku"], "group": row["group"], "rate": rate_fn, "currency": cur,
+                                     "price": prices.get(mp, {}).get(row["asin"]),
+                                     "days": days_until_empty(already_covered, rate_fn, today)}
                             runouts[region].append(entry)
                             # Acacia (PAREO_ACA/ZEN, shipped once a year) vs
                             # Malani - per the user 2026-11-19 each supplier
@@ -764,6 +810,17 @@ def GetNextOrderData(request):
 
             groups[row["group"]].append(item)
 
+        # Products without a price: the median price of their group in that region.
+        for region, lst in runouts.items():
+            by_group = defaultdict(list)
+            for e in lst:
+                if e["price"]:
+                    by_group[e["group"]].append(e["price"])
+            every = sorted(p for v in by_group.values() for p in v) or [1.0]
+            for e in lst:
+                if not e["price"]:
+                    g = sorted(by_group.get(e["group"]) or every)
+                    e["price"] = g[len(g) // 2]
         recommended_dates = recommended_shipment_dates(runouts, today)
         recommended_by_supplier = {k: recommended_shipment_dates(v, today) for k, v in supplier_runouts.items()}
 
