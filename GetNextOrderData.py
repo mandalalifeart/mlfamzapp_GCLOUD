@@ -1,3 +1,4 @@
+import time
 import calendar
 import json
 import os
@@ -515,6 +516,23 @@ def fetch_total_sales_by_region_asin(token, year):
     return out
 
 
+_ADS_CACHE = {}
+
+
+def cached_ads_and_totals(token, today):
+    """Ads ACOS + total sales per region/ASIN, cached 10 minutes in the
+    long-running local server (the ads read takes ~14 s)."""
+    key = today.isoformat()
+    hit = _ADS_CACHE.get(key)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1], hit[2]
+    ads = fetch_ads_acos_by_region_asin(token, today.year, (today - timedelta(days=30)).isoformat())
+    totals = fetch_total_sales_by_region_asin(token, today.year)
+    _ADS_CACHE.clear()
+    _ADS_CACHE[key] = (time.time(), ads, totals)
+    return ads, totals
+
+
 def _acos(spend, sales):
     return round(100 * spend / sales, 1) if sales else None
 
@@ -525,8 +543,20 @@ def GetNextOrderData(request):
     if request.method != "POST":
         return json_response({"error": "Method not allowed"}, 405)
 
+    # The page loads in phases (2026-11-19, per the user): "base" = products
+    # and stock only (fast), "reco" = recommendations for the shown regions
+    # (+ yearly units of every region + the recommended shipment dates),
+    # "extra" = ads ACOS/TACOS for an expanded region only. No "parts" = all
+    # of it, as before.
+    body = request.get_json(silent=True) or {}
+    parts = set(body.get("parts") or ["base", "reco", "extra"])
+    shown = [r for r in (body.get("regions") or list(REGION_RECO_CONFIGS)) if r in REGION_RECO_CONFIGS]
     try:
         token = pb_authenticate()
+        if parts == {"base"}:
+            # Warm the ads cache in the background so expanding a region is quick.
+            import threading
+            threading.Thread(target=lambda: cached_ads_and_totals(token, date.today()), daemon=True).start()
         stats_records = fetch_sku_statistics(token)
         next_positive = {
             rec.get("sku") for rec in stats_records
@@ -561,16 +591,18 @@ def GetNextOrderData(request):
         year1_months = year1_by_region["usa"]
         year2_months = year2_by_region["usa"]
 
+        need_sales = ("reco" in parts) or ("extra" in parts)
         all_sales_by_region = {
-            region: fetch_all_sales_by_asin_month(token, cfg["sales_marketplaces"])
+            region: fetch_all_sales_by_asin_month(token, cfg["sales_marketplaces"]) if need_sales else {}
             for region, cfg in REGION_RECO_CONFIGS.items()
         }
-        from StockDays import load_stock_days
-        stock_days, covered_days = load_stock_days(token)
+        if "reco" in parts:
+            from StockDays import load_stock_days
+            stock_days, covered_days = load_stock_days(token)
 
-        ads_by_region = fetch_ads_acos_by_region_asin(token, today.year, (today - timedelta(days=30)).isoformat())
         sales_years = [today.year, today.year - 1, today.year - 2]
-        total_sales_by_region = fetch_total_sales_by_region_asin(token, today.year)
+        if "extra" in parts:
+            ads_by_region, total_sales_by_region = cached_ads_and_totals(token, today)
 
         # Recommended next-shipment arrival date per region (2026-11-19, the
         # user's option A, 12-month rate): each product's run-out date = today
@@ -590,16 +622,49 @@ def GetNextOrderData(request):
             # Balance = FBA + AWD (+ LG warehouse for DE), per the user
             # 2026-10-03 - rebuilt from the parts so a stale combined field
             # can't disagree; parts are returned for the hover breakdown.
-            for region, parts in BALANCE_PARTS.items():
-                values = {p: stats.get(f"{region}_balance_{p}") or 0 for p in parts}
+            for region, bparts in BALANCE_PARTS.items():
+                values = {p: stats.get(f"{region}_balance_{p}") or 0 for p in bparts}
                 if any(values.values()):
                     item[f"{region}_balance"] = sum(values.values())
                 item[f"{region}_balance_parts"] = values
 
             for region, cfg in REGION_RECO_CONFIGS.items():
+                if "reco" not in parts and "extra" not in parts:
+                    break
                 asin_sales = all_sales_by_region[region].get(row["asin"], {}) if row["asin"] else {}
                 # Reco ignores the Next column (per the user 2026-10-03): Bal + OTW only.
                 already_covered = (item.get(cfg["balance"]) or 0) + (item.get(cfg["otw"]) or 0)
+                if "reco" in parts:
+                    if asin_sales and not row.get("end_of_life"):
+                        rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
+                                             covered_days[region], today)[0]
+                        if rate12 > 0:
+                            runouts[region].append((already_covered / rate12, rate12, row["sku"]))
+                    # Per the user (2026-10-03): yearly units (this year to date,
+                    # last year, 2 years ago) - every region (GENERAL sums them).
+                    item[f"{region}_yearly_sales"] = [
+                        sum(q for (y, _m), q in asin_sales.items() if y == yr) for yr in sales_years
+                    ]
+                if region not in shown:
+                    continue
+                if "extra" in parts:
+                    ads = ads_by_region[region].get(row["asin"]) if row["asin"] else None
+                    item[f"{region}_ads"] = {
+                        "acosYtd": _acos(ads["ytdSpend"], ads["ytdSales"]),
+                        "spendYtd": round(ads["ytdSpend"], 2), "salesYtd": round(ads["ytdSales"], 2),
+                        "acos30d": _acos(ads["recentSpend"], ads["recentSales"]),
+                        "spend30d": round(ads["recentSpend"], 2), "sales30d": round(ads["recentSales"], 2),
+                        "unitsYtd": ads["ytdUnits"], "units30d": ads["recentUnits"],
+                    } if ads else None
+                    # TACOS = ad spend / ALL sales of the product this year (per the user 2026-10-23)
+                    total_sales = total_sales_by_region[region].get(row["asin"], 0.0) if row["asin"] else 0.0
+                    item[f"{region}_tacos"] = {
+                        "tacosYtd": _acos(ads["ytdSpend"] if ads else 0.0, total_sales),
+                        "spendYtd": round(ads["ytdSpend"], 2) if ads else 0.0,
+                        "totalSalesYtd": round(total_sales, 2),
+                    }
+                if "reco" not in parts:
+                    continue
                 reco = compute_region_recommendations(
                     asin_sales, already_covered, region_dates[region], today, trailing_months,
                     year1_by_region[region], year2_by_region[region],
@@ -613,31 +678,6 @@ def GetNextOrderData(request):
                 item[f"{region}_seasonal_1yr_source"] = reco["seasonal_1yr_source"]
                 item[f"{region}_seasonal_2yr_source"] = reco["seasonal_2yr_source"]
                 item[f"{region}_reco_debug"] = reco["debug"]
-                if asin_sales and not row.get("end_of_life"):
-                    rate12 = window_rate(asin_sales, months_12, stock_days[region].get(row["asin"], {}),
-                                         covered_days[region], today)[0]
-                    if rate12 > 0:
-                        runouts[region].append((already_covered / rate12, rate12, row["sku"]))
-                # Per the user (2026-10-03): yearly units (this year to date,
-                # last year, 2 years ago) + ad ACOS for the region view.
-                item[f"{region}_yearly_sales"] = [
-                    sum(q for (y, _m), q in asin_sales.items() if y == yr) for yr in sales_years
-                ]
-                ads = ads_by_region[region].get(row["asin"]) if row["asin"] else None
-                item[f"{region}_ads"] = {
-                    "acosYtd": _acos(ads["ytdSpend"], ads["ytdSales"]),
-                    "spendYtd": round(ads["ytdSpend"], 2), "salesYtd": round(ads["ytdSales"], 2),
-                    "acos30d": _acos(ads["recentSpend"], ads["recentSales"]),
-                    "spend30d": round(ads["recentSpend"], 2), "sales30d": round(ads["recentSales"], 2),
-                    "unitsYtd": ads["ytdUnits"], "units30d": ads["recentUnits"],
-                } if ads else None
-                # TACOS = ad spend / ALL sales of the product this year (per the user 2026-10-23)
-                total_sales = total_sales_by_region[region].get(row["asin"], 0.0) if row["asin"] else 0.0
-                item[f"{region}_tacos"] = {
-                    "tacosYtd": _acos(ads["ytdSpend"] if ads else 0.0, total_sales),
-                    "spendYtd": round(ads["ytdSpend"], 2) if ads else 0.0,
-                    "totalSalesYtd": round(total_sales, 2),
-                }
 
             groups[row["group"]].append(item)
 
@@ -672,11 +712,32 @@ def GetNextOrderData(request):
                     }
                     break
 
+        # Products behind each date (per the user 2026-11-19 "show me those"):
+        # the ones out of stock now and the ones running out by the date.
+        for region, rec in recommended_dates.items():
+            limit = date.fromisoformat(rec["date"])
+            rec["products"] = [
+                {"sku": sku, "perMonth": round(rate * 30.4, 1),
+                 "runOut": (today + timedelta(days=int(d))).isoformat() if d > 0 else None}
+                for d, rate, sku in runouts[region] if today + timedelta(days=int(max(d, 0))) <= limit
+            ]
+
         group_list = []
         for group, items in groups.items():
             items.sort(key=lambda i: i["sku"])
             group_list.append({"group": group, "items": items})
         group_list.sort(key=lambda g: g["group"])
+
+        if "base" not in parts:
+            # Later phases: only the computed fields per SKU, merged by the page.
+            skip = set(STATS_FIELDS) | {"sku", "asin", "upc", "supplier_sku", "end_of_life"}
+            items = {}
+            for g in group_list:
+                for it in g["items"]:
+                    items[it["sku"]] = {k: v for k, v in it.items()
+                                        if k not in skip and not k.endswith("_balance") and not k.endswith("_balance_parts")}
+            return json_response({"status": "success", "items": items,
+                                  "recommendedShipmentDates": recommended_dates, "salesYears": sales_years})
 
         return json_response({
             "status": "success",
