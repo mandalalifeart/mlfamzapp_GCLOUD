@@ -501,7 +501,8 @@ def GetProductResearch(request):
                           "status": (status.get(idea["id"]) or {}).get("status", "idea"),
                           "userNotes": (status.get(idea["id"]) or {}).get("notes", ""),
                           "pool": (status.get(idea["id"]) or {}).get("pool") or default_pool(idea),
-                          "marked": bool((status.get(idea["id"]) or {}).get("marked"))})
+                          "marked": bool((status.get(idea["id"]) or {}).get("marked")),
+                          "calc": (status.get(idea["id"]) or {}).get("calc") or {}})
         ideas.sort(key=lambda i: -((i["score"] or {}).get("score") or -1))
         for n, i in enumerate(ideas, 1):
             i["rank"] = n
@@ -512,6 +513,7 @@ def GetProductResearch(request):
 
 
 POOLS = ("main", "option", "addon", "ready")
+CALC_KEYS = ("price", "cost", "freight", "dutyPct", "referralPct", "fba", "adsPct", "returnsPct")
 
 
 def default_pool(idea):
@@ -542,6 +544,9 @@ def SetProductResearchStatus(request):
             cur["pool"] = body["pool"]
         if body.get("marked") is not None:  # per the user 2026-11-17: mark the ideas we go for
             cur["marked"] = bool(body["marked"])
+        if isinstance(body.get("calc"), dict):  # profit calculator inputs (2026-11-20, per the user)
+            cur["calc"] = {k: float(v) for k, v in body["calc"].items()
+                           if k in CALC_KEYS and isinstance(v, (int, float, str)) and str(v).strip() != ""}
         status[idea_id] = cur
         set_job_state(token, "product_research_status", json.dumps(status))
         return _json({"ok": True, "id": idea_id, **cur})
