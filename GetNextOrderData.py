@@ -421,7 +421,7 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
         "seasonal_1yr_source": windows["1yr"]["pb"]["source"],
         "seasonal_2yr_source": windows["2yr"]["pb"]["source"],
         "debug": {
-            "xDays": x_days, "pbDays": pb_days, "have": h, "alreadyCovered": h,
+            "xDays": x_days, "pbDays": pb_days, "pbMonths": len(pb_months), "have": h, "alreadyCovered": h,
             "recent": {"rate": round(rate_recent, 2), "units": units_recent, "inStockDays": stock_recent,
                        "totalDays": total_recent, "allDaysUsed": all_recent, "source": "actual",
                        "months": [f"{y:04d}-{m:02d}" for y, m in trailing_months]},
