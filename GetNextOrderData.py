@@ -395,10 +395,13 @@ def compute_region_recommendations(asin_sales, already_covered, next_shipment_da
         pa_months = months_spanning(_shift_years(today, years), _shift_years(next_shipment_date, years)) if x_days else []
         res = {}
         for name, months in (("pa", pa_months), ("pb", pb_window)):
-            if months and earliest is not None and earliest <= months[0]:
-                rate, units, stock, total, all_days = window_rate(asin_sales, months, stock_months, covered_months, today)
+            # a product launched inside the window (e.g. first sale Jul, window Apr-Sep) uses
+            # the months from its first sale on, not the recent rate (per the user 2026-11-20)
+            used = [m for m in months if earliest is not None and m >= earliest]
+            if used:
+                rate, units, stock, total, all_days = window_rate(asin_sales, used, stock_months, covered_months, today)
                 res[name] = {"rate": rate, "units": units, "inStock": stock, "total": total, "allDays": all_days,
-                             "months": months, "source": "actual"}
+                             "months": used, "source": "actual" if len(used) == len(months) else "actual_partial"}
             else:
                 res[name] = {"rate": rate_recent, "units": 0, "inStock": 0, "total": 0, "allDays": False,
                              "months": months, "source": "fallback_recent"}
